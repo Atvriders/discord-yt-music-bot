@@ -173,8 +173,10 @@ YouTube in 2026 actively degrades server/datacenter access. The design must
 treat this as first-class, not assume `yt-dlp` "just works":
 - **Datacenter IP blocking:** cloud/VPS IPs frequently hit "Sign in to confirm
   you're not a bot", HTTP 403/429, or SABR-only/"only images" responses
-  (~20–40% success vs ~85–95% residential). **Recommendation:** self-host on a
-  residential/home network, **or** supply a residential proxy / cookies.
+  (~20–40% success vs ~85–95% residential). **Chosen target: home/residential
+  network** (§15), so **direct access is the default path** and the proxy/
+  cookies/PO-token mitigations below are wired but **off by default**, used only
+  if the home IP is ever flagged.
 - **External JS runtime required for nsig/n-challenge:** yt-dlp needs Deno or
   Node to solve YouTube's signature challenge; the **standalone binary omits the
   EJS solver scripts**. We therefore install **`pip install yt-dlp[default]`**
@@ -474,14 +476,16 @@ Create the Discord application; enable **Message Content** + **Guild Voice
 States** intents; register the OAuth2 redirect URI; invite the bot with voice +
 message permissions.
 
-## 15. Key Risk & Open Decision (surface to user)
+## 15. Key Risk & Decision (resolved)
 
-The single biggest feasibility risk is **§5.1 YouTube datacenter-IP blocking**:
-a Docker/GHCR bot on a cloud VPS may resolve/download unreliably. Mitigation is
-designed in (cookies, optional residential proxy, PO-token sidecar, retry/
-backoff), and the **recommendation is to self-host on a residential network** or
-supply a proxy/cookies. The deployment target (cloud vs home) is worth an
-explicit decision before implementation.
+The single biggest feasibility risk is **§5.1 YouTube datacenter-IP blocking**.
+**Decision: host on a home/residential network**, which avoids the datacenter
+penalty and gives ~85–95% extraction success with **no proxy required**. The
+bot therefore defaults to **direct YouTube access**; cookies, residential proxy,
+and the PO-token sidecar remain implemented and config-toggled as fallbacks
+(`YT_PROXY`/`YT_COOKIES`/`PO_TOKEN_PROVIDER_URL`) for the case where even the
+home IP gets flagged. (Self-hosting also fits the personal/private-server
+framing of the §2 ToS caveat.)
 
 ## 16. Resolved Decisions
 
