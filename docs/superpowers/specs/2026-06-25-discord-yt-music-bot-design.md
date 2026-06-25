@@ -190,6 +190,18 @@ treat this as first-class, not assume `yt-dlp` "just works":
 - **Config knobs:** `YT_PROXY`, `YT_COOKIES` (mounted cookies file),
   `PO_TOKEN_PROVIDER_URL`, plus jittered exponential-backoff retry on
   403/429. Resolve/download failures degrade to a friendly message (§11).
+- **Ads are not downloaded:** yt-dlp pulls the content stream directly and never
+  loads YouTube's ad-serving player, so the cached audio is the song only — no
+  pre/mid-roll and **no ad-related delay** (the only latency is extraction, hidden
+  by prefetch). Client-side ad blockers / browser extensions are therefore
+  irrelevant to the bot (no browser, no ad domains contacted). **DNS-adblock
+  caveat (home hosting):** the bot shares the host's DNS, so any home blocklist
+  must **allow-list** `googlevideo.com`, `*.youtube.com`, and
+  `youtubei.googleapis.com` — blocking those breaks extraction entirely.
+- **SSAI (emerging risk):** YouTube is experimenting with server-side ad
+  insertion (ads stitched into the stream). Still mostly targeted/experimental
+  for music in 2026; largely mitigated by the `player_client` selection above
+  (which tends to return clean non-SSAI streams) and keeping yt-dlp fresh.
 
 ### 5.2 Audio path & "highest quality" (Opus passthrough)
 1. **Prefer passthrough:** select an Opus source with
@@ -208,6 +220,14 @@ treat this as first-class, not assume `yt-dlp` "just works":
 5. **Optional loudness normalization** (`NORMALIZE_LOUDNESS`): EBU R128
    (`ffmpeg loudnorm`, target ~ -14 LUFS). Note: enabling it forces the
    transcode path (loses passthrough). Default **off**.
+6. **Optional SponsorBlock removal** (`SPONSORBLOCK_REMOVE`, default **off**):
+   yt-dlp `--sponsorblock-remove` cuts crowd-sourced *in-video* segments
+   (`sponsor`, `intro`, `outro`, `selfpromo`, and `music_offtopic` — the
+   non-music talking intros/outros on music videos). These are creator content,
+   **not** YouTube ads. Like normalization, removing a segment requires an ffmpeg
+   re-encode, so **any track that has a removed segment loses Opus passthrough**;
+   tracks with no matching segment are unaffected. Configurable category list
+   (e.g. `sponsor,music_offtopic`).
 
 > The v1 spec's "transcode every track to Opus and let the encoder set the
 > channel bitrate" was self-contradictory: passthrough has no encoder to set
@@ -429,6 +449,7 @@ optional/has-default.
 | `MAX_TRACK_DURATION_SEC` | O | Reject over-long videos at resolve time |
 | `SEARCH_RATE_LIMIT` / control rate limits | O | Per-user/per-guild throttles |
 | `NORMALIZE_LOUDNESS` | O | EBU R128 pass (forces transcode path; default off) |
+| `SPONSORBLOCK_REMOVE` | O | yt-dlp SponsorBlock categories to cut, e.g. `sponsor,music_offtopic` (forces transcode for affected tracks; default off/empty) |
 | `YT_PROXY` | O | Residential/ISP proxy for yt-dlp |
 | `YT_COOKIES` | O | Path to a mounted cookies file |
 | `PO_TOKEN_PROVIDER_URL` | O | bgutil PO-token sidecar URL |
