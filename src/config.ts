@@ -1,6 +1,6 @@
-import type { MediaConfig, BotConfig } from "./types/config-types.js";
+import type { MediaConfig, BotConfig, WebConfig } from "./types/config-types.js";
 
-export type { MediaConfig, BotConfig } from "./types/config-types.js";
+export type { MediaConfig, BotConfig, WebConfig } from "./types/config-types.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -51,5 +51,36 @@ export function loadBotConfig(env: Env = process.env): BotConfig {
       .split(",")
       .map((s) => s.trim())
       .filter((s) => SNOWFLAKE.test(s)),
+  };
+}
+
+export function loadWebConfig(env: Env = process.env): WebConfig {
+  const clientId = strEnv(env, "DISCORD_CLIENT_ID");
+  const clientSecret = strEnv(env, "DISCORD_CLIENT_SECRET");
+  const publicBaseUrlRaw = strEnv(env, "PUBLIC_BASE_URL");
+  const sessionSecret = strEnv(env, "SESSION_SECRET");
+  if (!clientId) throw new Error("DISCORD_CLIENT_ID is required");
+  if (!clientSecret) throw new Error("DISCORD_CLIENT_SECRET is required");
+  if (!publicBaseUrlRaw) throw new Error("PUBLIC_BASE_URL is required");
+  if (!sessionSecret || sessionSecret.length < 32) {
+    throw new Error("SESSION_SECRET is required and must be at least 32 characters");
+  }
+  const publicBaseUrl = publicBaseUrlRaw.replace(/\/$/, "");
+  const nodeEnv = strEnv(env, "NODE_ENV") ?? "development";
+  return {
+    clientId,
+    clientSecret,
+    publicBaseUrl,
+    redirectUri: strEnv(env, "OAUTH_REDIRECT_URI") ?? `${publicBaseUrl}/auth/callback`,
+    sessionSecret,
+    port: intEnv(env, "PORT", 8080),
+    host: strEnv(env, "HOST") ?? "0.0.0.0",
+    trustProxy: (strEnv(env, "TRUST_PROXY") ?? "true") !== "false",
+    allowedWsOrigins: (strEnv(env, "ALLOWED_WS_ORIGINS") ?? publicBaseUrl)
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+    nodeEnv,
+    secureCookies: nodeEnv === "production",
   };
 }

@@ -20,3 +20,17 @@ export interface BotConfig {
   maxConcurrentDownloads: number;
   adminUserIds: string[];
 }
+
+export interface WebConfig {
+  clientId: string;
+  clientSecret: string;
+  publicBaseUrl: string;
+  redirectUri: string;
+  sessionSecret: string;
+  port: number;
+  host: string;
+  trustProxy: boolean;
+  allowedWsOrigins: string[];
+  nodeEnv: string;
+  secureCookies: boolean;
+}

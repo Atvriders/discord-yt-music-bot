@@ -82,6 +82,65 @@ Docker and compose support are planned for Plan 3. Until then, run with Node dir
 
 ---
 
+## Web Panel
+
+The bot exposes an HTTP API + WebSocket for a browser-based control panel. All bot env vars remain required; add the following for the web layer:
+
+| Variable                | Required | Default                           | Description                                                               |
+| ----------------------- | -------- | --------------------------------- | ------------------------------------------------------------------------- |
+| `DISCORD_CLIENT_ID`     | yes      | —                                 | OAuth2 application Client ID from the Developer Portal                    |
+| `DISCORD_CLIENT_SECRET` | yes      | —                                 | OAuth2 application Client Secret                                          |
+| `PUBLIC_BASE_URL`       | yes      | —                                 | Public HTTPS origin (e.g. `https://music.example.com`); no trailing slash |
+| `OAUTH_REDIRECT_URI`    | no       | `<PUBLIC_BASE_URL>/auth/callback` | Override the OAuth redirect URI if it differs from the default            |
+| `SESSION_SECRET`        | yes      | —                                 | Random string ≥ 32 characters used to sign session cookies                |
+| `PORT`                  | no       | `8080`                            | Port the HTTP server listens on                                           |
+| `HOST`                  | no       | `0.0.0.0`                         | Interface to bind                                                         |
+| `TRUST_PROXY`           | no       | `true`                            | Set to `false` only if not behind a reverse proxy                         |
+| `ALLOWED_WS_ORIGINS`    | no       | `<PUBLIC_BASE_URL>`               | Comma-separated list of allowed WebSocket upgrade origins                 |
+
+### OAuth2 Redirect URI
+
+In the [Discord Developer Portal](https://discord.com/developers/applications), open your application, go to **OAuth2 > Redirects**, and add the exact URI:
+
+```
+<PUBLIC_BASE_URL>/auth/callback
+```
+
+The URI must be an **exact match** (Discord rejects anything that differs by even a trailing slash).
+
+### Reverse Proxy
+
+Run the bot behind nginx, Caddy, or similar that terminates TLS and forwards to `PORT`. Example nginx snippet:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    # Required for WebSocket upgrades:
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+}
+```
+
+Keep `TRUST_PROXY=true` (the default) so the bot reads the real client IP from `X-Forwarded-For` for rate limiting.
+
+### Manual Verification Checklist (Web Panel)
+
+The items below require a real Discord application, a valid `SESSION_SECRET`, and a running reverse-proxy with TLS.
+
+- [ ] `/healthz` returns `{"ok":true}` with HTTP 200
+- [ ] `GET /auth/login` responds with 302 → `discord.com/oauth2/authorize` and sets a `sid` session cookie
+- [ ] After completing the Discord OAuth flow the browser is redirected to `/` and `GET /api/me` returns the logged-in user's `id`, `username`, and `avatarUrl`
+- [ ] `GET /api/guilds/:id/state` returns queue state for a guild you are in and `403` for one you are not in
+- [ ] `POST /api/guilds/:id/skip` (with a valid session) returns `{"ok":true}`
+- [ ] `POST /auth/logout` destroys the session; subsequent `GET /api/me` returns `401`
+- [ ] Opening a WebSocket to `/ws` (with an authenticated session cookie and a matching `Origin` header) and sending `{"subscribe":"<guildId>"}` triggers a `state` push; playing or skipping a track causes a live `state` push over the socket
+
+---
+
 ## Command Reference
 
 All commands use the configured prefix (default `?`).

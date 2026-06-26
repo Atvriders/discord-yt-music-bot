@@ -73,6 +73,9 @@ export class GuildController {
   async remove(itemId: string): Promise<boolean> {
     return this.queue.remove(itemId);
   }
+  async reorder(itemId: string, toIndex: number): Promise<boolean> {
+    return this.queue.reorder(itemId, toIndex);
+  }
   async stop(): Promise<void> {
     await this.queue.clear();
     this.session?.stop();
