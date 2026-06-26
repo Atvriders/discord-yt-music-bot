@@ -74,7 +74,7 @@ export function App() {
           </>
         )}
         <footer className="text-center font-mono text-xs pt-4" style={{ color: "var(--color-ink-faint)" }}>
-          plays the exact link, nothing else · yt music bot
+          the real audio from the exact video — never a mirror track · YouTube Music Bot
         </footer>
       </div>
     </div>
