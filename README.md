@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/bot-avatar.png" width="128" alt="discord-yt-music-bot"></p>
+
 # discord-yt-music-bot
 
 A Discord bot that plays YouTube audio in voice channels. Supports direct URL playback, search-and-pick via button menus, per-guild queues with prefetch, and configurable admin controls.
