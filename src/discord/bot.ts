@@ -13,6 +13,7 @@ import { selectVoiceChannel } from "../orchestrator/voice-selection.js";
 import type { GuildHub } from "../orchestrator/hub.js";
 import type { YouTubeService } from "../youtube/index.js";
 import type { Requester } from "../types/index.js";
+import type { Logger } from "pino";
 
 export const REQUIRED_INTENTS = [
   GatewayIntentBits.Guilds,
@@ -27,6 +28,7 @@ export interface BotDeps {
   prefix: string;
   searchLimit: number;
   adminUserIds: ReadonlySet<string>;
+  log: Pick<Logger, "info" | "error">;
 }
 
 function requesterOf(message: Message, source: "discord" | "web" = "discord"): Requester {
@@ -65,7 +67,7 @@ export function createBot(deps: BotDeps): Client {
         await message.reply(result.content);
       }
     } catch (err) {
-      console.error("[bot] command failed:", err);
+      deps.log.error({ err }, "[bot] command failed");
       await message.reply("❌ Something went wrong handling that command.").catch(() => {});
     }
   });

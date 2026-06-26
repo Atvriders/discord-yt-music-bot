@@ -19,6 +19,7 @@ export interface BotConfig {
   prefetchDepth: number;
   maxConcurrentDownloads: number;
   adminUserIds: string[];
+  logLevel: string;
 }
 
 export interface WebConfig {

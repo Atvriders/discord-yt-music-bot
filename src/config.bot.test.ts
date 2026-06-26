@@ -20,4 +20,10 @@ describe("loadBotConfig", () => {
     });
     expect(c.adminUserIds).toEqual(["123456789012345678", "234567890123456789"]);
   });
+  it("defaults logLevel to info and accepts override", () => {
+    const c1 = loadBotConfig({ DISCORD_TOKEN: "t" });
+    expect(c1.logLevel).toBe("info");
+    const c2 = loadBotConfig({ DISCORD_TOKEN: "t", LOG_LEVEL: "warn" });
+    expect(c2.logLevel).toBe("warn");
+  });
 });

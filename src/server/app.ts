@@ -15,6 +15,7 @@ import type { WebConfig } from "../config.js";
 export interface AppDeps extends RestDeps {
   cfg: WebConfig;
   broadcaster?: GuildBroadcaster;
+  gatewayReady?: () => boolean;
 }
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
@@ -43,7 +44,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   });
   await app.register(websocket);
 
-  app.get("/healthz", async () => ({ ok: true }));
+  app.get("/healthz", async () => ({
+    ok: true,
+    gateway: deps.gatewayReady?.() ?? null,
+    uptimeSec: Math.floor(process.uptime()),
+  }));
   registerAuthRoutes(app, deps.cfg);
   registerRest(app, deps);
   registerWebsocket(app, {

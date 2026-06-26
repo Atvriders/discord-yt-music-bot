@@ -29,7 +29,10 @@ describe("buildApp", () => {
   it("serves /healthz", async () => {
     const app = await buildApp(deps());
     const res = await app.inject({ method: "GET", url: "/healthz" });
-    expect(res.json()).toEqual({ ok: true });
+    const body = res.json() as { ok: boolean; gateway: boolean | null; uptimeSec: number };
+    expect(body.ok).toBe(true);
+    expect(body.gateway).toBeNull();
+    expect(typeof body.uptimeSec).toBe("number");
     await app.close();
   });
   it("/auth/login redirects to Discord with a state cookie set", async () => {

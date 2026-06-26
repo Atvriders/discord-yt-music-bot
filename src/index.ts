@@ -9,50 +9,73 @@ import { createVoiceSession, createPassthroughResource } from "./voice/connect.j
 import type { Client } from "discord.js";
 import { buildApp } from "./server/app.js";
 import { GuildBroadcaster } from "./server/ws.js";
+import { createLogger } from "./util/logger.js";
+import { installCrashHandlers, installSignalHandlers } from "./lifecycle.js";
+import { startupCanary } from "./canary.js";
+import {
+  collectSnapshot,
+  writeSnapshot,
+  readSnapshot,
+  restoreSnapshot,
+} from "./orchestrator/snapshot.js";
 
 async function main(): Promise<void> {
   const media = loadMediaConfig();
   const bot = loadBotConfig();
+  const log = createLogger(bot.logLevel);
+  installCrashHandlers(log);
 
   const youtube = new YouTubeService(media);
   const cache = new AudioCache(media.cacheDir, media.cacheMaxBytes);
   await cache.init();
   const downloads = new Semaphore(bot.maxConcurrentDownloads);
 
-  process.on("unhandledRejection", (reason) => console.error("[unhandledRejection]", reason));
+  // Debounced snapshot writer — defined before hub so the factory closure captures it.
+  let snapshotTimer: ReturnType<typeof setTimeout> | null = null;
+  const scheduleSnapshot = (): void => {
+    if (snapshotTimer) clearTimeout(snapshotTimer);
+    snapshotTimer = setTimeout(() => {
+      snapshotTimer = null;
+      void writeSnapshot(media.cacheDir, collectSnapshot(hub, Date.now()));
+    }, 3000);
+  };
 
   // The hub creates one controller per guild; the controller's voice factory needs the
   // guild's channel object, which the bot resolves at connect time. We bridge via a
   // per-guild "connect" closure captured from discord.js when ensureConnected is called.
-  const hub = new GuildHub(
-    (guildId) =>
-      new GuildController(guildId, {
-        youtube,
-        cache,
-        cacheDir: media.cacheDir,
-        // invoked lazily after client.login(); the closure over `client` is safe
-        createSession: async (channelId) => {
-          const guild = await client.guilds.fetch(guildId);
-          const channel = await guild.channels.fetch(channelId);
-          if (!channel?.isVoiceBased()) throw new Error("target channel is not a voice channel");
-          return createVoiceSession(channel, bot.idleTimeoutMs);
-        },
-        makeResource: (filePath, item) => createPassthroughResource(filePath, item),
-        prefetchDepth: bot.prefetchDepth,
-        downloads,
-      }),
-  );
+  const hub = new GuildHub((guildId) => {
+    const controller = new GuildController(guildId, {
+      youtube,
+      cache,
+      cacheDir: media.cacheDir,
+      // invoked lazily after client.login(); the closure over `client` is safe
+      createSession: async (channelId) => {
+        const guild = await client.guilds.fetch(guildId);
+        const channel = await guild.channels.fetch(channelId);
+        if (!channel?.isVoiceBased()) throw new Error("target channel is not a voice channel");
+        return createVoiceSession(channel, bot.idleTimeoutMs);
+      },
+      makeResource: (filePath, item) => createPassthroughResource(filePath, item),
+      prefetchDepth: bot.prefetchDepth,
+      downloads,
+    });
+    // Wire debounced snapshot on queue changes.
+    controller.queue.on("changed", scheduleSnapshot);
+    return controller;
+  });
+
   const client: Client = createBot({
     hub,
     youtube,
     prefix: bot.commandPrefix,
     searchLimit: media.searchResultCount,
     adminUserIds: new Set(bot.adminUserIds),
+    log,
   });
 
-  client.on("error", (err) => console.error("[client error]", err));
+  client.on("error", (err) => log.error({ err }, "[client error]"));
   await client.login(bot.discordToken);
-  console.log("discord-yt-music-bot is online");
+  log.info("discord-yt-music-bot is online");
 
   const web = loadWebConfig();
   const broadcaster = new GuildBroadcaster();
@@ -64,9 +87,41 @@ async function main(): Promise<void> {
     adminIds: new Set(bot.adminUserIds),
     searchLimit: media.searchResultCount,
     broadcaster,
+    gatewayReady: () => client.isReady(),
   });
   await app.listen({ port: web.port, host: web.host });
-  console.log(`web panel listening on ${web.host}:${web.port}`);
+  log.info({ host: web.host, port: web.port }, "web panel listening");
+
+  // Startup canary — log only, never abort.
+  await startupCanary(youtube, log);
+
+  // Restore active sessions from the last snapshot (after client is ready).
+  if (!client.isReady()) {
+    await new Promise<void>((res) => client.once("ready", () => res()));
+  }
+  const snap = await readSnapshot(media.cacheDir);
+  if (snap) await restoreSnapshot(snap, hub, log);
+
+  // Graceful shutdown: flush snapshot, leave voice sessions, close HTTP server.
+  installSignalHandlers(
+    [
+      async () => {
+        if (snapshotTimer) {
+          clearTimeout(snapshotTimer);
+          snapshotTimer = null;
+        }
+        await writeSnapshot(media.cacheDir, collectSnapshot(hub, Date.now()));
+      },
+      async () => {
+        for (const c of hub.controllers()) await c.stop();
+      },
+      async () => {
+        await app.close();
+      },
+    ],
+    { graceMs: 8000 },
+    log,
+  );
 }
 
 void main();

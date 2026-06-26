@@ -51,6 +51,7 @@ export function loadBotConfig(env: Env = process.env): BotConfig {
       .split(",")
       .map((s) => s.trim())
       .filter((s) => SNOWFLAKE.test(s)),
+    logLevel: strEnv(env, "LOG_LEVEL") ?? "info",
   };
 }
 

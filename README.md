@@ -76,9 +76,45 @@ npm run build
 DISCORD_TOKEN=your-token-here node dist/index.js
 ```
 
-### Docker (Plan 3 / deploy)
+### Docker & Deploy
 
-Docker and compose support are planned for Plan 3. Until then, run with Node directly.
+Pull the latest GHCR image and run with Docker Compose:
+
+```bash
+docker compose up -d
+```
+
+The compose file pulls `ghcr.io/atvriders/discord-yt-music-bot:latest`, reads all env vars from `.env`, and exposes port `8080` (configurable via `PORT`).
+
+#### First-Time Setup
+
+1. **GHCR package visibility**: After the first build completes on GitHub, visit the [package page](https://github.com/Atvriders/discord-yt-music-bot/pkgs/container/discord-yt-music-bot) and set the package to **Public**. Subsequent pulls will not require authentication.
+2. **Fork first build**: If you forked this repo, the first GitHub Actions build requires a manual trigger. Go to **Actions > build > Run workflow > Run workflow**.
+
+#### Weekly Updates
+
+The CI runs on a weekly schedule (Monday 6 AM UTC) to keep `yt-dlp` and embedded EJS templates fresh. You can also manually trigger a rebuild via **Actions > build > Run workflow**.
+
+#### PO Token Sidecar
+
+To enable the optional `bgutil-ytdlp-pot-provider` sidecar (for YouTube age-gated content), run:
+
+```bash
+docker compose --profile pot up -d
+```
+
+Then set `PO_TOKEN_PROVIDER_URL=http://bgutil-pot:4416` in `.env`.
+
+#### Configuration
+
+All env vars are documented in the **Configuration** section above. For the web panel, set:
+
+- `OAUTH_REDIRECT_URI` to your public URL + `/auth/callback` (must match Discord's OAuth2 redirect URI exactly)
+- `PUBLIC_BASE_URL` to your public HTTPS origin (e.g. `https://music.example.com`)
+
+#### Volumes
+
+The named `cache` volume (`/data/cache`) stores downloaded audio files and the active session snapshot. It persists across container restarts and is automatically backed up on shutdown.
 
 ---
 

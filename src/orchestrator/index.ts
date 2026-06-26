@@ -40,8 +40,18 @@ export class GuildController {
     });
   }
 
+  get connectedChannelId(): string | null {
+    return this.session?.channelId ?? null;
+  }
+
   snapshot() {
     return this.queue.snapshot();
+  }
+
+  async restore(channelId: string, items: QueueItem[]): Promise<void> {
+    await this.ensureConnected(channelId);
+    for (const it of items) await this.queue.add(it.meta, it.requester);
+    // maybeStart fires via the queue "changed" listener.
   }
 
   async ensureConnected(channelId: string): Promise<void> {
