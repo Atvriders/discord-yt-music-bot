@@ -11,3 +11,12 @@ export interface MediaConfig {
   playerClients: string;
   ytdlpTimeoutMs: number;
 }
+
+export interface BotConfig {
+  discordToken: string;
+  commandPrefix: string;
+  idleTimeoutMs: number;
+  prefetchDepth: number;
+  maxConcurrentDownloads: number;
+  adminUserIds: string[];
+}

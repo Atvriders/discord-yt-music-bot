@@ -1,6 +1,6 @@
-import type { MediaConfig } from "./types/config-types.js";
+import type { MediaConfig, BotConfig } from "./types/config-types.js";
 
-export type { MediaConfig } from "./types/config-types.js";
+export type { MediaConfig, BotConfig } from "./types/config-types.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -33,5 +33,23 @@ export function loadMediaConfig(env: Env = process.env): MediaConfig {
     sponsorblockRemove: strEnv(env, "SPONSORBLOCK_REMOVE"),
     playerClients: strEnv(env, "YT_PLAYER_CLIENTS") ?? "android_vr,web_embedded,tv",
     ytdlpTimeoutMs: intEnv(env, "YTDLP_TIMEOUT_MS", 60_000),
+  };
+}
+
+const SNOWFLAKE = /^\d{17,20}$/;
+
+export function loadBotConfig(env: Env = process.env): BotConfig {
+  const token = strEnv(env, "DISCORD_TOKEN");
+  if (token === null) throw new Error("DISCORD_TOKEN is required");
+  return {
+    discordToken: token,
+    commandPrefix: strEnv(env, "COMMAND_PREFIX") ?? "?",
+    idleTimeoutMs: intEnv(env, "IDLE_TIMEOUT_SEC", 300) * 1000,
+    prefetchDepth: intEnv(env, "PREFETCH_DEPTH", 1),
+    maxConcurrentDownloads: intEnv(env, "MAX_TRANSCODE_JOBS", 2),
+    adminUserIds: (strEnv(env, "ADMIN_USER_IDS") ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => SNOWFLAKE.test(s)),
   };
 }
