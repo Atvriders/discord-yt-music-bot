@@ -166,4 +166,23 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
       return { ok };
     },
   );
+
+  app.get<{ Params: { id: string } }>("/api/guilds/:id/voice-channels", async (req, reply) => {
+    if (!(await requireControl(req, reply, req.params.id))) return;
+    const guild = deps.client.guilds.cache.get(req.params.id) as
+      | {
+          channels?: {
+            cache: Map<
+              string,
+              { id: string; name: string; type: number; isVoiceBased?: () => boolean }
+            >;
+          };
+        }
+      | undefined;
+    const channels: { id: string; name: string }[] = [];
+    for (const ch of guild?.channels?.cache?.values() ?? []) {
+      if (ch.isVoiceBased?.() ?? false) channels.push({ id: ch.id, name: ch.name });
+    }
+    return { channels };
+  });
 }

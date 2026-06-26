@@ -141,6 +141,55 @@ The items below require a real Discord application, a valid `SESSION_SECRET`, an
 
 ---
 
+## Web Control Panel
+
+The web control panel provides a browser-based interface for queuing tracks, viewing now-playing, managing the queue, and controlling playback across multiple Discord servers.
+
+### Local Development
+
+Start the Vite dev server with:
+
+```bash
+npm run dev:web
+```
+
+This launches the panel on `http://localhost:5173` with a development proxy that forwards `/api`, `/auth`, and `/ws` requests to the bot running on `:8080`. Run the bot in another terminal with `npm run dev`.
+
+### Production
+
+The production build compiles the web panel into `dist/public`, which the bot serves directly at `PUBLIC_BASE_URL` from the same Fastify process:
+
+```bash
+npm run build
+```
+
+This runs `build:web` (Vite → `dist/public`) and `tsc` (TypeScript → `dist`). The panel requires the Plan 3 OAuth setup: `PUBLIC_BASE_URL`, `OAUTH_REDIRECT_URI=<base>/auth/callback`, `SESSION_SECRET`, and the Discord OAuth2 credentials (`DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`).
+
+### Design
+
+The panel uses an "After-Hours" analog-radio aesthetic with custom design tokens, a warm color palette, and staggered reveals for visual hierarchy.
+
+### Manual Verification Checklist
+
+The browser-based flow cannot be covered by unit tests. Verify the following with a real Discord application and a running bot:
+
+- [ ] Open the panel, click **Login with Discord**, complete the OAuth flow, and land on the server selector
+- [ ] The server selector lists only the Discord servers you belong to
+- [ ] With the bot playing in one of your servers, the **Now Playing** card updates in real-time as you (or someone in Discord) play, skip, or pause a track
+- [ ] The **Progress** slider shows the current playback position and updates live
+- [ ] Paste a YouTube URL into the **Add** input and press Enter — the track queues instantly
+- [ ] Type a search query (e.g. "lofi hip hop") and press Enter — a picker modal appears; click a result to queue it
+- [ ] The **Queue** list shows all pending tracks and their requesters; clicking **✕** removes a track
+- [ ] Open the panel for a server you cannot control; the panel displays **✕ No access** and disables all controls
+
+### Known Limitation
+
+The web panel enqueues new tracks to the bot's current voice session by default (the most common case). Starting playback in a fresh channel from the panel (rather than via Discord `?play` in a voice channel) requires wiring the voice-channel picker into the **Add** bar — a small follow-up task.
+
+The `reorder` API and the `GET /api/guilds/:id/voice-channels` endpoint exist on the backend/client but are intentionally not wired into the UI yet (queue reorder + cold-start channel picker are a planned follow-up).
+
+---
+
 ## Command Reference
 
 All commands use the configured prefix (default `?`).

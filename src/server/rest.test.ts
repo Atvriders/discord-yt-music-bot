@@ -25,7 +25,16 @@ function build(sessionUserId: string | null, depOverrides: Record<string, unknow
     reorder: vi.fn(async () => true),
     snapshot: vi.fn(() => ({ current: null, upcoming: [], history: [] })),
   };
-  const guild = { name: "Test Guild", members: { fetch: vi.fn(async (id: string) => ({ id })) } };
+  const guild = {
+    name: "Test Guild",
+    members: { fetch: vi.fn(async (id: string) => ({ id })) },
+    channels: {
+      cache: new Map([
+        ["VC1", { id: "VC1", name: "General Voice", type: 2, isVoiceBased: () => true }],
+        ["TC1", { id: "TC1", name: "general", type: 0, isVoiceBased: () => false }],
+      ]),
+    },
+  };
   const deps = {
     hub: { get: vi.fn(() => controller) },
     youtube: {
@@ -140,5 +149,30 @@ describe("REST actions", () => {
       payload: { itemId: "i9", toIndex: 0 },
     });
     expect(h.controller.reorder).toHaveBeenCalledWith("i9", 0);
+  });
+  it("GET /api/guilds/:id/voice-channels returns only voice channels for a member", async () => {
+    const res = await h.app.inject({ method: "GET", url: `/api/guilds/${GUILD}/voice-channels` });
+    expect(res.statusCode).toBe(200);
+    const { channels } = res.json() as { channels: { id: string; name: string }[] };
+    expect(channels).toHaveLength(1);
+    expect(channels[0]).toMatchObject({ id: "VC1", name: "General Voice" });
+  });
+  it("GET /api/guilds/:id/voice-channels returns 403 for a non-member", async () => {
+    const guild = {
+      name: "Test Guild",
+      members: {
+        fetch: vi.fn(async () => {
+          throw new Error("Unknown Member");
+        }),
+      },
+      channels: {
+        cache: new Map([
+          ["VC1", { id: "VC1", name: "General Voice", type: 2, isVoiceBased: () => true }],
+        ]),
+      },
+    };
+    const { app } = build(USER, { client: { guilds: { cache: new Map([[GUILD, guild]]) } } });
+    const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/voice-channels` });
+    expect(res.statusCode).toBe(403);
   });
 });
