@@ -10,7 +10,15 @@ import type { Requester, TrackMeta } from "../types/index.js";
 export interface HandlerContext {
   controller: Pick<
     GuildController,
-    "ensureConnected" | "enqueue" | "skip" | "pause" | "resume" | "stop" | "remove" | "snapshot"
+    | "ensureConnected"
+    | "moveTo"
+    | "enqueue"
+    | "skip"
+    | "pause"
+    | "resume"
+    | "stop"
+    | "remove"
+    | "snapshot"
   >;
   youtube: {
     resolve(videoId: string): Promise<TrackMeta>;
@@ -95,7 +103,8 @@ async function handlePlay(input: string, ctx: HandlerContext): Promise<HandlerRe
     isAdmin: ctx.isAdmin,
   });
   if (!target.ok) return msg(`❌ ${target.reason}`);
-  await ctx.controller.ensureConnected(target.channelId);
+  if (target.move) await ctx.controller.moveTo(target.channelId);
+  else await ctx.controller.ensureConnected(target.channelId);
   await ctx.controller.enqueue(meta, ctx.requester);
   return msg(`➕ Queued **${meta.title}**.`);
 }

@@ -94,7 +94,8 @@ export function createBot(deps: BotDeps): Client {
     try {
       const meta = await deps.youtube.resolve(videoId);
       const controller = deps.hub.get(interaction.guildId);
-      await controller.ensureConnected(target.channelId);
+      if (target.move) await controller.moveTo(target.channelId);
+      else await controller.ensureConnected(target.channelId);
       await controller.enqueue(meta, {
         discordUserId: interaction.user.id,
         displayName: interaction.user.username,

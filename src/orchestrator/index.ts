@@ -54,14 +54,38 @@ export class GuildController {
     // maybeStart fires via the queue "changed" listener.
   }
 
+  // Inline session create + listener wiring (shared by ensureConnected and moveTo; NOT locked itself).
+  private async connectSessionLocked(channelId: string): Promise<void> {
+    const session = await this.deps.createSession(channelId);
+    session.on("trackEnd", () => {
+      if (this.session === session) void this.playNext();
+    });
+    session.on("error", () => {
+      if (this.session === session) void this.playNext();
+    });
+    session.on("idle", () => {
+      if (this.session === session) void this.leave();
+    });
+    this.session = session;
+  }
+
   async ensureConnected(channelId: string): Promise<void> {
     return this.lock.runExclusive(async () => {
       if (this.session) return;
-      const session = await this.deps.createSession(channelId);
-      session.on("trackEnd", () => void this.playNext());
-      session.on("error", () => void this.playNext()); // skip the broken track
-      session.on("idle", () => void this.leave());
-      this.session = session;
+      await this.connectSessionLocked(channelId);
+    });
+  }
+
+  /** Admin move: relocate to a new channel, resuming the current track from 0 (or starting the queue). */
+  async moveTo(channelId: string): Promise<void> {
+    return this.lock.runExclusive(async () => {
+      if (this.session && this.session.channelId === channelId) return; // already there
+      const current = this.queue.current;
+      this.session?.destroy();
+      this.session = null;
+      await this.connectSessionLocked(channelId);
+      if (current) await this.playItemLocked(current);
+      else await this.playNextLocked();
     });
   }
 
@@ -105,21 +129,28 @@ export class GuildController {
     return this.lock.runExclusive(() => this.playNextLocked());
   }
 
+  // Plays a specific item in the current session WITHOUT advancing the queue. Returns false on failure.
+  private async playItemLocked(item: QueueItem): Promise<boolean> {
+    const session = this.session;
+    if (!session) return false;
+    try {
+      const path = await this.ensureDownloaded(item.meta.videoId);
+      this.deps.cache.pin(item.meta.videoId);
+      this.pinned.add(item.meta.videoId);
+      session.play(await this.deps.makeResource(path, item));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private async playNextLocked(): Promise<void> {
     const session = this.session;
     if (!session) return;
     let item = await this.queue.advance();
     while (item) {
-      try {
-        const path = await this.ensureDownloaded(item.meta.videoId);
-        this.deps.cache.pin(item.meta.videoId);
-        this.pinned.add(item.meta.videoId);
-        session.play(await this.deps.makeResource(path, item));
-        return;
-      } catch {
-        // download/playback failed for this track — skip it and try the next
-        item = await this.queue.advance();
-      }
+      if (await this.playItemLocked(item)) return;
+      item = await this.queue.advance();
     }
     session.startIdleTimer();
   }

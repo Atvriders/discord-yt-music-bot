@@ -217,12 +217,9 @@ The browser-based flow cannot be covered by unit tests. Verify the following wit
 - [ ] Type a search query (e.g. "lofi hip hop") and press Enter — a picker modal appears; click a result to queue it
 - [ ] The **Queue** list shows all pending tracks and their requesters; clicking **✕** removes a track
 - [ ] Open the panel for a server you cannot control; the panel displays **✕ No access** and disables all controls
-
-### Known Limitation
-
-The web panel enqueues new tracks to the bot's current voice session by default (the most common case). Starting playback in a fresh channel from the panel (rather than via Discord `?play` in a voice channel) requires wiring the voice-channel picker into the **Add** bar — a small follow-up task.
-
-The `reorder` API and the `GET /api/guilds/:id/voice-channels` endpoint exist on the backend/client but are intentionally not wired into the UI yet (queue reorder + cold-start channel picker are a planned follow-up).
+- [ ] An admin can move the bot to their channel mid-session via `?play` in another channel or by selecting a voice channel from the panel; the current track resumes in the new channel
+- [ ] The panel's voice-channel picker lets you start playback in a chosen channel when the bot isn't connected; the bot joins that channel and begins playing
+- [ ] The queue **▲/▼** buttons reorder tracks and the change shows live in the **Queue** list
 
 ---
 

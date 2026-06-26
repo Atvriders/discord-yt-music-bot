@@ -141,3 +141,94 @@ describe("GuildController", () => {
     expect(ctrl.snapshot().current?.meta.videoId).toBe("bbbbbbbbbbb");
   });
 });
+
+describe("GuildController.moveTo", () => {
+  it("destroys old session, creates new for new channel, plays current without advancing", async () => {
+    // Set up two separate FakeSessions so we can tell them apart.
+    const sessionC1 = new FakeSession();
+    sessionC1.channelId = "C1";
+    const sessionC2 = new FakeSession();
+    sessionC2.channelId = "C2";
+    const sessions = [sessionC1, sessionC2];
+    let sessionIdx = 0;
+
+    const cacheStore = new Map<string, string>();
+    const deps = {
+      youtube: { download: vi.fn(async (id: string) => `/cache/${id}.webm`) },
+      cache: {
+        get: (id: string) => cacheStore.get(id) ?? null,
+        has: (id: string) => cacheStore.has(id),
+        register: (id: string, p: string) => cacheStore.set(id, p),
+        pin: vi.fn(),
+        unpin: vi.fn(),
+      },
+      cacheDir: "/cache",
+      createSession: vi.fn(async () => sessions[sessionIdx++] as never),
+      makeResource: (p: string) => ({ res: p }),
+      prefetchDepth: 1,
+      downloads: new Semaphore(2),
+    };
+    const ctrl = new GuildController("G1", deps as never);
+
+    // Connect to C1 and enqueue a track so there is a current item.
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0)); // allow playNextLocked to run
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+    expect(sessionC1.play).toHaveBeenCalledTimes(1);
+
+    // Move to C2 — should NOT advance the queue (still "aaaaaaaaaaa" as current).
+    await ctrl.moveTo("C2");
+
+    // Old session destroyed.
+    expect(sessionC1.destroy).toHaveBeenCalled();
+    // New session created for C2.
+    expect(deps.createSession).toHaveBeenCalledTimes(2);
+    expect(deps.createSession).toHaveBeenLastCalledWith("C2");
+    // Current track replayed on new session (playItemLocked, not advance).
+    expect(sessionC2.play).toHaveBeenCalledTimes(1);
+    // Queue current is still the same track (no double-advance).
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+  });
+
+  it("moveTo with no current: connects new session and starts queued track via advance", async () => {
+    // Two sessions: first for C2 (no C1 connect — we call moveTo without ensureConnected first).
+    const sessionC2 = new FakeSession();
+    sessionC2.channelId = "C2";
+
+    const cacheStore = new Map<string, string>();
+    const deps = {
+      youtube: { download: vi.fn(async (id: string) => `/cache/${id}.webm`) },
+      cache: {
+        get: (id: string) => cacheStore.get(id) ?? null,
+        has: (id: string) => cacheStore.has(id),
+        register: (id: string, p: string) => cacheStore.set(id, p),
+        pin: vi.fn(),
+        unpin: vi.fn(),
+      },
+      cacheDir: "/cache",
+      createSession: vi.fn(async () => sessionC2 as never),
+      makeResource: (p: string) => ({ res: p }),
+      prefetchDepth: 1,
+      downloads: new Semaphore(2),
+    };
+    const ctrl = new GuildController("G1", deps as never);
+
+    // Enqueue ONE track WITHOUT connecting first — current is null, nothing plays.
+    await ctrl.queue.add(meta("aaaaaaaaaaa"), requester);
+    expect(ctrl.snapshot().current).toBeNull();
+    expect(ctrl.snapshot().upcoming).toHaveLength(1);
+
+    // moveTo should connect C2 and advance+play the queued track.
+    await ctrl.moveTo("C2");
+    await new Promise((r) => setTimeout(r, 0)); // settle any microtasks
+
+    // New session created for C2.
+    expect(deps.createSession).toHaveBeenCalledTimes(1);
+    expect(deps.createSession).toHaveBeenCalledWith("C2");
+    // Queue advanced: the upcoming track is now current.
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+    // play was called exactly once (via playNextLocked -> playItemLocked).
+    expect(sessionC2.play).toHaveBeenCalledTimes(1);
+  });
+});

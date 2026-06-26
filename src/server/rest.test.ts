@@ -16,6 +16,8 @@ const meta = (id: string, title = id) => ({
 function build(sessionUserId: string | null, depOverrides: Record<string, unknown> = {}) {
   const controller = {
     ensureConnected: vi.fn(async () => {}),
+    moveTo: vi.fn(async () => {}),
+    connectedChannelId: null as string | null,
     enqueue: vi.fn(async () => ({ id: "i1" })),
     skip: vi.fn(),
     pause: vi.fn(),
@@ -118,6 +120,20 @@ describe("REST actions", () => {
     });
     expect(res.statusCode).toBe(400);
     expect(h.deps.youtube.resolve).not.toHaveBeenCalled();
+  });
+
+  it("admin posting play with a different voiceChannelId while connected triggers moveTo", async () => {
+    // Rebuild with an admin user and a controller that reports it's already connected to C1.
+    const { app, controller } = build(USER, { adminIds: new Set([USER]) });
+    controller.connectedChannelId = "C1";
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/play`,
+      payload: { input: "https://youtu.be/aaaaaaaaaaa", voiceChannelId: "C2" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(controller.moveTo).toHaveBeenCalledWith("C2");
+    expect(controller.ensureConnected).not.toHaveBeenCalled();
   });
   it("pick rejects a malformed videoId with 400 and no resolve", async () => {
     const res = await h.app.inject({

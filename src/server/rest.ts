@@ -7,6 +7,8 @@ import type { Requester, TrackMeta } from "../types/index.js";
 
 interface Controller {
   ensureConnected(channelId: string): Promise<void>;
+  moveTo(channelId: string): Promise<void>;
+  connectedChannelId: string | null;
   enqueue(meta: TrackMeta, requester: Requester): Promise<{ id: string }>;
   skip(): void;
   pause(): void;
@@ -31,6 +33,11 @@ function sessionUser(req: FastifyRequest): (DiscordUser & { id: string }) | null
   const s = (req as { session?: { userId?: string; user?: DiscordUser } }).session;
   if (!s?.userId) return null;
   return (s.user ?? { id: s.userId, username: s.userId, avatar: null }) as DiscordUser;
+}
+
+function isAdmin(req: FastifyRequest, deps: RestDeps): boolean {
+  const user = sessionUser(req);
+  return user !== null && deps.adminIds.has(user.id);
 }
 
 export function registerRest(app: FastifyInstance, deps: RestDeps): void {
@@ -121,7 +128,14 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
       return reply.code(400).send({ error: err instanceof YtError ? err.kind : "resolve_failed" });
     }
     const controller = deps.hub.get(params.id);
-    if (body.voiceChannelId) await controller.ensureConnected(body.voiceChannelId);
+    if (body.voiceChannelId) {
+      const connected = controller.connectedChannelId;
+      if (connected && connected !== body.voiceChannelId && isAdmin(req, deps)) {
+        await controller.moveTo(body.voiceChannelId);
+      } else {
+        await controller.ensureConnected(body.voiceChannelId);
+      }
+    }
     const requester: Requester = {
       discordUserId: user.id,
       displayName: user.global_name ?? user.username,

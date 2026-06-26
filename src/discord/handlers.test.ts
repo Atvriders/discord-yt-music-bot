@@ -21,6 +21,7 @@ const meta = (id: string, title = id): TrackMeta => ({
 function ctx(overrides: Partial<Parameters<typeof handleCommand>[1]> = {}) {
   const controller = {
     ensureConnected: vi.fn(async () => {}),
+    moveTo: vi.fn(async () => {}),
     enqueue: vi.fn(async () => ({ id: "i1" })),
     skip: vi.fn(),
     pause: vi.fn(),
@@ -82,6 +83,19 @@ describe("handleCommand — play", () => {
     );
     expect(c.controller.enqueue).not.toHaveBeenCalled();
     expect(res.type).toBe("message");
+  });
+
+  it("admin in a different channel calls moveTo, not ensureConnected", async () => {
+    const c = ctx({ requesterChannelId: "A", botChannelId: "B", isAdmin: true });
+    c.youtube.resolve.mockResolvedValue(meta("aaaaaaaaaaa", "Song"));
+    const res = await handleCommand(
+      { kind: "play", input: "https://youtu.be/aaaaaaaaaaa" },
+      c as never,
+    );
+    expect(c.controller.moveTo).toHaveBeenCalledWith("A");
+    expect(c.controller.ensureConnected).not.toHaveBeenCalled();
+    expect(c.controller.enqueue).toHaveBeenCalled();
+    expect(res).toEqual({ type: "message", content: expect.stringContaining("Song") });
   });
 
   it("returns a picker for a search query", async () => {

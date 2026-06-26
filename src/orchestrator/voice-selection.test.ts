@@ -9,20 +9,20 @@ describe("selectVoiceChannel", () => {
   it("joins the requester's channel when the bot is not connected", () => {
     expect(
       selectVoiceChannel({ requesterChannelId: "A", botChannelId: null, isAdmin: false }),
-    ).toEqual({ ok: true, channelId: "A" });
+    ).toEqual({ ok: true, channelId: "A", move: false });
   });
   it("is a no-op when the bot is already in the requester's channel", () => {
     expect(
       selectVoiceChannel({ requesterChannelId: "A", botChannelId: "A", isAdmin: false }),
-    ).toEqual({ ok: true, channelId: "A" });
+    ).toEqual({ ok: true, channelId: "A", move: false });
   });
   it("rejects a non-admin when the bot is busy in another channel", () => {
     const r = selectVoiceChannel({ requesterChannelId: "A", botChannelId: "B", isAdmin: false });
     expect(r.ok).toBe(false);
   });
-  it("lets an admin queue from another channel", () => {
+  it("admin in a different channel returns move:true", () => {
     expect(
       selectVoiceChannel({ requesterChannelId: "A", botChannelId: "B", isAdmin: true }),
-    ).toEqual({ ok: true, channelId: "A" });
+    ).toEqual({ ok: true, channelId: "A", move: true });
   });
 });

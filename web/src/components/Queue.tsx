@@ -1,7 +1,9 @@
 import type { QueueItem } from "../types.js";
 import { fmtTime } from "../lib/format.js";
 
-export function Queue({ items, onRemove }: { items: QueueItem[]; onRemove: (itemId: string) => void }) {
+export function Queue({ items, onRemove, onReorder }: {
+  items: QueueItem[]; onRemove: (itemId: string) => void; onReorder: (itemId: string, toIndex: number) => void;
+}) {
   return (
     <section className="card reveal p-5 sm:p-6" style={{ animationDelay: "180ms" }}>
       <div className="flex items-baseline justify-between">
@@ -25,10 +27,16 @@ export function Queue({ items, onRemove }: { items: QueueItem[]; onRemove: (item
                   {it.meta.channel} · <span className="font-mono">{fmtTime(it.meta.durationSec)}</span> · {it.requester.displayName}
                 </p>
               </div>
-              <button aria-label={`Remove ${it.meta.title}`} onClick={() => onRemove(it.id)}
-                className="pill pill-ghost opacity-0 group-hover:opacity-100" style={{ padding: "0.35rem 0.7rem", fontSize: "0.8rem" }}>
-                Remove
-              </button>
+              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100">
+                <button aria-label="Move up" disabled={i === 0} onClick={() => onReorder(it.id, i - 1)}
+                  className="pill pill-ghost" style={{ padding: "0.3rem 0.55rem", fontSize: "0.75rem" }}>▲</button>
+                <button aria-label="Move down" disabled={i === items.length - 1} onClick={() => onReorder(it.id, i + 1)}
+                  className="pill pill-ghost" style={{ padding: "0.3rem 0.55rem", fontSize: "0.75rem" }}>▼</button>
+                <button aria-label={`Remove ${it.meta.title}`} onClick={() => onRemove(it.id)}
+                  className="pill pill-ghost" style={{ padding: "0.35rem 0.7rem", fontSize: "0.8rem" }}>
+                  Remove
+                </button>
+              </div>
             </li>
           ))}
         </ol>
