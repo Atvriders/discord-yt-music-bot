@@ -6,7 +6,7 @@ export function ServerSelector({ me, activeGuildId, onSelect, onLogout }: {
   return (
     <header className="flex flex-wrap items-center gap-3 justify-between reveal">
       <div className="flex items-center gap-3 min-w-0">
-        <span className="font-display text-xl" style={{ color: "var(--color-ember-soft)" }}>◴ After-Hours</span>
+        <span className="font-display text-xl" style={{ color: "var(--color-ember-soft)" }}>▶ YT Music Bot</span>
         <div className="flex flex-wrap gap-1.5">
           {me.guilds.length === 0 && <span className="text-xs" style={{ color: "var(--color-ink-faint)" }}>No shared servers.</span>}
           {me.guilds.map((g) => (
