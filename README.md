@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/bot-avatar.png" width="128" alt="discord-yt-music-bot"></p>
+<p align="center"><img src="assets/logo.png" width="660" alt="YouTube Music Bot — the real audio from the exact video, never a mirror track"></p>
 
 # discord-yt-music-bot
 
