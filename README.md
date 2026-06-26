@@ -37,7 +37,7 @@ Save changes.
 
 ## Configuration
 
-All configuration is via environment variables. Copy `.env.example` to `.env` and fill in the values.
+All configuration lives in the `environment:` block of `docker-compose.yml`. Open that file and replace the placeholder values (marked `CHANGE_ME`) with your real credentials before running the bot. Do **not** commit a `docker-compose.yml` containing real secrets — keep your filled-in copy local.
 
 | Variable                 | Required | Default                      | Description                                                                                     |
 | ------------------------ | -------- | ---------------------------- | ----------------------------------------------------------------------------------------------- |
@@ -78,13 +78,18 @@ DISCORD_TOKEN=your-token-here node dist/index.js
 
 ### Docker & Deploy
 
-Pull the latest GHCR image and run with Docker Compose:
+The deploy flow is:
+
+1. **GitHub Actions** builds the image and pushes it to `ghcr.io/atvriders/discord-yt-music-bot:latest`.
+2. **You** edit the `environment:` block in `docker-compose.yml` to fill in your real credentials (replace all `CHANGE_ME` placeholders).
+3. **`docker compose up -d`** pulls the pre-built GHCR image and runs it with the inline config — no local build, no `.env` file needed.
 
 ```bash
+# Edit docker-compose.yml first, then:
 docker compose up -d
 ```
 
-The compose file pulls `ghcr.io/atvriders/discord-yt-music-bot:latest`, reads all env vars from `.env`, and exposes port `8080` (configurable via `PORT`).
+> **Security note**: Do not commit your filled-in `docker-compose.yml` to the repo. Keep it local. The version in the repo contains only safe placeholder values.
 
 #### First-Time Setup
 
@@ -103,11 +108,11 @@ To enable the optional `bgutil-ytdlp-pot-provider` sidecar (for YouTube age-gate
 docker compose --profile pot up -d
 ```
 
-Then set `PO_TOKEN_PROVIDER_URL=http://bgutil-pot:4416` in `.env`.
+`PO_TOKEN_PROVIDER_URL` in `docker-compose.yml` is already set to `http://bgutil-pot:4416` for this case; set it to `""` if you are not using the sidecar.
 
 #### Configuration
 
-All env vars are documented in the **Configuration** section above. For the web panel, set:
+All env vars are documented in the **Configuration** section above and are pre-populated in the `environment:` block of `docker-compose.yml`. For the web panel, update:
 
 - `OAUTH_REDIRECT_URI` to your public URL + `/auth/callback` (must match Discord's OAuth2 redirect URI exactly)
 - `PUBLIC_BASE_URL` to your public HTTPS origin (e.g. `https://music.example.com`)
