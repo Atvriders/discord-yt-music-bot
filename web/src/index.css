@@ -1,93 +1,63 @@
-@import url("https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap");
 @import "tailwindcss";
 
 @theme {
-  --color-bg: #100d0a;
-  --color-raised: #1a1411;
-  --color-sunken: #0b0908;
-  --color-ink: #f4ece2;
-  --color-ink-dim: #b6a794;
-  --color-ink-faint: #6f6456;
-  --color-ember: #ff8a3d;
-  --color-ember-soft: #ffb061;
-  --color-gold: #e0a458;
-  --color-line: rgba(244, 236, 226, 0.09);
-  --color-playing: #93cf9c;
-  --color-danger: #e8775f;
-  --font-display: "Fraunces", Georgia, serif;
-  --font-sans: "Hanken Grotesk", system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --color-bg: #0f0f0f;
+  --color-raised: #212121;
+  --color-sunken: #181818;
+  --color-ink: #f1f1f1;
+  --color-ink-dim: #aaaaaa;
+  --color-ink-faint: #717171;
+  --color-ember: #ff0000;
+  --color-ember-soft: #ff5c52;
+  --color-gold: #ff0000;
+  --color-line: rgba(255, 255, 255, 0.12);
+  --color-playing: #2ba640;
+  --color-danger: #f14c4c;
+  --font-display: "Roboto", system-ui, sans-serif;
+  --font-sans: "Roboto", system-ui, sans-serif;
+  --font-mono: "Roboto Mono", ui-monospace, monospace;
 }
 
 :root { color-scheme: dark; }
-
 html, body, #root { height: 100%; }
 body {
   margin: 0;
   background: var(--color-bg);
   color: var(--color-ink);
   font-family: var(--font-sans);
-  font-feature-settings: "ss01", "cv01";
   -webkit-font-smoothing: antialiased;
 }
+body::before { content: none; }
 
-/* Warm radial atmosphere + a faint dial-light glow at the top. */
-body::before {
-  content: "";
-  position: fixed; inset: 0; z-index: -2;
-  background:
-    radial-gradient(120% 80% at 50% -10%, rgba(255, 138, 61, 0.16), transparent 60%),
-    radial-gradient(80% 50% at 85% 110%, rgba(224, 164, 88, 0.08), transparent 55%),
-    var(--color-bg);
-}
-
-.font-display { font-family: var(--font-display); letter-spacing: -0.01em; }
+.font-display { font-family: var(--font-display); font-weight: 700; letter-spacing: -0.005em; }
 .font-mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-.eyebrow { font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.28em; text-transform: uppercase; color: var(--color-ink-faint); }
+.eyebrow { font-family: var(--font-sans); font-size: 0.72rem; font-weight: 500; letter-spacing: 0.04em; text-transform: none; color: var(--color-ink-dim); }
 
-/* Card surfaces with a hairline + inner warmth */
-.card {
-  background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0.12)), var(--color-raised);
-  border: 1px solid var(--color-line);
-  border-radius: 18px;
-  box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 24px 60px -36px rgba(0,0,0,0.9);
-}
+.card { background: var(--color-raised); border: 1px solid var(--color-line); border-radius: 12px; box-shadow: none; }
 
-/* The now-playing hero: an ember glow that breathes. */
 .hero-glow { position: relative; }
-.hero-glow::after {
-  content: ""; position: absolute; inset: -1px; border-radius: inherit; z-index: 0;
-  background: radial-gradient(70% 120% at 18% 30%, rgba(255,138,61,0.22), transparent 60%);
-  pointer-events: none;
-}
+.hero-glow::after { content: none; }
 
-/* Tactile pill button */
 .pill {
   display: inline-flex; align-items: center; gap: 0.5rem;
   border-radius: 999px; border: 1px solid var(--color-line);
-  background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(0,0,0,0.16));
-  color: var(--color-ink); padding: 0.6rem 1.05rem; font-weight: 600; font-size: 0.92rem;
-  transition: transform .12s ease, border-color .2s ease, background .2s ease, color .2s ease;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--color-ink); padding: 0.55rem 1.05rem; font-weight: 500; font-size: 0.92rem;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
   cursor: pointer;
 }
-.pill:hover { transform: translateY(-1px); border-color: rgba(255,138,61,0.4); color: var(--color-ember-soft); }
-.pill:active { transform: translateY(0) scale(0.98); }
-.pill-primary { border-color: rgba(255,138,61,0.5); background: linear-gradient(180deg, var(--color-ember), #e9742b); color: #1a0f06; box-shadow: 0 10px 30px -12px rgba(255,138,61,0.6); }
-.pill-primary:hover { color: #160c04; filter: brightness(1.05); }
-.pill-ghost:hover { color: var(--color-danger); border-color: rgba(232,119,95,0.4); }
+.pill:hover { background: rgba(255, 255, 255, 0.14); border-color: rgba(255, 255, 255, 0.2); }
+.pill:active { background: rgba(255, 255, 255, 0.22); }
+.pill-primary { border-color: transparent; background: var(--color-ember); color: #fff; font-weight: 600; }
+.pill-primary:hover { background: #cc0000; }
+.pill-ghost:hover { color: var(--color-danger); border-color: rgba(241, 76, 76, 0.5); background: rgba(241, 76, 76, 0.1); }
 
-/* VU-meter progress */
-.vu { height: 6px; border-radius: 999px; background: var(--color-sunken); overflow: hidden; border: 1px solid var(--color-line); }
-.vu > span { display: block; height: 100%; background: linear-gradient(90deg, var(--color-gold), var(--color-ember)); box-shadow: 0 0 14px rgba(255,138,61,0.6); }
+.vu { height: 6px; border-radius: 999px; background: #383838; overflow: hidden; }
+.vu > span { display: block; height: 100%; background: var(--color-ember); }
 
-/* spinning requester token for the current track */
-.disc { animation: spin 6s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.reveal { opacity: 0; animation: rise 0.5s ease forwards; }
+@media (prefers-reduced-motion: reduce) { .reveal { animation: none; opacity: 1; } }
 
-/* staggered page-load reveal */
-@keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
-.reveal { opacity: 0; animation: rise .7s cubic-bezier(.2,.7,.2,1) forwards; }
-@media (prefers-reduced-motion: reduce) {
-  .reveal { animation: none; opacity: 1; }
-  .disc { animation: none; }
-}
+button:disabled { opacity: 0.5; cursor: not-allowed; }

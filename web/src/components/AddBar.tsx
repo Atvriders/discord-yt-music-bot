@@ -33,7 +33,7 @@ export function AddBar({ onPlay, onPick, busy }: {
               <button onClick={() => { onPick(c.videoId); setCandidates(null); setInput(""); }}
                 className="w-full flex items-center gap-3 rounded-xl px-3 py-2.5 text-left"
                 style={{ transition: "background .15s" }}
-                onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,138,61,0.08)")}
+                onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.08)")}
                 onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
                 <img src={c.thumbnailUrl ?? ""} alt="" width={44} height={44} className="rounded-md object-cover" style={{ width: 44, height: 44 }} />
                 <span className="min-w-0 flex-1">

@@ -12,7 +12,7 @@ export function ServerSelector({ me, activeGuildId, onSelect, onLogout }: {
           {me.guilds.map((g) => (
             <button key={g.id} onClick={() => onSelect(g.id)}
               className="pill" aria-pressed={g.id === activeGuildId}
-              style={g.id === activeGuildId ? { borderColor: "rgba(255,138,61,0.6)", color: "var(--color-ember-soft)" } : undefined}>
+              style={g.id === activeGuildId ? { borderColor: "var(--color-ember)", color: "var(--color-ember-soft)" } : undefined}>
               {g.name}
             </button>
           ))}

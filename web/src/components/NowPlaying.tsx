@@ -17,7 +17,7 @@ export function NowPlaying({ item }: { item: QueueItem | null }) {
       <div className="relative z-10 flex gap-6">
         <div className="shrink-0 relative">
           <img src={meta.thumbnailUrl ?? ""} alt="" width={132} height={132}
-            className="rounded-2xl object-cover disc" style={{ width: 132, height: 132, boxShadow: "0 14px 40px -18px rgba(255,138,61,0.7)" }} />
+            className="rounded-2xl object-cover" style={{ width: 132, height: 132, boxShadow: "0 8px 24px -10px rgba(0,0,0,0.6)" }} />
           <span className="absolute inset-0 rounded-2xl" style={{ boxShadow: "inset 0 0 0 1px var(--color-line)" }} />
         </div>
         <div className="min-w-0 flex-1">
