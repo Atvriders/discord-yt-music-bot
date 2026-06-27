@@ -11,7 +11,7 @@ export function Queue({ items, onRemove, onReorder }: {
         <span className="font-mono text-xs" style={{ color: "var(--color-ink-faint)" }}>{items.length} queued</span>
       </div>
       {items.length === 0 ? (
-        <p className="mt-4 text-sm" style={{ color: "var(--color-ink-faint)" }}>Nothing waiting. The night is young.</p>
+        <p className="mt-4 text-sm" style={{ color: "var(--color-ink-faint)" }}>The queue is empty.</p>
       ) : (
         <ol className="mt-4 flex flex-col gap-1">
           {items.map((it, i) => (

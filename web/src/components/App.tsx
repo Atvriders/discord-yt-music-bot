@@ -116,7 +116,7 @@ export function App() {
       });
   }, [guildId, voiceChannelId, showBanner]);
 
-  if (!authChecked) return <main className="min-h-full grid place-items-center"><span className="eyebrow">tuning in…</span></main>;
+  if (!authChecked) return <main className="min-h-full grid place-items-center"><span className="eyebrow">Loading…</span></main>;
   if (!me) return <LoginGate />;
 
   const snap = live.snapshot;

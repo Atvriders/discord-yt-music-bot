@@ -6,7 +6,7 @@ export function LoginGate() {
       <Grain />
       <div className="card hero-glow reveal max-w-md w-full p-10 text-center">
         <p className="eyebrow" style={{ color: "var(--color-ember-soft)" }}>YouTube Music Bot</p>
-        <h1 className="font-display text-4xl mt-3 leading-tight">The booth is locked.</h1>
+        <h1 className="font-display text-4xl mt-3 leading-tight">Control your music.</h1>
         <p className="mt-3 text-sm" style={{ color: "var(--color-ink-dim)" }}>
           It plays the real audio straight from the exact YouTube video you link — never a re-uploaded or &ldquo;mirror&rdquo; audio track. Sign in with Discord to take the controls — only servers you belong to will appear.
         </p>

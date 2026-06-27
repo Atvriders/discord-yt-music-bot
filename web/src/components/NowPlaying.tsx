@@ -5,8 +5,8 @@ export function NowPlaying({ item }: { item: QueueItem | null }) {
   if (!item) {
     return (
       <section className="card hero-glow reveal p-8" style={{ animationDelay: "80ms" }}>
-        <p className="eyebrow">On air</p>
-        <p className="font-display text-3xl mt-3" style={{ color: "var(--color-ink-dim)" }}>Silence on the wire.</p>
+        <p className="eyebrow">Now playing</p>
+        <p className="font-display text-3xl mt-3" style={{ color: "var(--color-ink-dim)" }}>Nothing is playing.</p>
         <p className="mt-2 text-sm" style={{ color: "var(--color-ink-faint)" }}>Queue a YouTube link or search below to start the set.</p>
       </section>
     );
