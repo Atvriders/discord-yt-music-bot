@@ -86,10 +86,20 @@ export function App() {
 
   const control = useCallback(async (a: ControlAction) => {
     if (!guildId) return;
+    // Optimistic toggle for the pause/resume label.
     if (a === "pause") setPaused(true);
     if (a === "resume") setPaused(false);
-    await api.control(guildId, a).catch(() => {});
-  }, [guildId]);
+    try {
+      await api.control(guildId, a);
+    } catch (err) {
+      // Revert the optimistic toggle and surface the failure — a swallowed error
+      // made a failed pause look like it succeeded while audio kept playing.
+      if (a === "pause") setPaused(false);
+      if (a === "resume") setPaused(true);
+      const reason = err instanceof ApiError ? err.message : "Something went wrong";
+      showBanner({ kind: "error", text: `Couldn't ${a} — ${reason}` });
+    }
+  }, [guildId, showBanner]);
 
   const onPlay = useCallback(async (input: string): Promise<{ candidates: TrackMeta[] | null; queuedTitle?: string }> => {
     if (!guildId) return { candidates: null };

@@ -150,6 +150,8 @@ describe("REST actions", () => {
       expect(res.statusCode).toBe(200);
     }
     expect(h.controller.skip).toHaveBeenCalled();
+    expect(h.controller.pause).toHaveBeenCalled();
+    expect(h.controller.resume).toHaveBeenCalled();
     expect(h.controller.stop).toHaveBeenCalled();
   });
   it("queue/remove and reorder use the itemId", async () => {
