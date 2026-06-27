@@ -229,6 +229,35 @@ describe("GuildController playback position + paused", () => {
     expect(ctrl.snapshot().current?.positionMs).toBe(0);
   });
 
+  it("the LAST 'changed' broadcast on a skip carries the NEW track with its position reset to 0", async () => {
+    // Regression: the broadcaster turns every controller "changed" into a now-playing
+    // snapshot. On a skip/advance the controller emitted "changed" from inside
+    // queue.advance() — BEFORE markTrackStarted() resets the position — so the panel
+    // received the new track stamped with the PREVIOUS track's elapsed position and no
+    // corrected broadcast ever followed (stale now-playing card). The snapshot at the
+    // FINAL "changed" emit (what the panel renders) must reflect the freshly-started track.
+    const { ctrl, session, advanceClock } = makeClockController();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    advanceClock(45000); // track A has been playing 45s
+
+    // Capture the snapshot exactly as the broadcaster would at each "changed".
+    const emitted: { videoId: string | null; positionMs: number | undefined }[] = [];
+    ctrl.on("changed", () => {
+      const cur = ctrl.snapshot().current;
+      emitted.push({ videoId: cur?.meta.videoId ?? null, positionMs: cur?.positionMs });
+    });
+
+    session.emit("trackEnd"); // skip/advance to B
+    await new Promise((r) => setTimeout(r, 0));
+
+    const last = emitted.at(-1);
+    expect(last?.videoId).toBe("bbbbbbbbbbb"); // new track
+    expect(last?.positionMs).toBe(0); // position reset for the new track (was the stale 45000)
+  });
+
   it("emits 'changed' on pause, resume, skip and stop so the panel stays live", async () => {
     const { ctrl, session } = makeClockController();
     await ctrl.ensureConnected("C1");

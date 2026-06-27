@@ -11,6 +11,46 @@ describe("App", () => {
     render(<App />);
     await waitFor(() => expect(screen.getByText(/Continue with Discord/i)).toBeTruthy());
   });
+  it("now-playing reflects the NEW track when a second state arrives (skip/advance) — not the stale previous one", async () => {
+    // Regression: on a skip/advance the panel must replace the now-playing card with
+    // the new track. A reducer that shallow-merged `current` (or a NowPlaying that
+    // memoized the previous track) would leave the old title/thumbnail showing.
+    let wsRef: { deliver: (state: unknown) => void } | null = null;
+    class FakeWS {
+      readonly listeners: Record<string, ((e: unknown) => void)[]> = {};
+      constructor() {
+        wsRef = { deliver: (state) => this.emit("message", { data: JSON.stringify({ type: "state", state }) }) };
+        setTimeout(() => this.emit("open", {}), 0);
+      }
+      addEventListener(ev: string, cb: (e: unknown) => void) { (this.listeners[ev] ??= []).push(cb); }
+      emit(ev: string, e: unknown) { for (const cb of this.listeners[ev] ?? []) cb(e); }
+      send() {} close() {}
+    }
+    vi.stubGlobal("WebSocket", FakeWS as unknown as typeof WebSocket);
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "Booth" }] }) });
+      if (url.includes("/voice-channels")) return Promise.resolve({ ok: true, status: 200, json: async () => ({ channels: [], currentChannelId: null }) });
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ current: null, upcoming: [], history: [], paused: false }) });
+    }));
+    const track = (videoId: string, title: string) => ({
+      id: "q-" + videoId, addedAt: 0, positionMs: 0, durationMs: 100000,
+      meta: { videoId, title, channel: "ch", durationSec: 100, isLive: false, thumbnailUrl: "http://x/" + videoId + ".jpg" },
+      requester: { discordUserId: "1", displayName: "dj", avatarUrl: "", source: "web" },
+    });
+
+    render(<App />);
+    await waitFor(() => expect(wsRef).not.toBeNull());
+    wsRef!.deliver({ current: track("aaa", "First Track"), upcoming: [], history: [], paused: false, idleTimeoutSec: 300 });
+    await screen.findByText("First Track");
+
+    // Skip/advance: a fresh state with a new current.
+    wsRef!.deliver({ current: track("bbb", "Second Track"), upcoming: [], history: [], paused: false, idleTimeoutSec: 300 });
+    await waitFor(() => expect(document.querySelector("h1")?.textContent).toBe("Second Track"));
+    expect(screen.queryByText("First Track")).toBeNull();
+    const thumb = document.querySelector("img[width='132']") as HTMLImageElement;
+    expect(thumb.src).toContain("bbb.jpg"); // thumbnail updated too, not the previous track's
+  });
+
   it("surfaces an error when a control action (pause) fails instead of swallowing it", async () => {
     // A minimal WebSocket that immediately delivers a snapshot with a current track,
     // so the Controls are enabled and the Pause button is clickable.

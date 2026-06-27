@@ -240,6 +240,12 @@ export class GuildController extends EventEmitter {
       this.pinned.add(item.meta.videoId);
       session.play(await this.deps.makeResource(path, item));
       this.markTrackStarted();
+      // Re-broadcast now that the new track has actually started: the "changed"
+      // fired from queue.advance() ran BEFORE markTrackStarted(), so the panel's
+      // now-playing snapshot for this track still carried the PREVIOUS track's
+      // elapsed position. Emit again so the panel gets the freshly-started track
+      // with its position reset (no stale now-playing card after a skip/advance).
+      this.emit("changed");
       return true;
     } catch (err) {
       this.deps.onTrackError?.({
