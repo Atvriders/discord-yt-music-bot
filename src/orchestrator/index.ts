@@ -3,15 +3,37 @@ import { GuildQueue } from "../queue/index.js";
 import { Mutex } from "../util/mutex.js";
 import type { Semaphore } from "../util/semaphore.js";
 import type { VoiceSession } from "../voice/session.js";
-import type { QueueItem, Requester, TrackMeta } from "../types/index.js";
+import type { AudioInfo, QueueItem, Requester, TrackMeta } from "../types/index.js";
 import { YtError } from "../youtube/errors.js";
+import { DEFAULT_SETTINGS, applySettingsPatch, type GuildSettings } from "./settings.js";
+
+interface DownloadResult {
+  path: string;
+  audio: AudioInfo | null;
+}
+
+/** Audio post-processing options handed to the resource factory for a single track. */
+export interface AudioOptions {
+  /** Pseudo-crossfade seconds (fade-out at end / fade-in at start). 0 = off. */
+  crossfadeSec: number;
+  /** Apply ffmpeg `loudnorm` (EBU R128) normalization. */
+  normalizeLoudness: boolean;
+}
+
+export interface MakeResourceOpts {
+  /** Start offset in ms; when > 0 the resource is produced by ffmpeg `-ss` (transcode, not Opus passthrough). */
+  seekMs?: number;
+  /** Per-track audio post-processing (loudnorm / pseudo-crossfade). Omitted = no processing. */
+  audio?: AudioOptions;
+}
 
 export interface ControllerDeps {
-  youtube: { download(videoId: string, outDir: string): Promise<string> };
+  youtube: { download(videoId: string, outDir: string): Promise<DownloadResult> };
   cache: {
     get(id: string): string | null;
+    getAudio(id: string): AudioInfo | null;
     has(id: string): boolean;
-    register(id: string, path: string): void;
+    register(id: string, path: string, audio?: AudioInfo | null): void;
     pin(id: string): void;
     unpin(id: string): void;
   };
@@ -19,14 +41,22 @@ export interface ControllerDeps {
   // The factory receives the controller's current idle timeout so freshly-created
   // sessions honor the runtime (per-guild) value, not just the static default.
   createSession: (channelId: string, idleTimeoutMs: number) => Promise<VoiceSession>;
-  makeResource: (filePath: string, item: QueueItem) => unknown | Promise<unknown>;
+  makeResource: (
+    filePath: string,
+    item: QueueItem,
+    opts?: MakeResourceOpts,
+  ) => unknown | Promise<unknown>;
   prefetchDepth: number;
   /** Initial idle-disconnect timeout (ms); the panel can override it per guild at runtime. */
   idleTimeoutMs: number;
   downloads: Semaphore;
   queue?: GuildQueue;
   now?: () => number;
+  /** Seed for the per-guild settings (crossfade/normalize/repeat + idle). idleTimeoutSec is overridden by idleTimeoutMs. */
+  settings?: GuildSettings;
   onTrackError?: (info: { videoId: string; title: string; reason: string }) => void;
+  /** Called after any settings mutation so the host can persist (debounced) the change. */
+  onSettingsChange?: (settings: GuildSettings) => void;
 }
 
 /**
@@ -41,6 +71,12 @@ export interface ControllerSnapshot {
   paused: boolean;
   /** How long (seconds) the bot stays in voice after playback ends; runtime-adjustable per guild. */
   idleTimeoutSec: number;
+  /** Pseudo-crossfade seconds (0 = off). */
+  crossfadeSec: number;
+  /** Whether ffmpeg `loudnorm` normalization is applied. */
+  normalizeLoudness: boolean;
+  /** Repeat mode: off | one | all. */
+  repeat: GuildSettings["repeat"];
 }
 
 export class GuildController extends EventEmitter {
@@ -57,15 +93,21 @@ export class GuildController extends EventEmitter {
   private pausedAccumMs = 0;
   private pausedAt: number | null = null;
 
-  // Runtime-adjustable idle-disconnect timeout (ms), seeded from the configured default.
-  private idleTimeoutMs: number;
+  // Per-guild settings (idle timeout + crossfade/normalize/repeat), runtime-adjustable.
+  // The idle timeout is the live source of truth; `idleTimeoutMs` derives from it.
+  private _settings: GuildSettings;
 
   constructor(
     readonly guildId: string,
     private readonly deps: ControllerDeps,
   ) {
     super();
-    this.idleTimeoutMs = deps.idleTimeoutMs;
+    // Seed from deps.settings (if provided), but the explicit idleTimeoutMs always wins
+    // for the idle field so existing host wiring keeps its configured default.
+    this._settings = {
+      ...(deps.settings ?? DEFAULT_SETTINGS),
+      idleTimeoutSec: Math.round(deps.idleTimeoutMs / 1000),
+    };
     this.now = deps.now ?? (() => Date.now());
     this.queue = deps.queue ?? new GuildQueue();
     this.queue.on("prefetch", (videoId: string | null) => {
@@ -86,20 +128,47 @@ export class GuildController extends EventEmitter {
     return this.pausedAt !== null;
   }
 
+  /** Current per-guild settings (copy). */
+  get settings(): GuildSettings {
+    return { ...this._settings };
+  }
+
+  private get idleTimeoutMs(): number {
+    return this._settings.idleTimeoutSec * 1000;
+  }
+
   /** Current idle-disconnect timeout in seconds (per-guild, runtime-adjustable). */
   getIdleTimeoutSec(): number {
-    return Math.round(this.idleTimeoutMs / 1000);
+    return this._settings.idleTimeoutSec;
   }
 
   /**
-   * Set the idle-disconnect timeout (seconds). Updates the value used for new
-   * sessions, applies it immediately to the live session (restarting a running
-   * idle timer), and emits "changed" so the panel reflects it live.
+   * Set the idle-disconnect timeout (seconds). Thin wrapper over updateSettings so
+   * the existing REST/panel wiring keeps working unchanged.
    */
   setIdleTimeoutSec(sec: number): void {
-    this.idleTimeoutMs = sec * 1000;
+    this.updateSettings({ idleTimeoutSec: sec });
+  }
+
+  /**
+   * Validate + merge a settings patch. Applies the resulting idle timeout to the live
+   * session (restarting a running idle timer), notifies the host for persistence, and
+   * emits "changed" so the panel reflects every field live. Returns the new settings.
+   */
+  updateSettings(patch: Partial<Record<keyof GuildSettings, unknown>>): GuildSettings {
+    this._settings = applySettingsPatch(this._settings, patch);
     this.session?.setIdleTimeout(this.idleTimeoutMs);
+    this.deps.onSettingsChange?.(this._settings);
     this.emit("changed");
+    return { ...this._settings };
+  }
+
+  /** Audio post-processing options derived from current settings. */
+  private audioOptions(): AudioOptions {
+    return {
+      crossfadeSec: this._settings.crossfadeSec,
+      normalizeLoudness: this._settings.normalizeLoudness,
+    };
   }
 
   /** Elapsed ms of the current track, excluding paused time. */
@@ -110,11 +179,15 @@ export class GuildController extends EventEmitter {
     return Math.max(0, elapsed);
   }
 
-  // Reset position tracking the moment a new track starts playing.
-  private markTrackStarted(): void {
-    this.startedAt = this.now();
+  // (Re-)anchor position tracking so the current track reads `baseMs` elapsed right
+  // now. A fresh track starts at 0; a seek re-anchors to the seek target. When the
+  // track is currently paused (`keepPaused`), the frozen point moves to the new base
+  // so the position stays put after a scrub while paused.
+  private markTrackStarted(baseMs = 0, keepPaused = false): void {
+    const paused = keepPaused && this.pausedAt !== null;
+    this.startedAt = this.now() - baseMs;
     this.pausedAccumMs = 0;
-    this.pausedAt = null;
+    this.pausedAt = paused ? this.now() : null;
   }
 
   snapshot(): ControllerSnapshot {
@@ -134,7 +207,10 @@ export class GuildController extends EventEmitter {
       upcoming: snap.upcoming,
       history: snap.history,
       paused: this.isPaused,
-      idleTimeoutSec: this.getIdleTimeoutSec(),
+      idleTimeoutSec: this._settings.idleTimeoutSec,
+      crossfadeSec: this._settings.crossfadeSec,
+      normalizeLoudness: this._settings.normalizeLoudness,
+      repeat: this._settings.repeat,
     };
   }
 
@@ -203,6 +279,47 @@ export class GuildController extends EventEmitter {
       this.emit("changed");
     }
   }
+  /**
+   * Scrub to `positionMs` within the current track. Opus frames aren't randomly
+   * seekable, so we re-create the audio resource from the cached file starting at the
+   * offset via ffmpeg `-ss` (a transcode, not a passthrough), play it, re-anchor the
+   * position so the moving bar jumps to the target, and broadcast the new state.
+   *
+   * Because ffmpeg has to re-open and transcode from the offset, there is a brief
+   * audible gap (typically well under a second) while the new stream spins up. The
+   * paused state is preserved across the seek.
+   *
+   * @returns true if a seek was performed, false if there is nothing playing.
+   * @throws RangeError if positionMs is out of [0, durationMs].
+   */
+  async seek(positionMs: number): Promise<boolean> {
+    return this.lock.runExclusive(async () => {
+      const session = this.session;
+      const current = this.queue.current;
+      if (!session || !current) return false;
+      const durationSec = current.meta.durationSec;
+      const max = durationSec && durationSec > 0 ? durationSec * 1000 : Infinity;
+      if (!Number.isFinite(positionMs) || positionMs < 0 || positionMs > max) {
+        throw new RangeError("positionMs out of range");
+      }
+      const path = await this.ensureDownloaded(current.meta.videoId);
+      current.audio = this.deps.cache.getAudio(current.meta.videoId);
+      this.deps.cache.pin(current.meta.videoId);
+      this.pinned.add(current.meta.videoId);
+      const wasPaused = this.pausedAt !== null;
+      session.play(
+        await this.deps.makeResource(path, current, {
+          seekMs: positionMs,
+          audio: this.audioOptions(),
+        }),
+      );
+      // A fresh resource always starts playing; re-apply pause if we were paused.
+      if (wasPaused) session.pause();
+      this.markTrackStarted(positionMs, true);
+      this.emit("changed");
+      return true;
+    });
+  }
   async remove(itemId: string): Promise<boolean> {
     return this.queue.remove(itemId);
   }
@@ -236,9 +353,10 @@ export class GuildController extends EventEmitter {
     if (!session) return false;
     try {
       const path = await this.ensureDownloaded(item.meta.videoId);
+      item.audio = this.deps.cache.getAudio(item.meta.videoId);
       this.deps.cache.pin(item.meta.videoId);
       this.pinned.add(item.meta.videoId);
-      session.play(await this.deps.makeResource(path, item));
+      session.play(await this.deps.makeResource(path, item, { audio: this.audioOptions() }));
       this.markTrackStarted();
       // Re-broadcast now that the new track has actually started: the "changed"
       // fired from queue.advance() ran BEFORE markTrackStarted(), so the panel's
@@ -260,6 +378,16 @@ export class GuildController extends EventEmitter {
   private async playNextLocked(): Promise<void> {
     const session = this.session;
     if (!session) return;
+    // Repeat "one": replay the current track without advancing the queue.
+    if (this._settings.repeat === "one") {
+      const current = this.queue.current;
+      if (current && (await this.playItemLocked(current))) return;
+      // current missing or failed → fall through to normal advance.
+    }
+    // Repeat "all": when the queue has run dry, cycle the played history back in.
+    if (this._settings.repeat === "all" && this.queue.snapshot().upcoming.length === 0) {
+      await this.queue.requeueHistory();
+    }
     let item = await this.queue.advance();
     while (item) {
       if (await this.playItemLocked(item)) return;
@@ -271,20 +399,20 @@ export class GuildController extends EventEmitter {
   private async ensureDownloaded(videoId: string): Promise<string> {
     const cached = this.deps.cache.get(videoId);
     if (cached) return cached;
-    const path = await this.deps.downloads.run(() =>
+    const { path, audio } = await this.deps.downloads.run(() =>
       this.deps.youtube.download(videoId, this.deps.cacheDir),
     );
-    this.deps.cache.register(videoId, path);
+    this.deps.cache.register(videoId, path, audio);
     return path;
   }
 
   private async prefetch(videoId: string): Promise<void> {
     if (this.deps.cache.has(videoId)) return;
     try {
-      const path = await this.deps.downloads.run(() =>
+      const { path, audio } = await this.deps.downloads.run(() =>
         this.deps.youtube.download(videoId, this.deps.cacheDir),
       );
-      this.deps.cache.register(videoId, path);
+      this.deps.cache.register(videoId, path, audio);
       this.deps.cache.pin(videoId);
       this.pinned.add(videoId);
     } catch {

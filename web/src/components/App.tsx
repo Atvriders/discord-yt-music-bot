@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Me, TrackMeta, VoiceChannel } from "../types.js";
+import type { GuildSettings, Me, TrackMeta, VoiceChannel } from "../types.js";
 import { api, ApiError, type ControlAction } from "../lib/api.js";
 import { useGuildState } from "../lib/useGuildState.js";
 import { Grain } from "./Grain.js";
@@ -9,6 +9,7 @@ import { NowPlaying } from "./NowPlaying.js";
 import { Controls } from "./Controls.js";
 import { Queue } from "./Queue.js";
 import { AddBar } from "./AddBar.js";
+import { Discover } from "./Discover.js";
 import { VoiceChannelPicker } from "./VoiceChannelPicker.js";
 import { Settings } from "./Settings.js";
 
@@ -147,27 +148,59 @@ export function App() {
     }
   }, [guildId, showBanner]);
 
-  const onSetIdleTimeout = useCallback(async (idleTimeoutSec: number) => {
+  const onSeek = useCallback((positionMs: number) => {
+    if (!guildId) return;
+    api.seek(guildId, positionMs).catch((err: unknown) => {
+      const msg = err instanceof ApiError ? err.message : "Couldn't seek";
+      showBanner({ kind: "error", text: msg });
+    });
+  }, [guildId, showBanner]);
+
+  // Persist any settings patch. The authoritative values come back via the next WS
+  // state broadcast (the controller emits "changed" on update), so we don't store the
+  // result locally — the snapshot is the single source of truth.
+  const onPatchSettings = useCallback(async (patch: Partial<GuildSettings>) => {
     if (!guildId) return;
     try {
-      await api.setSettings(guildId, { idleTimeoutSec });
-      // The authoritative value comes back via the next WS state broadcast
-      // (the controller emits "changed" on update).
+      await api.setSettings(guildId, patch);
     } catch (err) {
       const reason = err instanceof ApiError ? err.message : "Something went wrong";
       showBanner({ kind: "error", text: `Couldn't update setting — ${reason}` });
     }
   }, [guildId, showBanner]);
+  const onSetIdleTimeout = useCallback(
+    (idleTimeoutSec: number) => onPatchSettings({ idleTimeoutSec }),
+    [onPatchSettings],
+  );
+
+  // Whether an enqueue would queue into the void: no channel picked AND the bot is
+  // not already playing anything in this guild. Used to short-circuit add attempts
+  // with a clear prompt rather than a false "Queued" (the backend also rejects this).
+  const noVoiceTarget = !voiceChannelId && !live.snapshot?.current;
+
+  // Surface a successful enqueue, including the non-admin move-suppressed case.
+  const announceQueued = useCallback((r: { queued?: { id: string; title: string }; moveSuppressed?: { requested: string; actual: string | null } }) => {
+    if (!r.queued) return;
+    if (r.moveSuppressed) {
+      showBanner({ kind: "success", text: `Queued: ${r.queued.title} — only an admin can move the bot` });
+    } else {
+      showBanner({ kind: "success", text: `Queued: ${r.queued.title}` });
+    }
+  }, [showBanner]);
 
   const onPlay = useCallback(async (input: string): Promise<{ candidates: TrackMeta[] | null; queuedTitle?: string }> => {
     if (!guildId) return { candidates: null };
+    if (noVoiceTarget) {
+      showBanner({ kind: "error", text: "Pick a voice channel first" });
+      return { candidates: null };
+    }
     // ITEM 5: show instant feedback — the resolve (yt-dlp) takes several seconds.
     const label = input.length > 60 ? input.slice(0, 57) + "…" : input;
     showBanner({ kind: "success", text: `Resolving ${label}…` });
     try {
       const r = await api.play(guildId, input, voiceChannelId ?? undefined);
       if (r.queued) {
-        showBanner({ kind: "success", text: `Queued: ${r.queued.title}` });
+        announceQueued(r);
       } else {
         // A search returned candidates — drop the pending banner.
         dismissBanner();
@@ -178,17 +211,53 @@ export function App() {
       showBanner({ kind: "error", text: msg });
       return { candidates: null };
     }
-  }, [guildId, voiceChannelId, showBanner, dismissBanner]);
+  }, [guildId, voiceChannelId, noVoiceTarget, showBanner, dismissBanner, announceQueued]);
 
   const onPick = useCallback((videoId: string) => {
     if (!guildId) return;
+    if (noVoiceTarget) {
+      showBanner({ kind: "error", text: "Pick a voice channel first" });
+      return;
+    }
     api.pick(guildId, videoId, voiceChannelId ?? undefined)
-      .then((r) => { if (r.queued) showBanner({ kind: "success", text: `Queued: ${r.queued.title}` }); })
+      .then((r) => announceQueued(r))
       .catch((err: unknown) => {
         const msg = err instanceof ApiError ? err.message : "Something went wrong";
         showBanner({ kind: "error", text: msg });
       });
-  }, [guildId, voiceChannelId, showBanner]);
+  }, [guildId, voiceChannelId, noVoiceTarget, showBanner, announceQueued]);
+
+  // Refetch the snapshot after a queue mutation when the WS isn't live to deliver
+  // the update itself (otherwise the queue would look stale until the next event).
+  const refreshIfNotLive = useCallback(async () => {
+    if (!guildId || live.status === "live") return;
+    try {
+      const snap = await api.state(guildId);
+      live.refresh(snap);
+    } catch { /* a refetch failure is non-fatal; the mutation already succeeded */ }
+  }, [guildId, live]);
+
+  const onRemove = useCallback(async (itemId: string) => {
+    if (!guildId) return;
+    try {
+      await api.remove(guildId, itemId);
+      await refreshIfNotLive();
+    } catch (err) {
+      const reason = err instanceof ApiError ? err.message : "Something went wrong";
+      showBanner({ kind: "error", text: `Couldn't remove — ${reason}` });
+    }
+  }, [guildId, refreshIfNotLive, showBanner]);
+
+  const onReorder = useCallback(async (itemId: string, toIndex: number) => {
+    if (!guildId) return;
+    try {
+      await api.reorder(guildId, itemId, toIndex);
+      await refreshIfNotLive();
+    } catch (err) {
+      const reason = err instanceof ApiError ? err.message : "Something went wrong";
+      showBanner({ kind: "error", text: `Couldn't move — ${reason}` });
+    }
+  }, [guildId, refreshIfNotLive, showBanner]);
 
   if (!authChecked) return <main className="min-h-full grid place-items-center"><span className="eyebrow">Loading…</span></main>;
   if (!me) return <LoginGate />;
@@ -204,20 +273,36 @@ export function App() {
           <p className="card p-8 text-center" style={{ color: "var(--color-ink-dim)" }}>Pick a server to take the controls.</p>
         ) : (
           <>
-            <NowPlaying item={snap?.current ?? null} paused={snap?.paused ?? false} receivedAt={live.receivedAt} />
+            <NowPlaying
+              item={snap?.current ?? null}
+              paused={snap?.paused ?? false}
+              playing={!!snap?.current && !paused}
+              receivedAt={live.receivedAt}
+              canSeek={live.status === "live" && !!snap?.current}
+              onSeek={onSeek}
+            />
             <div className="flex items-center justify-between flex-wrap gap-3">
               <div className="flex items-center gap-4 flex-wrap">
                 <Controls onAction={control} paused={paused} disabled={!snap?.current} />
                 <VoiceChannelPicker channels={channels} value={voiceChannelId} onChange={(id) => { manualChannelRef.current = true; setVoiceChannelId(id); }} />
-                <Settings idleTimeoutSec={snap?.idleTimeoutSec} disabled={live.status === "forbidden"} onChange={onSetIdleTimeout} />
+                <Settings
+                  idleTimeoutSec={snap?.idleTimeoutSec}
+                  crossfadeSec={snap?.crossfadeSec}
+                  normalizeLoudness={snap?.normalizeLoudness}
+                  repeat={snap?.repeat}
+                  disabled={live.status === "forbidden"}
+                  onChange={onSetIdleTimeout}
+                  onAudioChange={onPatchSettings}
+                />
               </div>
               <span className="font-mono text-xs" style={{ color: "var(--color-ink-faint)" }}>
                 {live.status === "live" ? "● live" : live.status === "forbidden" ? "✕ no access" : "○ " + live.status}
               </span>
             </div>
             {banner && <StatusBanner msg={banner} onDismiss={dismissBanner} />}
-            <AddBar onPlay={onPlay} onPick={onPick} />
-            <Queue items={snap?.upcoming ?? []} onRemove={(id) => guildId && api.remove(guildId, id).then(() => {}).catch(() => {})} onReorder={(id, toIndex) => guildId && api.reorder(guildId, id, toIndex).catch(() => {})} />
+            <AddBar onPlay={onPlay} onPick={onPick} busy={noVoiceTarget} />
+            <Discover onSearch={onPlay} onPick={onPick} busy={noVoiceTarget} />
+            <Queue items={snap?.upcoming ?? []} onRemove={onRemove} onReorder={onReorder} />
           </>
         )}
         <footer className="text-center font-mono text-xs pt-4" style={{ color: "var(--color-ink-faint)" }}>

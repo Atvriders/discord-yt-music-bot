@@ -68,6 +68,22 @@ describe("AudioCache", () => {
     expect(cache.get("zzzzzzzzzzz")).toBeNull();
   });
 
+  it("stores and returns the audio format passed to register", async () => {
+    const cache = new AudioCache(dir, 1000);
+    await cache.init();
+    const audio = { codec: "opus", bitrateKbps: 160, sampleRateHz: 48000 };
+    cache.register("aaaaaaaaaaa", await makeFile("aaaaaaaaaaa.webm", 100), audio);
+    expect(cache.getAudio("aaaaaaaaaaa")).toEqual(audio);
+    expect(cache.getAudio("unknownnnnn")).toBeNull();
+  });
+
+  it("getAudio defaults to null when no format was supplied", async () => {
+    const cache = new AudioCache(dir, 1000);
+    await cache.init();
+    cache.register("aaaaaaaaaaa", await makeFile("aaaaaaaaaaa.webm", 100));
+    expect(cache.getAudio("aaaaaaaaaaa")).toBeNull();
+  });
+
   afterEach(async () => {
     await rm(dir, { recursive: true, force: true });
   });

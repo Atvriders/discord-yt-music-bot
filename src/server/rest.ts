@@ -4,6 +4,7 @@ import { canControl } from "../auth/authz.js";
 import { avatarUrl, type DiscordUser } from "../auth/oauth.js";
 import { YtError } from "../youtube/errors.js";
 import type { Requester, TrackMeta } from "../types/index.js";
+import type { GuildSettings } from "../orchestrator/settings.js";
 
 interface Controller {
   ensureConnected(channelId: string): Promise<void>;
@@ -14,11 +15,16 @@ interface Controller {
   pause(): void;
   resume(): void;
   stop(): Promise<void>;
+  seek(positionMs: number): Promise<boolean>;
   remove(itemId: string): Promise<boolean>;
   reorder(itemId: string, toIndex: number): Promise<boolean>;
-  snapshot(): { current: unknown; upcoming: { id: string }[]; history: unknown };
-  getIdleTimeoutSec(): number;
-  setIdleTimeoutSec(sec: number): void;
+  snapshot(): {
+    current: { meta?: { durationSec?: number | null } } | null;
+    upcoming: { id: string }[];
+    history: unknown;
+  };
+  readonly settings: GuildSettings;
+  updateSettings(patch: Partial<Record<keyof GuildSettings, unknown>>): GuildSettings;
 }
 export interface RestDeps {
   hub: { get(guildId: string): Controller };
@@ -130,13 +136,24 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
       return reply.code(400).send({ error: err instanceof YtError ? err.kind : "resolve_failed" });
     }
     const controller = deps.hub.get(params.id);
+    let moveSuppressed: { requested: string; actual: string | null } | undefined;
     if (body.voiceChannelId) {
       const connected = controller.connectedChannelId;
-      if (connected && connected !== body.voiceChannelId && isAdmin(req, deps)) {
-        await controller.moveTo(body.voiceChannelId);
+      if (connected && connected !== body.voiceChannelId) {
+        if (isAdmin(req, deps)) {
+          await controller.moveTo(body.voiceChannelId);
+        } else {
+          // Non-admin can't move the bot: keep it where it is, but flag the request
+          // so the panel can tell the user only an admin can move it.
+          moveSuppressed = { requested: body.voiceChannelId, actual: connected };
+        }
       } else {
         await controller.ensureConnected(body.voiceChannelId);
       }
+    } else if (controller.connectedChannelId === null) {
+      // No target channel and the bot isn't in voice — the track would queue into
+      // the void and never play. Reject so the panel can prompt for a channel.
+      return reply.code(400).send({ error: "no_voice_channel" });
     }
     const requester: Requester = {
       discordUserId: user.id,
@@ -145,7 +162,10 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
       source: "web",
     };
     const item = await controller.enqueue(meta, requester);
-    return { queued: { id: item.id, title: meta.title } };
+    return {
+      queued: { id: item.id, title: meta.title },
+      ...(moveSuppressed ? { moveSuppressed } : {}),
+    };
   }
 
   for (const action of ["skip", "pause", "resume", "stop"] as const) {
@@ -156,6 +176,30 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
       return { ok: true };
     });
   }
+
+  app.post<{ Params: { id: string }; Body: { positionMs?: number } }>(
+    "/api/guilds/:id/seek",
+    async (req, reply) => {
+      if (!(await requireControl(req, reply, req.params.id))) return;
+      const positionMs = Number(req.body?.positionMs);
+      if (!Number.isFinite(positionMs) || positionMs < 0) {
+        return reply.code(400).send({ error: "positionMs must be a non-negative number" });
+      }
+      const c = deps.hub.get(req.params.id);
+      const current = c.snapshot().current;
+      if (!current) return reply.code(409).send({ error: "nothing is playing" });
+      const durationSec = current.meta?.durationSec ?? null;
+      if (durationSec != null && positionMs > durationSec * 1000) {
+        return reply.code(400).send({ error: "positionMs exceeds track duration" });
+      }
+      try {
+        const ok = await c.seek(Math.round(positionMs));
+        return { ok };
+      } catch {
+        return reply.code(400).send({ error: "seek failed" });
+      }
+    },
+  );
 
   app.post<{ Params: { id: string }; Body: { itemId?: string } }>(
     "/api/guilds/:id/queue/remove",
@@ -208,24 +252,21 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
     return { channels, currentChannelId };
   });
 
-  // Per-guild panel settings: the idle timeout (how long the bot stays in voice
-  // after playback ends). Defaults to the configured IDLE_TIMEOUT_SEC.
+  // Per-guild panel settings: idle timeout (how long the bot lingers in voice after
+  // playback ends), pseudo-crossfade seconds, loudness normalization, and repeat mode.
   app.get<{ Params: { id: string } }>("/api/guilds/:id/settings", async (req, reply) => {
     if (!(await requireControl(req, reply, req.params.id))) return;
-    return { idleTimeoutSec: deps.hub.get(req.params.id).getIdleTimeoutSec() };
+    return { settings: deps.hub.get(req.params.id).settings };
   });
 
-  app.post<{ Params: { id: string }; Body: { idleTimeoutSec?: unknown } }>(
-    "/api/guilds/:id/settings",
-    async (req, reply) => {
-      if (!(await requireControl(req, reply, req.params.id))) return;
-      const sec = req.body?.idleTimeoutSec;
-      // 0 = leave as soon as idle; max 3600 = 1 hour.
-      if (typeof sec !== "number" || !Number.isInteger(sec) || sec < 0 || sec > 3600) {
-        return reply.code(400).send({ error: "invalid idleTimeoutSec" });
-      }
-      deps.hub.get(req.params.id).setIdleTimeoutSec(sec);
-      return { ok: true, idleTimeoutSec: sec };
-    },
-  );
+  app.post<{
+    Params: { id: string };
+    Body: Partial<Record<keyof GuildSettings, unknown>>;
+  }>("/api/guilds/:id/settings", async (req, reply) => {
+    if (!(await requireControl(req, reply, req.params.id))) return;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    // updateSettings validates/clamps every field; unknown keys are ignored.
+    const settings = deps.hub.get(req.params.id).updateSettings(body);
+    return { settings };
+  });
 }

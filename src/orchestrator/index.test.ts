@@ -2,7 +2,9 @@ import { describe, it, expect, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { GuildController } from "./index.js";
 import { Semaphore } from "../util/semaphore.js";
-import type { Requester, TrackMeta } from "../types/index.js";
+import type { AudioInfo, Requester, TrackMeta } from "../types/index.js";
+
+const AUDIO: AudioInfo = { codec: "opus", bitrateKbps: 160, sampleRateHz: 48000 };
 
 const requester: Requester = {
   discordUserId: "1",
@@ -34,33 +36,47 @@ class FakeSession extends EventEmitter {
 
 function makeController(
   overrides: {
-    downloadFn?: (id: string) => Promise<string>;
+    downloadFn?: (id: string) => Promise<{ path: string; audio: AudioInfo | null }>;
     onTrackError?: ReturnType<typeof vi.fn>;
+    now?: () => number;
   } = {},
 ) {
   const session = new FakeSession();
   const cacheStore = new Map<string, string>();
+  const audioStore = new Map<string, AudioInfo | null>();
+  const makeResource = vi.fn((p: string, _item: unknown, opts?: { seekMs?: number }) => ({
+    res: p,
+    seekMs: opts?.seekMs ?? 0,
+  }));
   const deps = {
     youtube: {
-      download: vi.fn(overrides.downloadFn ?? (async (id: string) => `/cache/${id}.webm`)),
+      download: vi.fn(
+        overrides.downloadFn ??
+          (async (id: string) => ({ path: `/cache/${id}.webm`, audio: AUDIO })),
+      ),
     },
     cache: {
       get: (id: string) => cacheStore.get(id) ?? null,
+      getAudio: (id: string) => audioStore.get(id) ?? null,
       has: (id: string) => cacheStore.has(id),
-      register: (id: string, p: string) => cacheStore.set(id, p),
+      register: (id: string, p: string, audio: AudioInfo | null = null) => {
+        cacheStore.set(id, p);
+        audioStore.set(id, audio);
+      },
       pin: vi.fn(),
       unpin: vi.fn(),
     },
     cacheDir: "/cache",
     createSession: vi.fn(async () => session as never),
-    makeResource: (p: string) => ({ res: p }),
+    makeResource,
     prefetchDepth: 1,
     idleTimeoutMs: 300_000,
     downloads: new Semaphore(2),
+    now: overrides.now,
     onTrackError: overrides.onTrackError,
   };
   const ctrl = new GuildController("G1", deps as never);
-  return { ctrl, session, deps };
+  return { ctrl, session, deps, makeResource };
 }
 
 describe("GuildController", () => {
@@ -73,6 +89,14 @@ describe("GuildController", () => {
     expect(deps.youtube.download).toHaveBeenCalledWith("aaaaaaaaaaa", "/cache");
     expect(session.play).toHaveBeenCalledTimes(1);
     expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+  });
+
+  it("attaches the downloaded audio format to snapshot.current", async () => {
+    const { ctrl } = makeController();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ctrl.snapshot().current?.audio).toEqual(AUDIO);
   });
 
   it("advances to the next track on trackEnd, and idles when empty", async () => {
@@ -119,7 +143,7 @@ describe("GuildController", () => {
     const { ctrl, session } = makeController({
       downloadFn: async (id: string) => {
         if (id === badId) throw new Error("gone");
-        return `/cache/${id}.webm`;
+        return { path: `/cache/${id}.webm`, audio: AUDIO };
       },
       onTrackError,
     });
@@ -163,25 +187,36 @@ describe("GuildController playback position + paused", () => {
     const now = () => t;
     const session = new FakeSession();
     const cacheStore = new Map<string, string>();
+    const audioStore = new Map<string, AudioInfo | null>();
+    const makeResource = vi.fn((p: string, _item: unknown, opts?: { seekMs?: number }) => ({
+      res: p,
+      seekMs: opts?.seekMs ?? 0,
+    }));
     const deps = {
-      youtube: { download: vi.fn(async (id: string) => `/cache/${id}.webm`) },
+      youtube: {
+        download: vi.fn(async (id: string) => ({ path: `/cache/${id}.webm`, audio: AUDIO })),
+      },
       cache: {
         get: (id: string) => cacheStore.get(id) ?? null,
+        getAudio: (id: string) => audioStore.get(id) ?? null,
         has: (id: string) => cacheStore.has(id),
-        register: (id: string, p: string) => cacheStore.set(id, p),
+        register: (id: string, p: string, audio: AudioInfo | null = null) => {
+          cacheStore.set(id, p);
+          audioStore.set(id, audio);
+        },
         pin: vi.fn(),
         unpin: vi.fn(),
       },
       cacheDir: "/cache",
       createSession: vi.fn(async () => session as never),
-      makeResource: (p: string) => ({ res: p }),
+      makeResource,
       prefetchDepth: 1,
       idleTimeoutMs: 300_000,
       downloads: new Semaphore(2),
       now,
     };
     const ctrl = new GuildController("G1", deps as never);
-    return { ctrl, session, deps, advanceClock: (ms: number) => (t += ms) };
+    return { ctrl, session, deps, makeResource, advanceClock: (ms: number) => (t += ms) };
   }
 
   it("reports positionMs/durationMs on the current track, accounting for pauses", async () => {
@@ -288,6 +323,68 @@ describe("GuildController playback position + paused", () => {
     expect(session.destroy).not.toHaveBeenCalled();
     expect(session.startIdleTimer).toHaveBeenCalled();
   });
+
+  describe("GuildController.seek", () => {
+    it("re-creates the resource at the offset, re-anchors position, and broadcasts", async () => {
+      const { ctrl, session, makeResource, advanceClock } = makeClockController();
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+      await new Promise((r) => setTimeout(r, 0));
+      makeResource.mockClear();
+      session.play.mockClear();
+      const changed = vi.fn();
+      ctrl.on("changed", changed);
+
+      advanceClock(5000); // 5s into the track before seeking
+      const ok = await ctrl.seek(30_000);
+      expect(ok).toBe(true);
+      // Resource re-created with the seek offset (and current audio options) and replayed.
+      expect(makeResource).toHaveBeenCalledTimes(1);
+      expect(makeResource.mock.calls[0]![2]).toEqual({
+        seekMs: 30_000,
+        audio: { crossfadeSec: 0, normalizeLoudness: false },
+      });
+      expect(session.play).toHaveBeenCalledTimes(1);
+      // Position re-anchored to the seek target.
+      expect(ctrl.snapshot().current?.positionMs).toBe(30_000);
+      expect(ctrl.snapshot().paused).toBe(false);
+      // Broadcast fired so the panel re-renders.
+      expect(changed).toHaveBeenCalled();
+
+      advanceClock(2000); // 2s after the seek
+      expect(ctrl.snapshot().current?.positionMs).toBe(32_000);
+    });
+
+    it("seeking while paused leaves the track paused at the new offset", async () => {
+      const { ctrl, advanceClock } = makeClockController();
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+      await new Promise((r) => setTimeout(r, 0));
+      ctrl.pause();
+      await ctrl.seek(20_000);
+      expect(ctrl.snapshot().paused).toBe(true);
+      expect(ctrl.snapshot().current?.positionMs).toBe(20_000);
+      advanceClock(5000); // time passes while paused -> position stays frozen
+      expect(ctrl.snapshot().current?.positionMs).toBe(20_000);
+    });
+
+    it("returns false when nothing is playing", async () => {
+      const { ctrl, session } = makeClockController();
+      await ctrl.ensureConnected("C1");
+      session.play.mockClear();
+      expect(await ctrl.seek(1000)).toBe(false);
+      expect(session.play).not.toHaveBeenCalled();
+    });
+
+    it("rejects an out-of-range position with RangeError", async () => {
+      const { ctrl } = makeClockController();
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester); // durationSec 100 -> 100000ms
+      await new Promise((r) => setTimeout(r, 0));
+      await expect(ctrl.seek(-1)).rejects.toBeInstanceOf(RangeError);
+      await expect(ctrl.seek(100_001)).rejects.toBeInstanceOf(RangeError);
+    });
+  });
 });
 
 describe("GuildController.moveTo", () => {
@@ -301,12 +398,19 @@ describe("GuildController.moveTo", () => {
     let sessionIdx = 0;
 
     const cacheStore = new Map<string, string>();
+    const audioStore = new Map<string, AudioInfo | null>();
     const deps = {
-      youtube: { download: vi.fn(async (id: string) => `/cache/${id}.webm`) },
+      youtube: {
+        download: vi.fn(async (id: string) => ({ path: `/cache/${id}.webm`, audio: AUDIO })),
+      },
       cache: {
         get: (id: string) => cacheStore.get(id) ?? null,
+        getAudio: (id: string) => audioStore.get(id) ?? null,
         has: (id: string) => cacheStore.has(id),
-        register: (id: string, p: string) => cacheStore.set(id, p),
+        register: (id: string, p: string, audio: AudioInfo | null = null) => {
+          cacheStore.set(id, p);
+          audioStore.set(id, audio);
+        },
         pin: vi.fn(),
         unpin: vi.fn(),
       },
@@ -345,12 +449,19 @@ describe("GuildController.moveTo", () => {
     sessionC2.channelId = "C2";
 
     const cacheStore = new Map<string, string>();
+    const audioStore = new Map<string, AudioInfo | null>();
     const deps = {
-      youtube: { download: vi.fn(async (id: string) => `/cache/${id}.webm`) },
+      youtube: {
+        download: vi.fn(async (id: string) => ({ path: `/cache/${id}.webm`, audio: AUDIO })),
+      },
       cache: {
         get: (id: string) => cacheStore.get(id) ?? null,
+        getAudio: (id: string) => audioStore.get(id) ?? null,
         has: (id: string) => cacheStore.has(id),
-        register: (id: string, p: string) => cacheStore.set(id, p),
+        register: (id: string, p: string, audio: AudioInfo | null = null) => {
+          cacheStore.set(id, p);
+          audioStore.set(id, audio);
+        },
         pin: vi.fn(),
         unpin: vi.fn(),
       },
@@ -418,12 +529,19 @@ describe("GuildController idle timeout (per-guild, runtime-adjustable)", () => {
     // idleTimeoutMs to it so freshly-created sessions honor the runtime value.
     const sessions: FakeSession[] = [];
     const cacheStore = new Map<string, string>();
+    const audioStore = new Map<string, AudioInfo | null>();
     const deps = {
-      youtube: { download: vi.fn(async (id: string) => `/cache/${id}.webm`) },
+      youtube: {
+        download: vi.fn(async (id: string) => ({ path: `/cache/${id}.webm`, audio: AUDIO })),
+      },
       cache: {
         get: (id: string) => cacheStore.get(id) ?? null,
+        getAudio: (id: string) => audioStore.get(id) ?? null,
         has: (id: string) => cacheStore.has(id),
-        register: (id: string, p: string) => cacheStore.set(id, p),
+        register: (id: string, p: string, audio: AudioInfo | null = null) => {
+          cacheStore.set(id, p);
+          audioStore.set(id, audio);
+        },
         pin: vi.fn(),
         unpin: vi.fn(),
       },
@@ -445,5 +563,87 @@ describe("GuildController idle timeout (per-guild, runtime-adjustable)", () => {
     // The factory was invoked with the updated timeout (120s = 120000ms).
     const lastCall = deps.createSession.mock.calls.at(-1)!;
     expect(lastCall[1]).toBe(120_000);
+  });
+});
+
+describe("GuildController settings", () => {
+  it("defaults audio settings and validates patches via updateSettings", () => {
+    const { ctrl } = makeController();
+    expect(ctrl.settings.repeat).toBe("off");
+    expect(ctrl.settings.crossfadeSec).toBe(0);
+    expect(ctrl.settings.normalizeLoudness).toBe(false);
+
+    const next = ctrl.updateSettings({ repeat: "all", crossfadeSec: 999, normalizeLoudness: true });
+    expect(next.repeat).toBe("all");
+    expect(next.crossfadeSec).toBe(12); // clamped to CROSSFADE_MAX_SEC
+    expect(next.normalizeLoudness).toBe(true);
+    expect(ctrl.settings).toEqual(next);
+  });
+
+  it("notifies onSettingsChange and emits 'changed' on update", () => {
+    const { ctrl } = makeController();
+    const onSettingsChange = vi.fn();
+    (
+      ctrl as unknown as { deps: { onSettingsChange?: typeof onSettingsChange } }
+    ).deps.onSettingsChange = onSettingsChange;
+    const changed = vi.fn();
+    ctrl.on("changed", changed);
+    ctrl.updateSettings({ repeat: "one" });
+    expect(onSettingsChange).toHaveBeenCalledWith(expect.objectContaining({ repeat: "one" }));
+    expect(changed).toHaveBeenCalled();
+  });
+
+  it("passes crossfade/normalize audio options to makeResource", async () => {
+    const { ctrl, makeResource } = makeController();
+    ctrl.updateSettings({ crossfadeSec: 4, normalizeLoudness: true });
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    const opts = makeResource.mock.calls[0]![2] as { audio?: unknown };
+    expect(opts.audio).toEqual({ crossfadeSec: 4, normalizeLoudness: true });
+  });
+
+  it("repeat=one replays the current track on trackEnd (no advance)", async () => {
+    const { ctrl, session } = makeController();
+    ctrl.updateSettings({ repeat: "one" });
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+
+    session.emit("trackEnd");
+    await new Promise((r) => setTimeout(r, 0));
+    // Still the same current track; the next one stays queued.
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+    expect(ctrl.snapshot().upcoming.map((i) => i.meta.videoId)).toEqual(["bbbbbbbbbbb"]);
+    expect(session.play).toHaveBeenCalledTimes(2); // initial + replay
+  });
+
+  it("repeat=all re-cycles the set when the queue empties", async () => {
+    const { ctrl, session } = makeController();
+    ctrl.updateSettings({ repeat: "all" });
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+
+    session.emit("trackEnd"); // a ends -> b
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("bbbbbbbbbbb");
+
+    session.emit("trackEnd"); // b ends -> queue empty -> requeue history -> a plays again
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+    expect(session.startIdleTimer).not.toHaveBeenCalled();
+  });
+
+  it("snapshot carries the audio settings", () => {
+    const { ctrl } = makeController();
+    ctrl.updateSettings({ crossfadeSec: 6, normalizeLoudness: true, repeat: "all" });
+    const snap = ctrl.snapshot();
+    expect(snap.crossfadeSec).toBe(6);
+    expect(snap.normalizeLoudness).toBe(true);
+    expect(snap.repeat).toBe("all");
   });
 });

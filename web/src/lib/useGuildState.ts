@@ -1,4 +1,4 @@
-import { useEffect, useReducer } from "react";
+import { useCallback, useEffect, useReducer } from "react";
 import type { Snapshot } from "../types.js";
 
 export interface WsState {
@@ -8,8 +8,17 @@ export interface WsState {
   // moving progress bar between WS updates.
   receivedAt: number;
   lastError?: { title: string; reason: string; seq: number } | null;
+  // Push a freshly-fetched snapshot into local state. Used when the WS isn't live
+  // (so it won't deliver the update) but a REST mutation changed the queue.
+  refresh: (snapshot: Snapshot) => void;
 }
-export const initialWsState: WsState = { snapshot: null, status: "connecting", receivedAt: 0, lastError: null };
+export const initialWsState: WsState = {
+  snapshot: null,
+  status: "connecting",
+  receivedAt: 0,
+  lastError: null,
+  refresh: () => {},
+};
 
 export function applyWsMessage(prev: WsState, raw: string): WsState {
   let msg: { type?: string; state?: Snapshot; title?: string; reason?: string };
@@ -30,12 +39,21 @@ export function applyWsMessage(prev: WsState, raw: string): WsState {
   return prev;
 }
 
+type WsAction = { raw: string } | { reset: true } | { closed: true } | { refresh: Snapshot };
+
 export function useGuildState(guildId: string | null): WsState {
   const [state, dispatch] = useReducer(
-    (s: WsState, a: { raw: string } | { reset: true } | { closed: true }): WsState =>
-      "reset" in a ? initialWsState : "closed" in a ? { ...s, status: s.status === "forbidden" ? s.status : "closed" } : applyWsMessage(s, a.raw),
+    (s: WsState, a: WsAction): WsState =>
+      "reset" in a
+        ? initialWsState
+        : "closed" in a
+          ? { ...s, status: s.status === "forbidden" ? s.status : "closed" }
+          : "refresh" in a
+            ? { ...s, snapshot: a.refresh, receivedAt: Date.now() }
+            : applyWsMessage(s, a.raw),
     initialWsState,
   );
+  const refresh = useCallback((snapshot: Snapshot) => dispatch({ refresh: snapshot }), []);
   useEffect(() => {
     if (!guildId) return;
     if (typeof WebSocket === "undefined") return;
@@ -47,5 +65,5 @@ export function useGuildState(guildId: string | null): WsState {
     ws.addEventListener("close", () => dispatch({ closed: true }));
     return () => ws.close();
   }, [guildId]);
-  return state;
+  return { ...state, refresh };
 }

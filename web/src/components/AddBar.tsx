@@ -38,7 +38,12 @@ export function AddBar({ onPlay, onPick, busy }: {
           {pending ? (<><span className="spinner" aria-hidden /> Resolving…</>) : "Queue it"}
         </button>
       </form>
-      {candidates && (
+      {candidates && candidates.length === 0 && (
+        <p className="mt-4 text-sm" style={{ color: "var(--color-ink-faint)" }}>
+          No matches — try a different search.
+        </p>
+      )}
+      {candidates && candidates.length > 0 && (
         <ul className="mt-4 flex flex-col gap-1">
           <li className="eyebrow px-1 pb-1">Pick the exact track</li>
           {candidates.map((c) => (

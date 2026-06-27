@@ -6,7 +6,7 @@ import { join } from "node:path";
 const runMock = vi.hoisted(() => vi.fn());
 vi.mock("./ytdlp.js", () => ({ runYtDlp: runMock }));
 
-import { YouTubeService } from "./index.js";
+import { YouTubeService, parseAudioInfo } from "./index.js";
 import { YtErrorKind } from "./errors.js";
 import { loadMediaConfig } from "../config.js";
 
@@ -126,19 +126,34 @@ describe("YouTubeService.search", () => {
 describe("YouTubeService.download", () => {
   beforeEach(() => runMock.mockReset());
 
-  it("returns the produced file path", async () => {
+  it("returns the produced file path and parsed audio format", async () => {
     const dir = await mkdtemp(join(tmpdir(), "yt-"));
     await writeFile(join(dir, "dQw4w9WgXcQ.webm"), "fakeaudio");
-    runMock.mockResolvedValue(ok(""));
-    const path = await new YouTubeService(cfg).download("dQw4w9WgXcQ", dir);
-    expect(path).toBe(join(dir, "dQw4w9WgXcQ.webm"));
+    runMock.mockResolvedValue(ok("AUDIOFMT::opus|160|165|48000\n"));
+    const res = await new YouTubeService(cfg).download("dQw4w9WgXcQ", dir);
+    expect(res.path).toBe(join(dir, "dQw4w9WgXcQ.webm"));
+    expect(res.audio).toEqual({ codec: "opus", bitrateKbps: 160, sampleRateHz: 48000 });
     const args = runMock.mock.calls[0]![0] as string[];
     expect(args).toContain("-f");
     expect(args).toContain("bestaudio[acodec=opus]/bestaudio/best");
     expect(args).toContain("--no-playlist");
     expect(args).toContain("--");
+    // requests the real format via a post-download --print
+    expect(args).toContain("--print");
+    const printIdx = args.indexOf("--print");
+    expect(args[printIdx + 1]).toContain("after_move:");
+    expect(args[printIdx + 1]).toContain("%(acodec)s");
     expect(args[args.length - 1]).toBe("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
     expect(args).not.toContain("--sponsorblock-remove");
+  });
+
+  it("returns null audio when yt-dlp prints no usable format", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yt-"));
+    await writeFile(join(dir, "dQw4w9WgXcQ.webm"), "fakeaudio");
+    runMock.mockResolvedValue(ok(""));
+    const res = await new YouTubeService(cfg).download("dQw4w9WgXcQ", dir);
+    expect(res.path).toBe(join(dir, "dQw4w9WgXcQ.webm"));
+    expect(res.audio).toBeNull();
   });
 
   it("includes sponsorblock args when SPONSORBLOCK_REMOVE is set", async () => {
@@ -149,8 +164,8 @@ describe("YouTubeService.download", () => {
       MAX_TRACK_DURATION_SEC: "3600",
       SPONSORBLOCK_REMOVE: "sponsor,music_offtopic",
     });
-    const path = await new YouTubeService(sbCfg).download("dQw4w9WgXcQ", dir);
-    expect(path).toBe(join(dir, "dQw4w9WgXcQ.opus"));
+    const res = await new YouTubeService(sbCfg).download("dQw4w9WgXcQ", dir);
+    expect(res.path).toBe(join(dir, "dQw4w9WgXcQ.opus"));
     const args = runMock.mock.calls[0]![0] as string[];
     expect(args).toContain("-x");
     expect(args).toContain("--audio-format");
@@ -164,5 +179,49 @@ describe("YouTubeService.download", () => {
     const dir = await mkdtemp(join(tmpdir(), "yt-"));
     runMock.mockResolvedValue(ok(""));
     await expect(new YouTubeService(cfg).download("dQw4w9WgXcQ", dir)).rejects.toThrow();
+  });
+});
+
+describe("parseAudioInfo", () => {
+  it("parses codec, abr (preferred bitrate), and asr", () => {
+    expect(parseAudioInfo("AUDIOFMT::opus|160|200|48000")).toEqual({
+      codec: "opus",
+      bitrateKbps: 160,
+      sampleRateHz: 48000,
+    });
+  });
+
+  it("falls back to tbr when abr is NA", () => {
+    expect(parseAudioInfo("AUDIOFMT::aac|NA|129.5|44100")).toEqual({
+      codec: "aac",
+      bitrateKbps: 130, // rounded tbr
+      sampleRateHz: 44100,
+    });
+  });
+
+  it("locates the marker line amid other stdout", () => {
+    const out = "[download] 100%\nsome noise\nAUDIOFMT::mp4a.40.2|128|130|44100\n";
+    expect(parseAudioInfo(out)).toEqual({
+      codec: "mp4a.40.2",
+      bitrateKbps: 128,
+      sampleRateHz: 44100,
+    });
+  });
+
+  it("returns null when codec is missing/NA", () => {
+    expect(parseAudioInfo("AUDIOFMT::NA|NA|NA|NA")).toBeNull();
+    expect(parseAudioInfo("AUDIOFMT::none|1|1|1")).toBeNull();
+  });
+
+  it("returns null when the marker is absent", () => {
+    expect(parseAudioInfo("nothing here\n[download] done")).toBeNull();
+  });
+
+  it("zeroes numeric fields that are unparseable but keeps the codec", () => {
+    expect(parseAudioInfo("AUDIOFMT::opus|NA|NA|NA")).toEqual({
+      codec: "opus",
+      bitrateKbps: 0,
+      sampleRateHz: 0,
+    });
   });
 });

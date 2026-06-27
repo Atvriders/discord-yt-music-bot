@@ -2,11 +2,14 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Logger } from "pino";
 import type { QueueItem } from "../types/index.js";
+import type { GuildSettings } from "./settings.js";
 
 export interface GuildSnap {
   guildId: string;
   voiceChannelId: string;
   items: QueueItem[];
+  /** Per-guild settings, persisted so they survive a restart (optional for back-compat). */
+  settings?: GuildSettings;
 }
 export interface SnapshotFile {
   version: 1;
@@ -18,6 +21,8 @@ interface ControllerLike {
   connectedChannelId: string | null;
   snapshot(): { current: QueueItem | null; upcoming: QueueItem[] };
   restore(channelId: string, items: QueueItem[]): Promise<void>;
+  readonly settings?: GuildSettings;
+  updateSettings?(patch: Partial<Record<keyof GuildSettings, unknown>>): GuildSettings;
 }
 interface HubLike {
   guildIds(): string[];
@@ -35,7 +40,7 @@ export function collectSnapshot(hub: HubLike, now: number): SnapshotFile {
     const snap = c.snapshot();
     const items = [...(snap.current ? [snap.current] : []), ...snap.upcoming];
     if (items.length === 0) continue;
-    guilds.push({ guildId, voiceChannelId: channelId, items });
+    guilds.push({ guildId, voiceChannelId: channelId, items, settings: c.settings });
   }
   return { version: 1, savedAt: now, guilds };
 }
@@ -64,7 +69,9 @@ export async function restoreSnapshot(
 ): Promise<void> {
   for (const g of file.guilds) {
     try {
-      await hub.get(g.guildId).restore(g.voiceChannelId, g.items);
+      const controller = hub.get(g.guildId);
+      if (g.settings) controller.updateSettings?.(g.settings);
+      await controller.restore(g.voiceChannelId, g.items);
       log.info({ guildId: g.guildId, tracks: g.items.length }, "restored session");
     } catch (err) {
       log.error({ guildId: g.guildId, err }, "failed to restore session");

@@ -101,6 +101,30 @@ describe("GuildQueue", () => {
     expect(q.snapshot().upcoming).toEqual([]);
   });
 
+  it("requeueHistory cycles played history + current back to the end of upcoming", async () => {
+    // historyMax is 2 in this helper, so use two played tracks to stay within it.
+    const q = newQueue();
+    await q.add(meta("aaaaaaaaaaa"), requester); // id1
+    await q.add(meta("bbbbbbbbbbb"), requester); // id2
+    await q.advance(); // current = id1
+    await q.advance(); // current = id2, history = [id1]
+    expect(q.snapshot().upcoming).toEqual([]);
+
+    const n = await q.requeueHistory();
+    expect(n).toBe(2); // history (id1) + current (id2)
+    expect(q.current).toBeNull();
+    expect(q.snapshot().upcoming.map((i) => i.id)).toEqual(["id1", "id2"]);
+    expect(q.snapshot().history).toEqual([]);
+  });
+
+  it("requeueHistory is a no-op when nothing has played", async () => {
+    const q = newQueue();
+    await q.add(meta("aaaaaaaaaaa"), requester);
+    const n = await q.requeueHistory();
+    expect(n).toBe(0);
+    expect(q.snapshot().upcoming.map((i) => i.id)).toEqual(["id1"]);
+  });
+
   it("serializes concurrent adds without losing or duplicating items", async () => {
     const q = newQueue();
     await Promise.all(

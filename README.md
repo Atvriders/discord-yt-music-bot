@@ -201,7 +201,7 @@ What it does:
 - **Discord login** — OAuth2; only servers you actually belong to appear, and control is gated on membership/admin.
 - **Remembers your last server** — defaults back to the server you last used.
 - **Auto-selects your voice channel** — if you're already in a voice channel, the picker defaults to it (your manual choice still wins).
-- **Live now-playing with a moving progress bar** — elapsed/duration ticks in real time and freezes when paused; updates instantly on play/skip/pause from either the panel or Discord. (Display-only — there is no click-to-seek.)
+- **Live now-playing with an interactive progress bar** — elapsed/duration ticks in real time and freezes when paused; updates instantly on play/skip/pause from either the panel or Discord. Click anywhere on the bar (or drag its handle) to scrub — playback jumps to that position. Seeking transcodes from the offset (ffmpeg `-ss`), so there is a brief audible gap (typically under a second) while the new stream spins up.
 - **Instant submit** — paste a link and press Enter; the box clears and shows "Resolving…" immediately while extraction runs in the background, then "Queued: …".
 - **Queue management** — see pending tracks + requesters, remove (✕), and reorder (▲/▼), all reflected live.
 - **Idle-timeout setting** — choose how long the bot stays in the voice channel after playback ends (1/5/10/15/30 minutes, or "Never"), per server, from a dropdown. Defaults to 5 minutes and overrides `IDLE_TIMEOUT_SEC` at runtime; changes apply immediately (a running idle timer restarts).
@@ -214,11 +214,13 @@ Requires a real Discord app, a valid `SESSION_SECRET`, and a TLS reverse proxy.
 - [ ] `GET /auth/login` → 302 to `discord.com/oauth2/authorize`, sets the `sid` cookie; after consent you land on `/` and `GET /api/me` returns your `id`/`username`/`avatarUrl`
 - [ ] The server selector lists only servers you belong to and defaults to your last-used one
 - [ ] With the bot playing, **Now Playing** updates live and the progress bar advances; pausing freezes it
+- [ ] Click anywhere on the progress bar (or drag its handle) to scrub — playback jumps to that position (a brief audible gap is expected while ffmpeg re-opens the cached file at the new offset)
 - [ ] Paste a URL → box clears + "Resolving…" → "Queued: …"; a search query opens the picker
 - [ ] The voice-channel picker defaults to the channel you're in; **Queue** shows tracks + requesters; ✕ removes; ▲/▼ reorder — all live
 - [ ] The **Leave channel after tracks end** dropdown reflects the current per-guild setting (default 5 min); changing it persists for that guild and takes effect immediately; `GET /api/guilds/:id/settings` returns `{ "idleTimeoutSec": … }` and `POST` with `{ "idleTimeoutSec": 0..3600 }` applies it (out-of-range → `400`)
 - [ ] A server you can't control shows **No access** with controls disabled
 - [ ] `POST /api/guilds/:id/skip` with a valid session returns `{"ok":true}`; without a session, `401`; `GET /api/guilds/:id/state` returns `403` for a guild you're not in
+- [ ] `POST /api/guilds/:id/seek` with `{"positionMs":<n>}` scrubs the current track (validates `0 <= positionMs <= durationMs`; `409` when nothing is playing, `400` out of range)
 - [ ] `POST /auth/logout` destroys the session; `GET /api/me` then returns `401`
 
 ---

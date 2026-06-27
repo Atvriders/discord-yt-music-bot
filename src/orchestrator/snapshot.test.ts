@@ -18,7 +18,13 @@ const requester = {
   avatarUrl: "a",
   source: "discord" as const,
 };
-const item = (id: string) => ({ id: `i-${id}`, meta: meta(id), requester, addedAt: 0 });
+const item = (id: string) => ({
+  id: `i-${id}`,
+  meta: meta(id),
+  requester,
+  addedAt: 0,
+  audio: null,
+});
 
 function fakeController(channelId: string | null, current: unknown, upcoming: unknown[]) {
   return {
@@ -44,6 +50,43 @@ describe("snapshot", () => {
       "aaaaaaaaaaa",
       "bbbbbbbbbbb",
     ]);
+  });
+
+  it("persists and restores per-guild settings", async () => {
+    const settings = {
+      idleTimeoutSec: 120,
+      crossfadeSec: 4,
+      normalizeLoudness: true,
+      repeat: "all" as const,
+    };
+    const collectHub = {
+      guildIds: () => ["G1"],
+      get: () => ({
+        connectedChannelId: "C1",
+        snapshot: () => ({ current: item("aaaaaaaaaaa"), upcoming: [] }),
+        restore: vi.fn(async () => {}),
+        settings,
+      }),
+    };
+    const file = collectSnapshot(collectHub as never, 1);
+    expect(file.guilds[0]!.settings).toEqual(settings);
+
+    const updateSettings = vi.fn();
+    const c = {
+      connectedChannelId: "C1",
+      snapshot: () => ({ current: null, upcoming: [] }),
+      restore: vi.fn(async () => {}),
+      updateSettings,
+    };
+    await restoreSnapshot(
+      file as never,
+      { get: () => c } as never,
+      {
+        info: vi.fn(),
+        error: vi.fn(),
+      } as never,
+    );
+    expect(updateSettings).toHaveBeenCalledWith(settings);
   });
 
   it("round-trips through disk and ignores a missing file", async () => {

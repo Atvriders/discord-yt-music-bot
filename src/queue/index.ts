@@ -45,7 +45,13 @@ export class GuildQueue extends EventEmitter {
 
   add(meta: TrackMeta, requester: Requester): Promise<QueueItem> {
     return this.mutex.runExclusive(() => {
-      const item: QueueItem = { id: this.idFactory(), meta, requester, addedAt: this.now() };
+      const item: QueueItem = {
+        id: this.idFactory(),
+        meta,
+        requester,
+        addedAt: this.now(),
+        audio: null,
+      };
       this._upcoming.push(item);
       this.emitChange();
       return item;
@@ -85,6 +91,24 @@ export class GuildQueue extends EventEmitter {
       if (item) this._upcoming.splice(clamped, 0, item);
       this.emitChange();
       return true;
+    });
+  }
+
+  /**
+   * Repeat-all support: move played history (and the current track, if any) back to
+   * the end of the upcoming list so the set replays in its original order. History is
+   * cleared. No-op when there is nothing to requeue. Returns the number requeued.
+   */
+  requeueHistory(): Promise<number> {
+    return this.mutex.runExclusive(() => {
+      const recycled = [...this._history];
+      if (this._current) recycled.push(this._current);
+      if (recycled.length === 0) return 0;
+      this._history = [];
+      this._current = null;
+      this._upcoming.push(...recycled);
+      this.emitChange();
+      return recycled.length;
     });
   }
 

@@ -23,11 +23,28 @@ function build(sessionUserId: string | null, depOverrides: Record<string, unknow
     pause: vi.fn(),
     resume: vi.fn(),
     stop: vi.fn(async () => {}),
+    seek: vi.fn(async () => true),
     remove: vi.fn(async () => true),
     reorder: vi.fn(async () => true),
-    snapshot: vi.fn(() => ({ current: null, upcoming: [], history: [], idleTimeoutSec: 300 })),
-    getIdleTimeoutSec: vi.fn(() => 300),
-    setIdleTimeoutSec: vi.fn(),
+    snapshot: vi.fn(() => ({
+      current: null,
+      upcoming: [],
+      history: [],
+      idleTimeoutSec: 300,
+    })) as ReturnType<typeof vi.fn>,
+    settings: {
+      idleTimeoutSec: 300,
+      crossfadeSec: 0,
+      normalizeLoudness: false,
+      repeat: "off" as const,
+    },
+    updateSettings: vi.fn((patch: Record<string, unknown>) => ({
+      idleTimeoutSec: 300,
+      crossfadeSec: 0,
+      normalizeLoudness: false,
+      repeat: "off",
+      ...patch,
+    })),
   };
   const guild = {
     name: "Test Guild",
@@ -137,6 +154,44 @@ describe("REST actions", () => {
     expect(controller.moveTo).toHaveBeenCalledWith("C2");
     expect(controller.ensureConnected).not.toHaveBeenCalled();
   });
+  it("rejects 400 no_voice_channel when no channel is given and the bot is disconnected", async () => {
+    // h.controller.connectedChannelId defaults to null, no voiceChannelId in payload.
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/play`,
+      payload: { input: "https://youtu.be/aaaaaaaaaaa" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("no_voice_channel");
+    expect(h.controller.enqueue).not.toHaveBeenCalled();
+  });
+  it("enqueues without a voiceChannelId when the bot is already connected", async () => {
+    const { app, controller } = build(USER);
+    controller.connectedChannelId = "C1";
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/play`,
+      payload: { input: "https://youtu.be/aaaaaaaaaaa" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(controller.enqueue).toHaveBeenCalled();
+    expect(controller.ensureConnected).not.toHaveBeenCalled();
+  });
+  it("non-admin requesting a different channel queues with moveSuppressed (no move)", async () => {
+    const { app, controller } = build(USER); // not in adminIds
+    controller.connectedChannelId = "C1";
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/play`,
+      payload: { input: "https://youtu.be/aaaaaaaaaaa", voiceChannelId: "C2" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(controller.moveTo).not.toHaveBeenCalled();
+    expect(controller.ensureConnected).not.toHaveBeenCalled();
+    expect(controller.enqueue).toHaveBeenCalled();
+    expect(res.json().queued).toMatchObject({ id: "i1" });
+    expect(res.json().moveSuppressed).toEqual({ requested: "C2", actual: "C1" });
+  });
   it("pick rejects a malformed videoId with 400 and no resolve", async () => {
     const res = await h.app.inject({
       method: "POST",
@@ -156,6 +211,55 @@ describe("REST actions", () => {
     expect(h.controller.resume).toHaveBeenCalled();
     expect(h.controller.stop).toHaveBeenCalled();
   });
+  it("seek validates the position and calls the controller (rounded)", async () => {
+    h.controller.snapshot.mockReturnValue({
+      current: { meta: { durationSec: 120 } },
+      upcoming: [],
+      history: [],
+      idleTimeoutSec: 300,
+    });
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/seek`,
+      payload: { positionMs: 30000.7 },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().ok).toBe(true);
+    expect(h.controller.seek).toHaveBeenCalledWith(30001);
+  });
+  it("seek rejects a negative position with 400 and no controller call", async () => {
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/seek`,
+      payload: { positionMs: -5 },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(h.controller.seek).not.toHaveBeenCalled();
+  });
+  it("seek beyond the track duration is rejected with 400", async () => {
+    h.controller.snapshot.mockReturnValue({
+      current: { meta: { durationSec: 10 } },
+      upcoming: [],
+      history: [],
+      idleTimeoutSec: 300,
+    });
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/seek`,
+      payload: { positionMs: 999999 },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(h.controller.seek).not.toHaveBeenCalled();
+  });
+  it("seek with nothing playing returns 409", async () => {
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/seek`,
+      payload: { positionMs: 0 },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(h.controller.seek).not.toHaveBeenCalled();
+  });
   it("queue/remove and reorder use the itemId", async () => {
     await h.app.inject({
       method: "POST",
@@ -170,11 +274,15 @@ describe("REST actions", () => {
     });
     expect(h.controller.reorder).toHaveBeenCalledWith("i9", 0);
   });
-  it("GET /api/guilds/:id/settings returns the current idle timeout", async () => {
+  it("GET /api/guilds/:id/settings returns the controller's settings", async () => {
     const res = await h.app.inject({ method: "GET", url: `/api/guilds/${GUILD}/settings` });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ idleTimeoutSec: 300 });
-    expect(h.controller.getIdleTimeoutSec).toHaveBeenCalled();
+    expect(res.json().settings).toMatchObject({
+      idleTimeoutSec: 300,
+      crossfadeSec: 0,
+      normalizeLoudness: false,
+      repeat: "off",
+    });
   });
 
   it("GET /api/guilds/:id/settings is gated by control auth (401 when not logged in)", async () => {
@@ -183,53 +291,44 @@ describe("REST actions", () => {
     expect(res.statusCode).toBe(401);
   });
 
-  it("POST /api/guilds/:id/settings applies a valid idle timeout", async () => {
+  it("POST /api/guilds/:id/settings forwards the patch to updateSettings and echoes the result", async () => {
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/settings`,
+      payload: { crossfadeSec: 5, repeat: "all", normalizeLoudness: true },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(h.controller.updateSettings).toHaveBeenCalledWith({
+      crossfadeSec: 5,
+      repeat: "all",
+      normalizeLoudness: true,
+    });
+    expect(res.json().settings).toMatchObject({
+      crossfadeSec: 5,
+      repeat: "all",
+      normalizeLoudness: true,
+    });
+  });
+
+  it("POST /api/guilds/:id/settings forwards an idle-timeout patch (clamping is the controller's job)", async () => {
     const res = await h.app.inject({
       method: "POST",
       url: `/api/guilds/${GUILD}/settings`,
       payload: { idleTimeoutSec: 600 },
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ ok: true, idleTimeoutSec: 600 });
-    expect(h.controller.setIdleTimeoutSec).toHaveBeenCalledWith(600);
+    expect(h.controller.updateSettings).toHaveBeenCalledWith({ idleTimeoutSec: 600 });
+    expect(res.json().settings).toMatchObject({ idleTimeoutSec: 600 });
   });
 
-  it("POST /api/guilds/:id/settings accepts the boundary values 0 and 3600", async () => {
-    for (const v of [0, 3600]) {
-      const res = await h.app.inject({
-        method: "POST",
-        url: `/api/guilds/${GUILD}/settings`,
-        payload: { idleTimeoutSec: v },
-      });
-      expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ ok: true, idleTimeoutSec: v });
-    }
-  });
-
-  it("POST /api/guilds/:id/settings rejects out-of-range values with 400 (no controller call)", async () => {
-    for (const v of [-1, 3601, 100000]) {
-      const res = await h.app.inject({
-        method: "POST",
-        url: `/api/guilds/${GUILD}/settings`,
-        payload: { idleTimeoutSec: v },
-      });
-      expect(res.statusCode).toBe(400);
-      expect(res.json()).toEqual({ error: "invalid idleTimeoutSec" });
-    }
-    expect(h.controller.setIdleTimeoutSec).not.toHaveBeenCalled();
-  });
-
-  it("POST /api/guilds/:id/settings rejects non-integer / missing values with 400", async () => {
-    for (const payload of [{ idleTimeoutSec: 1.5 }, { idleTimeoutSec: "60" }, {}]) {
-      const res = await h.app.inject({
-        method: "POST",
-        url: `/api/guilds/${GUILD}/settings`,
-        payload,
-      });
-      expect(res.statusCode).toBe(400);
-      expect(res.json()).toEqual({ error: "invalid idleTimeoutSec" });
-    }
-    expect(h.controller.setIdleTimeoutSec).not.toHaveBeenCalled();
+  it("POST /api/guilds/:id/settings is gated by control auth (401 when not logged in)", async () => {
+    const { app } = build(null);
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/settings`,
+      payload: { crossfadeSec: 2 },
+    });
+    expect(res.statusCode).toBe(401);
   });
 
   it("POST /api/guilds/:id/settings is gated by control auth (403 for a non-member)", async () => {

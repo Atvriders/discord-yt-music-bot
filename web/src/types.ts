@@ -5,9 +5,17 @@ export interface TrackMeta {
 export interface Requester {
   discordUserId: string; displayName: string; avatarUrl: string; source: "discord" | "web";
 }
-export interface QueueItem { id: string; meta: TrackMeta; requester: Requester; addedAt: number; }
+export interface AudioInfo { codec: string; bitrateKbps: number; sampleRateHz: number; }
+export interface QueueItem { id: string; meta: TrackMeta; requester: Requester; addedAt: number; audio: AudioInfo | null; }
 // The now-playing item carries elapsed-position info for the (display-only) progress bar.
 export type CurrentItem = QueueItem & { positionMs: number; durationMs: number };
-export interface Snapshot { current: CurrentItem | null; upcoming: QueueItem[]; history: QueueItem[]; paused: boolean; idleTimeoutSec: number; }
+export type RepeatMode = "off" | "one" | "all";
+export interface GuildSettings {
+  idleTimeoutSec: number;
+  crossfadeSec: number;
+  normalizeLoudness: boolean;
+  repeat: RepeatMode;
+}
+export interface Snapshot extends GuildSettings { current: CurrentItem | null; upcoming: QueueItem[]; history: QueueItem[]; paused: boolean; }
 export interface Me { user: { id: string; username: string; avatarUrl: string }; guilds: { id: string; name: string }[]; }
 export interface VoiceChannel { id: string; name: string; }

@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { rmSync, statSync } from "node:fs";
+import type { AudioInfo } from "../types/index.js";
 
 interface CacheEntry {
   videoId: string;
@@ -7,6 +8,7 @@ interface CacheEntry {
   sizeBytes: number;
   lastUsed: number;
   pinned: boolean;
+  audio: AudioInfo | null;
 }
 
 export class AudioCache {
@@ -33,7 +35,12 @@ export class AudioCache {
     return e.filePath;
   }
 
-  register(videoId: string, filePath: string): void {
+  /** Real audio format captured at download time, or null if unknown / not cached. */
+  getAudio(videoId: string): AudioInfo | null {
+    return this.entries.get(videoId)?.audio ?? null;
+  }
+
+  register(videoId: string, filePath: string, audio: AudioInfo | null = null): void {
     const { size } = statSyncSafe(filePath);
     const oldEntry = this.entries.get(videoId);
     // Evict to make room for the new entry
@@ -59,6 +66,7 @@ export class AudioCache {
       sizeBytes: size,
       lastUsed: ++this.clock,
       pinned: oldEntry?.pinned ?? false,
+      audio: audio ?? oldEntry?.audio ?? null,
     });
   }
 

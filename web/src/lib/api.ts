@@ -1,4 +1,4 @@
-import type { Me, Snapshot, TrackMeta, VoiceChannel } from "../types.js";
+import type { GuildSettings, Me, Snapshot, TrackMeta, VoiceChannel } from "../types.js";
 
 export class ApiError extends Error {
   constructor(public readonly status: number, message: string) { super(message); this.name = "ApiError"; }
@@ -11,6 +11,9 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
     try { detail = ((await res.json()) as { error?: string }).error ?? detail; } catch { /* ignore */ }
     throw new ApiError(res.status, detail);
   }
+  // Some endpoints (e.g. logout) return an empty 204 body; calling res.json() on
+  // those throws. Short-circuit before parsing.
+  if (res.status === 204 || res.headers.get("content-length") === "0") return undefined as T;
   return (await res.json()) as T;
 }
 function post<T>(url: string, body?: unknown): Promise<T> {
@@ -27,6 +30,13 @@ function post<T>(url: string, body?: unknown): Promise<T> {
 
 export type ControlAction = "skip" | "pause" | "resume" | "stop";
 
+// A successful enqueue. `moveSuppressed` is set when a non-admin asked to move the
+// bot to a different channel: the track is still queued, but the bot stays put.
+export interface EnqueueResult {
+  queued?: { id: string; title: string };
+  moveSuppressed?: { requested: string; actual: string | null };
+}
+
 export const api = {
   me: () => req<Me>("/api/me"),
   state: (g: string) => req<Snapshot>(`/api/guilds/${g}/state`),
@@ -35,14 +45,15 @@ export const api = {
       `/api/guilds/${g}/voice-channels`,
     ),
   play: (g: string, input: string, voiceChannelId?: string) =>
-    post<{ queued?: { id: string; title: string }; candidates?: TrackMeta[] }>(`/api/guilds/${g}/play`, { input, voiceChannelId }),
+    post<EnqueueResult & { candidates?: TrackMeta[] }>(`/api/guilds/${g}/play`, { input, voiceChannelId }),
   pick: (g: string, videoId: string, voiceChannelId?: string) =>
-    post<{ queued?: { id: string; title: string } }>(`/api/guilds/${g}/pick`, { videoId, voiceChannelId }),
+    post<EnqueueResult>(`/api/guilds/${g}/pick`, { videoId, voiceChannelId }),
   control: (g: string, action: ControlAction) => post<{ ok: boolean }>(`/api/guilds/${g}/${action}`),
+  seek: (g: string, positionMs: number) => post<{ ok: boolean }>(`/api/guilds/${g}/seek`, { positionMs }),
   remove: (g: string, itemId: string) => post<{ ok: boolean }>(`/api/guilds/${g}/queue/remove`, { itemId }),
   reorder: (g: string, itemId: string, toIndex: number) => post<{ ok: boolean }>(`/api/guilds/${g}/queue/reorder`, { itemId, toIndex }),
-  getSettings: (g: string) => req<{ idleTimeoutSec: number }>(`/api/guilds/${g}/settings`),
-  setSettings: (g: string, settings: { idleTimeoutSec: number }) =>
-    post<{ ok: boolean; idleTimeoutSec: number }>(`/api/guilds/${g}/settings`, settings),
+  getSettings: (g: string) => req<{ settings: GuildSettings }>(`/api/guilds/${g}/settings`),
+  setSettings: (g: string, patch: Partial<GuildSettings>) =>
+    post<{ settings: GuildSettings }>(`/api/guilds/${g}/settings`, patch),
   logout: () => post<void>("/auth/logout"),
 };

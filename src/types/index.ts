@@ -9,6 +9,13 @@ export interface TrackMeta {
   thumbnailUrl: string | null;
 }
 
+/** Real audio format of a downloaded track file. */
+export interface AudioInfo {
+  codec: string;
+  bitrateKbps: number;
+  sampleRateHz: number;
+}
+
 export type RequestSource = "discord" | "web";
 
 export interface Requester {
@@ -23,4 +30,6 @@ export interface QueueItem {
   meta: TrackMeta;
   requester: Requester;
   addedAt: number;
+  /** Real audio format of the downloaded file; null until the track has been downloaded. */
+  audio: AudioInfo | null;
 }

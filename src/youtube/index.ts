@@ -1,11 +1,48 @@
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { MediaConfig } from "../config.js";
-import type { TrackMeta } from "../types/index.js";
+import type { AudioInfo, TrackMeta } from "../types/index.js";
 import { runYtDlp } from "./ytdlp.js";
 import { YtError, YtErrorKind, classifyYtdlpError } from "./errors.js";
 
 type RunFn = typeof runYtDlp;
+
+export interface DownloadResult {
+  path: string;
+  audio: AudioInfo | null;
+}
+
+/** Marker prefixing the yt-dlp --print line so we can locate it amid other stdout. */
+const AUDIO_PRINT_PREFIX = "AUDIOFMT::";
+/** Printed after the file lands on disk, reflecting the REAL post-processed format. */
+const AUDIO_PRINT_TEMPLATE = `after_move:${AUDIO_PRINT_PREFIX}%(acodec)s|%(abr)s|%(tbr)s|%(asr)s`;
+
+/** Parse "codec|abr|tbr|asr" (yt-dlp emits "NA" for missing numerics). null when codec is unknown. */
+export function parseAudioInfo(stdout: string): AudioInfo | null {
+  const line = stdout
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .find((l) => l.startsWith(AUDIO_PRINT_PREFIX));
+  if (!line) return null;
+
+  const [codecRaw, abrRaw, tbrRaw, asrRaw] = line.slice(AUDIO_PRINT_PREFIX.length).split("|");
+  const codec = (codecRaw ?? "").trim();
+  if (!codec || codec === "NA" || codec === "none") return null;
+
+  const num = (s: string | undefined): number | null => {
+    if (s === undefined) return null;
+    const v = Number.parseFloat(s.trim());
+    return Number.isFinite(v) ? v : null;
+  };
+  const bitrate = num(abrRaw) ?? num(tbrRaw);
+  const asr = num(asrRaw);
+
+  return {
+    codec,
+    bitrateKbps: bitrate !== null ? Math.round(bitrate) : 0,
+    sampleRateHz: asr !== null ? Math.round(asr) : 0,
+  };
+}
 
 interface RawInfo {
   id: string;
@@ -85,7 +122,7 @@ export class YouTubeService {
     return (parsed.entries ?? []).map(toMeta);
   }
 
-  async download(videoId: string, outDir: string): Promise<string> {
+  async download(videoId: string, outDir: string): Promise<DownloadResult> {
     const maxMb = Math.floor(this.cfg.cacheMaxBytes / (1024 * 1024));
     const args = [
       "-f",
@@ -99,6 +136,8 @@ export class YouTubeService {
       "3",
       "--no-warnings",
       "--no-progress",
+      "--print",
+      AUDIO_PRINT_TEMPLATE,
       ...this.extractorArgs(),
     ];
     if (this.cfg.sponsorblockRemove) {
@@ -117,7 +156,7 @@ export class YouTubeService {
       `https://www.youtube.com/watch?v=${videoId}`,
     );
 
-    const { stderr, code } = await this.run(args, this.cfg.ytdlpTimeoutMs);
+    const { stdout, stderr, code } = await this.run(args, this.cfg.ytdlpTimeoutMs);
     if (code !== 0) throw classifyYtdlpError(stderr, code);
 
     const files = await readdir(outDir);
@@ -128,6 +167,6 @@ export class YouTubeService {
         `download completed but no file for ${videoId} was found`,
       );
     }
-    return join(outDir, produced);
+    return { path: join(outDir, produced), audio: parseAudioInfo(stdout) };
   }
 }

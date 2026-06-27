@@ -43,4 +43,87 @@ describe("Settings (idle timeout)", () => {
     render(<Settings idleTimeoutSec={300} disabled={true} onChange={() => {}} />);
     expect(select().disabled).toBe(true);
   });
+
+  it("BUG 3: renders a synthetic option for a non-preset value so the select isn't blank", () => {
+    render(<Settings idleTimeoutSec={120} disabled={false} onChange={() => {}} />);
+    const s = select();
+    // The current value is reflected (not blank) and labeled as the current value.
+    expect(s.value).toBe("120");
+    const synthetic = Array.from(s.options).find((o) => o.value === "120");
+    expect(synthetic).toBeTruthy();
+    expect(synthetic!.textContent ?? "").toMatch(/120s \(current\)/i);
+  });
+
+  it("BUG 3: does not add a synthetic option when the value matches a preset", () => {
+    render(<Settings idleTimeoutSec={600} disabled={false} onChange={() => {}} />);
+    const values = Array.from(select().options).map((o) => o.value);
+    expect(values).toEqual(["60", "300", "600", "900", "1800", "3600"]);
+  });
+});
+
+describe("Settings (audio options)", () => {
+  it("reflects the current repeat / crossfade / normalize values", () => {
+    render(
+      <Settings
+        idleTimeoutSec={300}
+        crossfadeSec={4}
+        normalizeLoudness={true}
+        repeat="all"
+        onChange={() => {}}
+        onAudioChange={() => {}}
+      />,
+    );
+    expect((screen.getByLabelText(/repeat mode/i) as HTMLSelectElement).value).toBe("all");
+    expect((screen.getByLabelText(/crossfade seconds/i) as HTMLInputElement).value).toBe("4");
+    expect((screen.getByLabelText(/normalize loudness/i) as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("defaults audio controls to off when props are omitted", () => {
+    render(<Settings idleTimeoutSec={300} onChange={() => {}} onAudioChange={() => {}} />);
+    expect((screen.getByLabelText(/repeat mode/i) as HTMLSelectElement).value).toBe("off");
+    expect((screen.getByLabelText(/crossfade seconds/i) as HTMLInputElement).value).toBe("0");
+    expect((screen.getByLabelText(/normalize loudness/i) as HTMLInputElement).checked).toBe(false);
+  });
+
+  it("posts a repeat patch when the repeat mode changes", () => {
+    const onAudioChange = vi.fn();
+    render(
+      <Settings idleTimeoutSec={300} onChange={() => {}} onAudioChange={onAudioChange} />,
+    );
+    fireEvent.change(screen.getByLabelText(/repeat mode/i), { target: { value: "one" } });
+    expect(onAudioChange).toHaveBeenCalledWith({ repeat: "one" });
+  });
+
+  it("posts a crossfade patch when the crossfade value changes", () => {
+    const onAudioChange = vi.fn();
+    render(<Settings idleTimeoutSec={300} onChange={() => {}} onAudioChange={onAudioChange} />);
+    fireEvent.change(screen.getByLabelText(/crossfade seconds/i), { target: { value: "6" } });
+    expect(onAudioChange).toHaveBeenCalledWith({ crossfadeSec: 6 });
+  });
+
+  it("posts a normalize patch when the checkbox toggles", () => {
+    const onAudioChange = vi.fn();
+    render(<Settings idleTimeoutSec={300} onChange={() => {}} onAudioChange={onAudioChange} />);
+    fireEvent.click(screen.getByLabelText(/normalize loudness/i));
+    expect(onAudioChange).toHaveBeenCalledWith({ normalizeLoudness: true });
+  });
+
+  it("documents the pseudo-crossfade limitation in the UI (honesty)", () => {
+    render(<Settings idleTimeoutSec={300} onChange={() => {}} onAudioChange={() => {}} />);
+    expect(screen.getByText(/can't truly overlap|brief dip to silence/i)).toBeTruthy();
+  });
+
+  it("disables every control when the user cannot control the guild", () => {
+    render(
+      <Settings
+        idleTimeoutSec={300}
+        disabled={true}
+        onChange={() => {}}
+        onAudioChange={() => {}}
+      />,
+    );
+    expect((screen.getByLabelText(/repeat mode/i) as HTMLSelectElement).disabled).toBe(true);
+    expect((screen.getByLabelText(/crossfade seconds/i) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByLabelText(/normalize loudness/i) as HTMLInputElement).disabled).toBe(true);
+  });
 });

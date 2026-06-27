@@ -60,12 +60,14 @@ async function main(): Promise<void> {
         if (!channel?.isVoiceBased()) throw new Error("target channel is not a voice channel");
         return createVoiceSession(channel, idleTimeoutMs);
       },
-      makeResource: (filePath, item) => createPassthroughResource(filePath, item),
+      makeResource: (filePath, item, opts) => createPassthroughResource(filePath, item, opts),
       prefetchDepth: bot.prefetchDepth,
       // Initial default; the panel can override this per guild at runtime.
       idleTimeoutMs: bot.idleTimeoutMs,
       downloads,
       onTrackError: (info) => broadcaster.broadcast(guildId, { type: "trackError", ...info }),
+      // Persist settings changes (debounced) so they survive a restart.
+      onSettingsChange: () => scheduleSnapshot(),
     });
     // Wire debounced snapshot on queue changes.
     controller.queue.on("changed", scheduleSnapshot);
