@@ -57,11 +57,15 @@ services:
       NORMALIZE_LOUDNESS: "false"
 
       # YouTube configuration
-      YT_PROXY: ""
-      YT_COOKIES: ""
-      PO_TOKEN_PROVIDER_URL: "http://bgutil-pot:4416"
-      YT_PLAYER_CLIENTS: "web,mweb"
-      ALLOWED_WS_ORIGINS: "http://localhost:3000"
+      YT_PROXY: "" # optional residential/SOCKS proxy if your IP gets blocked by YouTube
+      YT_COOKIES: "" # optional path to a mounted cookies.txt (helps on flagged/datacenter IPs)
+      # Zero-PO-token clients — reliable on most hosts. Do NOT use "web,mweb" unless you run the
+      # bgutil PO-token sidecar (`--profile pot`) AND install its yt-dlp plugin in the image,
+      # or playback silently fails to extract audio.
+      YT_PLAYER_CLIENTS: "android_vr,web_embedded,tv"
+      PO_TOKEN_PROVIDER_URL: "" # only set (e.g. http://bgutil-pot:4416) when running `--profile pot`
+      # MUST match PUBLIC_BASE_URL exactly, or the live-updates WebSocket is rejected (no live panel)
+      ALLOWED_WS_ORIGINS: "http://localhost:8080"
     ports: ["8080:8080"]
     volumes: ["cache:/data/cache"]
     restart: unless-stopped
