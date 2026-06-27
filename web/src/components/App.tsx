@@ -10,8 +10,15 @@ import { Controls } from "./Controls.js";
 import { Queue } from "./Queue.js";
 import { AddBar } from "./AddBar.js";
 import { VoiceChannelPicker } from "./VoiceChannelPicker.js";
+import { Settings } from "./Settings.js";
 
 type BannerMsg = { kind: "success"; text: string } | { kind: "error"; text: string };
+
+const GUILD_STORAGE_KEY = "ytbot.guildId";
+
+function readStoredGuildId(): string | null {
+  try { return localStorage.getItem(GUILD_STORAGE_KEY); } catch { return null; }
+}
 
 function StatusBanner({ msg, onDismiss }: { msg: BannerMsg; onDismiss: () => void }) {
   const isError = msg.kind === "error";
@@ -42,6 +49,9 @@ export function App() {
   const [paused, setPaused] = useState(false);
   const [channels, setChannels] = useState<VoiceChannel[]>([]);
   const [voiceChannelId, setVoiceChannelId] = useState<string | null>(null);
+  // True once the user manually picks a channel for this guild, so later channel
+  // refreshes don't clobber their choice with the auto-detected current channel.
+  const manualChannelRef = useRef(false);
   const live = useGuildState(guildId);
 
   // Status banner state: current message + which lastError.seq we've already shown.
@@ -74,15 +84,51 @@ export function App() {
 
   useEffect(() => setPaused(false), [guildId]);
 
+  // Reconcile the pause/resume label with server truth: the server now broadcasts
+  // a fresh snapshot on every pause/resume, so the optimistic toggle is corrected
+  // (or confirmed) by the authoritative `paused` flag on the next WS state message.
+  const serverPaused = live.snapshot?.paused;
+  useEffect(() => {
+    if (typeof serverPaused === "boolean") setPaused(serverPaused);
+  }, [serverPaused]);
+
+  // Reset manual-pick tracking when the active guild changes.
+  useEffect(() => { manualChannelRef.current = false; }, [guildId]);
+
   useEffect(() => {
     if (!guildId) { setChannels([]); setVoiceChannelId(null); return; }
-    api.voiceChannels(guildId).then((r) => setChannels(r.channels)).catch(() => setChannels([]));
+    api.voiceChannels(guildId).then((r) => {
+      setChannels(r.channels);
+      // ITEM 2: auto-select the voice channel the user is currently in, unless
+      // they've already picked one manually (manual choice must win).
+      if (
+        !manualChannelRef.current &&
+        r.currentChannelId &&
+        r.channels.some((c) => c.id === r.currentChannelId)
+      ) {
+        setVoiceChannelId(r.currentChannelId);
+      }
+    }).catch(() => setChannels([]));
   }, [guildId]);
 
   useEffect(() => {
-    api.me().then((m) => { setMe(m); setGuildId((g) => g ?? m.guilds[0]?.id ?? null); })
-      .catch(() => setMe(null)).finally(() => setAuthChecked(true));
+    api.me().then((m) => {
+      setMe(m);
+      // ITEM 1: prefer the last-selected guild (if still controllable), else the first.
+      setGuildId((g) => {
+        if (g) return g;
+        const stored = readStoredGuildId();
+        if (stored && m.guilds.some((x) => x.id === stored)) return stored;
+        return m.guilds[0]?.id ?? null;
+      });
+    }).catch(() => setMe(null)).finally(() => setAuthChecked(true));
   }, []);
+
+  // ITEM 1: persist the chosen guild so it is remembered next visit.
+  useEffect(() => {
+    if (!guildId) return;
+    try { localStorage.setItem(GUILD_STORAGE_KEY, guildId); } catch { /* ignore */ }
+  }, [guildId]);
 
   const control = useCallback(async (a: ControlAction) => {
     if (!guildId) return;
@@ -101,12 +147,30 @@ export function App() {
     }
   }, [guildId, showBanner]);
 
+  const onSetIdleTimeout = useCallback(async (idleTimeoutSec: number) => {
+    if (!guildId) return;
+    try {
+      await api.setSettings(guildId, { idleTimeoutSec });
+      // The authoritative value comes back via the next WS state broadcast
+      // (the controller emits "changed" on update).
+    } catch (err) {
+      const reason = err instanceof ApiError ? err.message : "Something went wrong";
+      showBanner({ kind: "error", text: `Couldn't update setting — ${reason}` });
+    }
+  }, [guildId, showBanner]);
+
   const onPlay = useCallback(async (input: string): Promise<{ candidates: TrackMeta[] | null; queuedTitle?: string }> => {
     if (!guildId) return { candidates: null };
+    // ITEM 5: show instant feedback — the resolve (yt-dlp) takes several seconds.
+    const label = input.length > 60 ? input.slice(0, 57) + "…" : input;
+    showBanner({ kind: "success", text: `Resolving ${label}…` });
     try {
       const r = await api.play(guildId, input, voiceChannelId ?? undefined);
       if (r.queued) {
         showBanner({ kind: "success", text: `Queued: ${r.queued.title}` });
+      } else {
+        // A search returned candidates — drop the pending banner.
+        dismissBanner();
       }
       return { candidates: r.candidates ?? null };
     } catch (err) {
@@ -114,7 +178,7 @@ export function App() {
       showBanner({ kind: "error", text: msg });
       return { candidates: null };
     }
-  }, [guildId, voiceChannelId, showBanner]);
+  }, [guildId, voiceChannelId, showBanner, dismissBanner]);
 
   const onPick = useCallback((videoId: string) => {
     if (!guildId) return;
@@ -140,11 +204,12 @@ export function App() {
           <p className="card p-8 text-center" style={{ color: "var(--color-ink-dim)" }}>Pick a server to take the controls.</p>
         ) : (
           <>
-            <NowPlaying item={snap?.current ?? null} />
+            <NowPlaying item={snap?.current ?? null} paused={snap?.paused ?? false} receivedAt={live.receivedAt} />
             <div className="flex items-center justify-between flex-wrap gap-3">
               <div className="flex items-center gap-4 flex-wrap">
                 <Controls onAction={control} paused={paused} disabled={!snap?.current} />
-                <VoiceChannelPicker channels={channels} value={voiceChannelId} onChange={setVoiceChannelId} />
+                <VoiceChannelPicker channels={channels} value={voiceChannelId} onChange={(id) => { manualChannelRef.current = true; setVoiceChannelId(id); }} />
+                <Settings idleTimeoutSec={snap?.idleTimeoutSec} disabled={live.status === "forbidden"} onChange={onSetIdleTimeout} />
               </div>
               <span className="font-mono text-xs" style={{ color: "var(--color-ink-faint)" }}>
                 {live.status === "live" ? "● live" : live.status === "forbidden" ? "✕ no access" : "○ " + live.status}

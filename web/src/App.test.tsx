@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, cleanup } from "@testing-library/react";
 import { App } from "./components/App.js";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); localStorage.clear(); });
 
 describe("App", () => {
   it("shows the login gate when /api/me is unauthorized", async () => {
@@ -71,6 +71,135 @@ describe("App", () => {
     await waitFor(() => expect(pauseCalls).toBe(1));
     // ...and the failure is surfaced to the user, not silently swallowed.
     await waitFor(() => expect(screen.getByText(/forbidden|couldn't pause|pause failed/i)).toBeTruthy());
+  });
+
+  it("ITEM 1: defaults to the stored guild when it is one the user can control", async () => {
+    localStorage.setItem("ytbot.guildId", "G2");
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("/api/me")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "First Room" }, { id: "G2", name: "Second Room" }] }) });
+      }
+      if (url.includes("/api/guilds/G2/voice-channels")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ channels: [], currentChannelId: null }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ channels: [], currentChannelId: null, current: null, upcoming: [], history: [], paused: false }) });
+    }));
+    render(<App />);
+    // The stored guild G2 should be the active selection (its voice-channels are fetched).
+    await waitFor(() =>
+      expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some((c: unknown[]) => String(c[0]).includes("/api/guilds/G2/voice-channels"))).toBe(true),
+    );
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some((c: unknown[]) => String(c[0]).includes("/api/guilds/G1/voice-channels"))).toBe(false);
+  });
+
+  it("ITEM 1: ignores a stored guild the user can no longer control and falls back to the first", async () => {
+    localStorage.setItem("ytbot.guildId", "GHOST");
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("/api/me")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "First Room" }] }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ channels: [], currentChannelId: null }) });
+    }));
+    render(<App />);
+    await waitFor(() =>
+      expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some((c: unknown[]) => String(c[0]).includes("/api/guilds/G1/voice-channels"))).toBe(true),
+    );
+  });
+
+  it("ITEM 2: auto-selects the voice channel the user is currently in", async () => {
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("/api/me")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "The Booth" }] }) });
+      }
+      if (url.includes("/api/guilds/G1/voice-channels")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ channels: [{ id: "C1", name: "General" }, { id: "C2", name: "Lounge" }], currentChannelId: "C2" }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ current: null, upcoming: [], history: [], paused: false }) });
+    }));
+    render(<App />);
+    const select = (await screen.findByLabelText(/voice channel/i)) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe("C2"));
+  });
+
+  it("ITEM 5: clears the input and shows a pending indicator immediately on submit", async () => {
+    // Defer the /play response so we can observe the UI state BEFORE it resolves.
+    let resolvePlay: (v: unknown) => void = () => {};
+    const playPromise = new Promise((res) => { resolvePlay = res; });
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("/api/me")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "The Booth" }] }) });
+      }
+      if (url.includes("/api/guilds/G1/voice-channels")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ channels: [], currentChannelId: null }) });
+      }
+      if (url.endsWith("/api/guilds/G1/play")) {
+        return playPromise.then(() => ({ ok: true, status: 200, json: async () => ({ queued: { id: "q1", title: "My Song" } }) }));
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ current: null, upcoming: [], history: [], paused: false }) });
+    }));
+
+    render(<App />);
+    const box = (await screen.findByLabelText(/add a track/i)) as HTMLInputElement;
+    fireEvent.change(box, { target: { value: "https://youtu.be/abcdefghijk" } });
+    expect(box.value).toBe("https://youtu.be/abcdefghijk");
+    fireEvent.submit(box.closest("form")!);
+
+    // INSTANT response: the box is cleared and a pending/resolving indicator shows,
+    // all BEFORE the /play promise resolves.
+    await waitFor(() => expect(box.value).toBe(""));
+    // A pending indicator is shown (the "Resolving…" banner and/or button label).
+    expect(screen.getAllByText(/resolving/i).length).toBeGreaterThan(0);
+    // The submit button is disabled while resolving.
+    expect((screen.getByRole("button", { name: /resolving/i }) as HTMLButtonElement).disabled).toBe(true);
+
+    // Now let the resolve finish — the queued banner replaces the pending one.
+    resolvePlay(null);
+    await waitFor(() => expect(screen.getByText(/Queued: My Song/i)).toBeTruthy());
+  });
+
+  it("Settings: shows the current idle timeout from the WS snapshot and posts the new value on change", async () => {
+    class FakeWS {
+      readonly listeners: Record<string, ((e: unknown) => void)[]> = {};
+      constructor() {
+        setTimeout(() => {
+          this.emit("open", {});
+          this.emit("message", {
+            data: JSON.stringify({
+              type: "state",
+              state: { current: null, upcoming: [], history: [], paused: false, idleTimeoutSec: 600 },
+            }),
+          });
+        }, 0);
+      }
+      addEventListener(ev: string, cb: (e: unknown) => void) { (this.listeners[ev] ??= []).push(cb); }
+      emit(ev: string, e: unknown) { for (const cb of this.listeners[ev] ?? []) cb(e); }
+      send() {}
+      close() {}
+    }
+    vi.stubGlobal("WebSocket", FakeWS as unknown as typeof WebSocket);
+
+    const settingsPosts: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
+      if (url.includes("/api/me")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "The Booth" }] }) });
+      }
+      if (url.includes("/api/guilds/G1/voice-channels")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ channels: [], currentChannelId: null }) });
+      }
+      if (url.endsWith("/api/guilds/G1/settings") && init?.method === "POST") {
+        settingsPosts.push(JSON.parse(String(init.body)));
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, idleTimeoutSec: 60 }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ current: null, upcoming: [], history: [], paused: false, idleTimeoutSec: 300 }) });
+    }));
+
+    render(<App />);
+    const sel = (await screen.findByLabelText(/leave channel after tracks end/i)) as HTMLSelectElement;
+    // Reflects the WS snapshot (600s = 10 minutes).
+    await waitFor(() => expect(sel.value).toBe("600"));
+    // Changing it posts the new value to the settings endpoint.
+    fireEvent.change(sel, { target: { value: "60" } });
+    await waitFor(() => expect(settingsPosts).toContainEqual({ idleTimeoutSec: 60 }));
   });
 
   it("shows the panel + server selector when logged in", async () => {

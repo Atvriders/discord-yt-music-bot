@@ -25,7 +25,9 @@ function build(sessionUserId: string | null, depOverrides: Record<string, unknow
     stop: vi.fn(async () => {}),
     remove: vi.fn(async () => true),
     reorder: vi.fn(async () => true),
-    snapshot: vi.fn(() => ({ current: null, upcoming: [], history: [] })),
+    snapshot: vi.fn(() => ({ current: null, upcoming: [], history: [], idleTimeoutSec: 300 })),
+    getIdleTimeoutSec: vi.fn(() => 300),
+    setIdleTimeoutSec: vi.fn(),
   };
   const guild = {
     name: "Test Guild",
@@ -168,12 +170,113 @@ describe("REST actions", () => {
     });
     expect(h.controller.reorder).toHaveBeenCalledWith("i9", 0);
   });
+  it("GET /api/guilds/:id/settings returns the current idle timeout", async () => {
+    const res = await h.app.inject({ method: "GET", url: `/api/guilds/${GUILD}/settings` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ idleTimeoutSec: 300 });
+    expect(h.controller.getIdleTimeoutSec).toHaveBeenCalled();
+  });
+
+  it("GET /api/guilds/:id/settings is gated by control auth (401 when not logged in)", async () => {
+    const { app } = build(null);
+    const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/settings` });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("POST /api/guilds/:id/settings applies a valid idle timeout", async () => {
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/settings`,
+      payload: { idleTimeoutSec: 600 },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, idleTimeoutSec: 600 });
+    expect(h.controller.setIdleTimeoutSec).toHaveBeenCalledWith(600);
+  });
+
+  it("POST /api/guilds/:id/settings accepts the boundary values 0 and 3600", async () => {
+    for (const v of [0, 3600]) {
+      const res = await h.app.inject({
+        method: "POST",
+        url: `/api/guilds/${GUILD}/settings`,
+        payload: { idleTimeoutSec: v },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true, idleTimeoutSec: v });
+    }
+  });
+
+  it("POST /api/guilds/:id/settings rejects out-of-range values with 400 (no controller call)", async () => {
+    for (const v of [-1, 3601, 100000]) {
+      const res = await h.app.inject({
+        method: "POST",
+        url: `/api/guilds/${GUILD}/settings`,
+        payload: { idleTimeoutSec: v },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({ error: "invalid idleTimeoutSec" });
+    }
+    expect(h.controller.setIdleTimeoutSec).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/guilds/:id/settings rejects non-integer / missing values with 400", async () => {
+    for (const payload of [{ idleTimeoutSec: 1.5 }, { idleTimeoutSec: "60" }, {}]) {
+      const res = await h.app.inject({
+        method: "POST",
+        url: `/api/guilds/${GUILD}/settings`,
+        payload,
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({ error: "invalid idleTimeoutSec" });
+    }
+    expect(h.controller.setIdleTimeoutSec).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/guilds/:id/settings is gated by control auth (403 for a non-member)", async () => {
+    const guild = {
+      members: {
+        fetch: vi.fn(async () => {
+          throw new Error("Unknown Member");
+        }),
+      },
+    };
+    const { app } = build(USER, { client: { guilds: { cache: new Map([[GUILD, guild]]) } } });
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/settings`,
+      payload: { idleTimeoutSec: 60 },
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
   it("GET /api/guilds/:id/voice-channels returns only voice channels for a member", async () => {
     const res = await h.app.inject({ method: "GET", url: `/api/guilds/${GUILD}/voice-channels` });
     expect(res.statusCode).toBe(200);
-    const { channels } = res.json() as { channels: { id: string; name: string }[] };
+    const { channels, currentChannelId } = res.json() as {
+      channels: { id: string; name: string }[];
+      currentChannelId: string | null;
+    };
     expect(channels).toHaveLength(1);
     expect(channels[0]).toMatchObject({ id: "VC1", name: "General Voice" });
+    // No voice-state cache wired in this fixture -> null.
+    expect(currentChannelId).toBeNull();
+  });
+
+  it("GET /api/guilds/:id/voice-channels reports the channel the user is connected to", async () => {
+    const guild = {
+      name: "Test Guild",
+      members: { fetch: vi.fn(async (id: string) => ({ id })) },
+      channels: {
+        cache: new Map([
+          ["VC1", { id: "VC1", name: "General Voice", type: 2, isVoiceBased: () => true }],
+        ]),
+      },
+      voiceStates: { cache: new Map([[USER, { channelId: "VC1" }]]) },
+    };
+    const { app } = build(USER, { client: { guilds: { cache: new Map([[GUILD, guild]]) } } });
+    const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/voice-channels` });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { currentChannelId: string | null }).currentChannelId).toBe("VC1");
   });
   it("GET /api/guilds/:id/voice-channels returns 403 for a non-member", async () => {
     const guild = {

@@ -17,6 +17,8 @@ interface Controller {
   remove(itemId: string): Promise<boolean>;
   reorder(itemId: string, toIndex: number): Promise<boolean>;
   snapshot(): { current: unknown; upcoming: { id: string }[]; history: unknown };
+  getIdleTimeoutSec(): number;
+  setIdleTimeoutSec(sec: number): void;
 }
 export interface RestDeps {
   hub: { get(guildId: string): Controller };
@@ -183,6 +185,7 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
 
   app.get<{ Params: { id: string } }>("/api/guilds/:id/voice-channels", async (req, reply) => {
     if (!(await requireControl(req, reply, req.params.id))) return;
+    const userId = sessionUser(req)?.id ?? null;
     const guild = deps.client.guilds.cache.get(req.params.id) as
       | {
           channels?: {
@@ -191,12 +194,38 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
               { id: string; name: string; type: number; isVoiceBased?: () => boolean }
             >;
           };
+          voiceStates?: { cache: Map<string, { channelId?: string | null }> };
         }
       | undefined;
     const channels: { id: string; name: string }[] = [];
     for (const ch of guild?.channels?.cache?.values() ?? []) {
       if (ch.isVoiceBased?.() ?? false) channels.push({ id: ch.id, name: ch.name });
     }
-    return { channels };
+    // The voice channel the logged-in user is currently connected to (from the
+    // bot's GuildVoiceStates cache), or null if not in voice / undeterminable.
+    const currentChannelId: string | null =
+      (userId && guild?.voiceStates?.cache?.get(userId)?.channelId) || null;
+    return { channels, currentChannelId };
   });
+
+  // Per-guild panel settings: the idle timeout (how long the bot stays in voice
+  // after playback ends). Defaults to the configured IDLE_TIMEOUT_SEC.
+  app.get<{ Params: { id: string } }>("/api/guilds/:id/settings", async (req, reply) => {
+    if (!(await requireControl(req, reply, req.params.id))) return;
+    return { idleTimeoutSec: deps.hub.get(req.params.id).getIdleTimeoutSec() };
+  });
+
+  app.post<{ Params: { id: string }; Body: { idleTimeoutSec?: unknown } }>(
+    "/api/guilds/:id/settings",
+    async (req, reply) => {
+      if (!(await requireControl(req, reply, req.params.id))) return;
+      const sec = req.body?.idleTimeoutSec;
+      // 0 = leave as soon as idle; max 3600 = 1 hour.
+      if (typeof sec !== "number" || !Number.isInteger(sec) || sec < 0 || sec > 3600) {
+        return reply.code(400).send({ error: "invalid idleTimeoutSec" });
+      }
+      deps.hub.get(req.params.id).setIdleTimeoutSec(sec);
+      return { ok: true, idleTimeoutSec: sec };
+    },
+  );
 }

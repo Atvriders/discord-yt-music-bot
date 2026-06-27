@@ -22,7 +22,10 @@ export type ControlAction = "skip" | "pause" | "resume" | "stop";
 export const api = {
   me: () => req<Me>("/api/me"),
   state: (g: string) => req<Snapshot>(`/api/guilds/${g}/state`),
-  voiceChannels: (g: string) => req<{ channels: VoiceChannel[] }>(`/api/guilds/${g}/voice-channels`),
+  voiceChannels: (g: string) =>
+    req<{ channels: VoiceChannel[]; currentChannelId: string | null }>(
+      `/api/guilds/${g}/voice-channels`,
+    ),
   play: (g: string, input: string, voiceChannelId?: string) =>
     post<{ queued?: { id: string; title: string }; candidates?: TrackMeta[] }>(`/api/guilds/${g}/play`, { input, voiceChannelId }),
   pick: (g: string, videoId: string, voiceChannelId?: string) =>
@@ -30,5 +33,8 @@ export const api = {
   control: (g: string, action: ControlAction) => post<{ ok: boolean }>(`/api/guilds/${g}/${action}`),
   remove: (g: string, itemId: string) => post<{ ok: boolean }>(`/api/guilds/${g}/queue/remove`, { itemId }),
   reorder: (g: string, itemId: string, toIndex: number) => post<{ ok: boolean }>(`/api/guilds/${g}/queue/reorder`, { itemId, toIndex }),
+  getSettings: (g: string) => req<{ idleTimeoutSec: number }>(`/api/guilds/${g}/settings`),
+  setSettings: (g: string, settings: { idleTimeoutSec: number }) =>
+    post<{ ok: boolean; idleTimeoutSec: number }>(`/api/guilds/${g}/settings`, settings),
   logout: () => post<void>("/auth/logout"),
 };

@@ -20,6 +20,8 @@ const IDLE = "idle";
 export class VoiceSession extends EventEmitter {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
+  // Mutable so the idle timeout can be reconfigured at runtime (per-guild panel setting).
+  private idleTimeoutMs: number;
 
   private readonly onStateChange = (
     oldState: { status: string },
@@ -40,8 +42,19 @@ export class VoiceSession extends EventEmitter {
     private readonly opts: VoiceSessionOptions,
   ) {
     super();
+    this.idleTimeoutMs = opts.idleTimeoutMs;
     this.player.on("stateChange", this.onStateChange);
     this.player.on("error", this.onPlayerError);
+  }
+
+  /**
+   * Update the idle-disconnect timeout. If a timer is currently running it is
+   * restarted with the new value so a change takes effect immediately; otherwise
+   * only the next startIdleTimer() picks it up.
+   */
+  setIdleTimeout(ms: number): void {
+    this.idleTimeoutMs = ms;
+    if (this.idleTimer) this.startIdleTimer();
   }
 
   get channelId(): string {
@@ -70,7 +83,7 @@ export class VoiceSession extends EventEmitter {
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
       this.emit("idle");
-    }, this.opts.idleTimeoutMs);
+    }, this.idleTimeoutMs);
   }
   cancelIdleTimer(): void {
     if (this.idleTimer) {

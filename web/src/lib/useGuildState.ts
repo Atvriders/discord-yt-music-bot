@@ -4,14 +4,18 @@ import type { Snapshot } from "../types.js";
 export interface WsState {
   snapshot: Snapshot | null;
   status: "connecting" | "live" | "forbidden" | "closed";
+  // Local epoch-ms the latest state snapshot arrived — used to extrapolate the
+  // moving progress bar between WS updates.
+  receivedAt: number;
   lastError?: { title: string; reason: string; seq: number } | null;
 }
-export const initialWsState: WsState = { snapshot: null, status: "connecting", lastError: null };
+export const initialWsState: WsState = { snapshot: null, status: "connecting", receivedAt: 0, lastError: null };
 
 export function applyWsMessage(prev: WsState, raw: string): WsState {
   let msg: { type?: string; state?: Snapshot; title?: string; reason?: string };
   try { msg = JSON.parse(raw); } catch { return prev; }
-  if (msg.type === "state" && msg.state) return { ...prev, snapshot: msg.state, status: "live" };
+  if (msg.type === "state" && msg.state)
+    return { ...prev, snapshot: msg.state, status: "live", receivedAt: Date.now() };
   if (msg.type === "error" || msg.type === "revoked") return { ...prev, status: "forbidden" };
   if (msg.type === "trackError") {
     return {

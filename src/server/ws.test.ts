@@ -30,15 +30,16 @@ describe("GuildBroadcaster", () => {
     b.broadcast("G1", { type: "state", state: 1 });
     expect(a).not.toHaveBeenCalled();
   });
-  it("attach wires controller.queue 'changed' to a state broadcast (once per guild)", () => {
+  it("attach wires controller 'changed' to a state broadcast (once per guild)", () => {
     const b = new GuildBroadcaster();
-    const queue = new EventEmitter();
-    const controller = { queue, snapshot: () => ({ current: null, upcoming: [], history: [] }) };
+    const controller = Object.assign(new EventEmitter(), {
+      snapshot: () => ({ current: null, upcoming: [], history: [], paused: false }),
+    });
     const sub = vi.fn();
     b.attach("G1", controller as never);
     b.attach("G1", controller as never); // second attach must NOT double-wire
     b.subscribe("G1", sub);
-    queue.emit("changed");
+    controller.emit("changed");
     expect(sub).toHaveBeenCalledTimes(1);
     expect(sub).toHaveBeenCalledWith(expect.objectContaining({ type: "state" }));
   });

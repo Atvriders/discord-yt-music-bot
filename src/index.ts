@@ -54,14 +54,16 @@ async function main(): Promise<void> {
       cache,
       cacheDir: media.cacheDir,
       // invoked lazily after client.login(); the closure over `client` is safe
-      createSession: async (channelId) => {
+      createSession: async (channelId, idleTimeoutMs) => {
         const guild = await client.guilds.fetch(guildId);
         const channel = await guild.channels.fetch(channelId);
         if (!channel?.isVoiceBased()) throw new Error("target channel is not a voice channel");
-        return createVoiceSession(channel, bot.idleTimeoutMs);
+        return createVoiceSession(channel, idleTimeoutMs);
       },
       makeResource: (filePath, item) => createPassthroughResource(filePath, item),
       prefetchDepth: bot.prefetchDepth,
+      // Initial default; the panel can override this per guild at runtime.
+      idleTimeoutMs: bot.idleTimeoutMs,
       downloads,
       onTrackError: (info) => broadcaster.broadcast(guildId, { type: "trackError", ...info }),
     });

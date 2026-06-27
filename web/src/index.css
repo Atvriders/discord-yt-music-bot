@@ -54,10 +54,13 @@ body::before { content: none; }
 .pill-ghost:hover { color: var(--color-danger); border-color: rgba(241, 76, 76, 0.5); background: rgba(241, 76, 76, 0.1); }
 
 .vu { height: 6px; border-radius: 999px; background: #383838; overflow: hidden; }
-.vu > span { display: block; height: 100%; background: var(--color-ember); }
+.vu > span { display: block; height: 100%; background: var(--color-ember); transition: width 0.5s linear; }
 
 @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 .reveal { opacity: 0; animation: rise 0.5s ease forwards; }
-@media (prefers-reduced-motion: reduce) { .reveal { animation: none; opacity: 1; } }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner { display: inline-block; width: 0.85em; height: 0.85em; vertical-align: -0.1em; margin-right: 0.15em; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin 0.7s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .reveal { animation: none; opacity: 1; } .spinner { animation: none; } .vu > span { transition: none; } }
 
 button:disabled { opacity: 0.5; cursor: not-allowed; }

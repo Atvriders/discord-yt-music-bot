@@ -27,6 +27,7 @@ class FakeSession extends EventEmitter {
   stop = vi.fn();
   startIdleTimer = vi.fn();
   cancelIdleTimer = vi.fn();
+  setIdleTimeout = vi.fn();
   destroy = vi.fn();
   channelId = "C1";
 }
@@ -54,6 +55,7 @@ function makeController(
     createSession: vi.fn(async () => session as never),
     makeResource: (p: string) => ({ res: p }),
     prefetchDepth: 1,
+    idleTimeoutMs: 300_000,
     downloads: new Semaphore(2),
     onTrackError: overrides.onTrackError,
   };
@@ -155,6 +157,110 @@ describe("GuildController", () => {
   });
 });
 
+describe("GuildController playback position + paused", () => {
+  function makeClockController() {
+    let t = 1000;
+    const now = () => t;
+    const session = new FakeSession();
+    const cacheStore = new Map<string, string>();
+    const deps = {
+      youtube: { download: vi.fn(async (id: string) => `/cache/${id}.webm`) },
+      cache: {
+        get: (id: string) => cacheStore.get(id) ?? null,
+        has: (id: string) => cacheStore.has(id),
+        register: (id: string, p: string) => cacheStore.set(id, p),
+        pin: vi.fn(),
+        unpin: vi.fn(),
+      },
+      cacheDir: "/cache",
+      createSession: vi.fn(async () => session as never),
+      makeResource: (p: string) => ({ res: p }),
+      prefetchDepth: 1,
+      idleTimeoutMs: 300_000,
+      downloads: new Semaphore(2),
+      now,
+    };
+    const ctrl = new GuildController("G1", deps as never);
+    return { ctrl, session, deps, advanceClock: (ms: number) => (t += ms) };
+  }
+
+  it("reports positionMs/durationMs on the current track, accounting for pauses", async () => {
+    const { ctrl, advanceClock } = makeClockController();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    // Just started -> ~0ms elapsed.
+    let snap = ctrl.snapshot();
+    expect(snap.current?.positionMs).toBe(0);
+    // durationSec is 100 -> durationMs 100000.
+    expect(snap.current?.durationMs).toBe(100000);
+    expect(snap.paused).toBe(false);
+
+    advanceClock(5000);
+    snap = ctrl.snapshot();
+    expect(snap.current?.positionMs).toBe(5000);
+
+    // Pause -> position freezes and paused flips true.
+    ctrl.pause();
+    advanceClock(3000);
+    snap = ctrl.snapshot();
+    expect(snap.paused).toBe(true);
+    expect(snap.current?.positionMs).toBe(5000); // frozen while paused
+
+    // Resume -> clock counts again but the paused gap is excluded.
+    ctrl.resume();
+    advanceClock(2000);
+    snap = ctrl.snapshot();
+    expect(snap.paused).toBe(false);
+    expect(snap.current?.positionMs).toBe(7000);
+  });
+
+  it("resets position on track advance", async () => {
+    const { ctrl, session, advanceClock } = makeClockController();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    advanceClock(9000);
+    expect(ctrl.snapshot().current?.positionMs).toBe(9000);
+    session.emit("trackEnd");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("bbbbbbbbbbb");
+    expect(ctrl.snapshot().current?.positionMs).toBe(0);
+  });
+
+  it("emits 'changed' on pause, resume, skip and stop so the panel stays live", async () => {
+    const { ctrl, session } = makeClockController();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    const changed = vi.fn();
+    ctrl.on("changed", changed);
+    ctrl.pause();
+    expect(changed).toHaveBeenCalledTimes(1);
+    ctrl.resume();
+    expect(changed).toHaveBeenCalledTimes(2);
+    ctrl.skip(); // FakeSession.skip emits trackEnd which advances (queue change)
+    await new Promise((r) => setTimeout(r, 0));
+    expect(changed.mock.calls.length).toBeGreaterThanOrEqual(3);
+    const before = changed.mock.calls.length;
+    void session;
+    await ctrl.stop();
+    expect(changed.mock.calls.length).toBeGreaterThan(before);
+  });
+
+  it("stop clears the queue and stays in the channel (no immediate leave; idle timeout disconnects later)", async () => {
+    const { ctrl, session } = makeClockController();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    await ctrl.stop();
+    expect(session.stop).toHaveBeenCalled();
+    expect(session.destroy).not.toHaveBeenCalled();
+    expect(session.startIdleTimer).toHaveBeenCalled();
+  });
+});
+
 describe("GuildController.moveTo", () => {
   it("destroys old session, creates new for new channel, plays current without advancing", async () => {
     // Set up two separate FakeSessions so we can tell them apart.
@@ -197,7 +303,7 @@ describe("GuildController.moveTo", () => {
     expect(sessionC1.destroy).toHaveBeenCalled();
     // New session created for C2.
     expect(deps.createSession).toHaveBeenCalledTimes(2);
-    expect(deps.createSession).toHaveBeenLastCalledWith("C2");
+    expect(deps.createSession.mock.calls.at(-1)?.[0]).toBe("C2");
     // Current track replayed on new session (playItemLocked, not advance).
     expect(sessionC2.play).toHaveBeenCalledTimes(1);
     // Queue current is still the same track (no double-advance).
@@ -238,10 +344,77 @@ describe("GuildController.moveTo", () => {
 
     // New session created for C2.
     expect(deps.createSession).toHaveBeenCalledTimes(1);
-    expect(deps.createSession).toHaveBeenCalledWith("C2");
+    expect(deps.createSession.mock.calls[0]?.[0]).toBe("C2");
     // Queue advanced: the upcoming track is now current.
     expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
     // play was called exactly once (via playNextLocked -> playItemLocked).
     expect(sessionC2.play).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("GuildController idle timeout (per-guild, runtime-adjustable)", () => {
+  it("defaults the idle timeout from deps.idleTimeoutMs (300s) and exposes it in the snapshot", async () => {
+    const { ctrl } = makeController();
+    expect(ctrl.getIdleTimeoutSec()).toBe(300);
+    expect(ctrl.snapshot().idleTimeoutSec).toBe(300);
+  });
+
+  it("setIdleTimeoutSec updates the field, the snapshot, emits 'changed', and applies to the live session", async () => {
+    const { ctrl, session } = makeController();
+    await ctrl.ensureConnected("C1");
+    const changed = vi.fn();
+    ctrl.on("changed", changed);
+
+    ctrl.setIdleTimeoutSec(60);
+
+    expect(ctrl.getIdleTimeoutSec()).toBe(60);
+    expect(ctrl.snapshot().idleTimeoutSec).toBe(60);
+    expect(changed).toHaveBeenCalledTimes(1);
+    // Applied to the currently-connected session in ms.
+    expect(session.setIdleTimeout).toHaveBeenCalledWith(60_000);
+  });
+
+  it("setIdleTimeoutSec with no live session still updates the field + snapshot + emits 'changed'", () => {
+    const { ctrl } = makeController();
+    const changed = vi.fn();
+    ctrl.on("changed", changed);
+    ctrl.setIdleTimeoutSec(15);
+    expect(ctrl.getIdleTimeoutSec()).toBe(15);
+    expect(ctrl.snapshot().idleTimeoutSec).toBe(15);
+    expect(changed).toHaveBeenCalledTimes(1);
+  });
+
+  it("a NEWLY-created session is constructed with the updated idle timeout", async () => {
+    // createSession is the per-channel factory; the controller passes its current
+    // idleTimeoutMs to it so freshly-created sessions honor the runtime value.
+    const sessions: FakeSession[] = [];
+    const cacheStore = new Map<string, string>();
+    const deps = {
+      youtube: { download: vi.fn(async (id: string) => `/cache/${id}.webm`) },
+      cache: {
+        get: (id: string) => cacheStore.get(id) ?? null,
+        has: (id: string) => cacheStore.has(id),
+        register: (id: string, p: string) => cacheStore.set(id, p),
+        pin: vi.fn(),
+        unpin: vi.fn(),
+      },
+      cacheDir: "/cache",
+      createSession: vi.fn(async (_channelId: string, idleTimeoutMs?: number) => {
+        const s = new FakeSession();
+        (s as unknown as { idleTimeoutMs?: number }).idleTimeoutMs = idleTimeoutMs;
+        sessions.push(s);
+        return s as never;
+      }),
+      makeResource: (p: string) => ({ res: p }),
+      prefetchDepth: 1,
+      idleTimeoutMs: 300_000,
+      downloads: new Semaphore(2),
+    };
+    const ctrl = new GuildController("G1", deps as never);
+    ctrl.setIdleTimeoutSec(120);
+    await ctrl.ensureConnected("C1");
+    // The factory was invoked with the updated timeout (120s = 120000ms).
+    const lastCall = deps.createSession.mock.calls.at(-1)!;
+    expect(lastCall[1]).toBe(120_000);
   });
 });

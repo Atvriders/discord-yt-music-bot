@@ -5,7 +5,7 @@ import { canControl } from "../auth/authz.js";
 type Send = (payload: unknown) => void;
 
 interface ControllerLike {
-  queue: { on(event: "changed", listener: () => void): unknown };
+  on(event: "changed", listener: () => void): unknown;
   snapshot(): unknown;
 }
 
@@ -31,7 +31,9 @@ export class GuildBroadcaster {
   attach(guildId: string, controller: ControllerLike): void {
     if (this.wired.has(guildId)) return;
     this.wired.add(guildId);
-    controller.queue.on("changed", () =>
+    // The controller re-emits "changed" for every relevant change: queue
+    // mutations (add/remove/reorder/advance) AND playback state (pause/resume/stop).
+    controller.on("changed", () =>
       this.broadcast(guildId, { type: "state", state: controller.snapshot() }),
     );
   }

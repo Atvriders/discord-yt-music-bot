@@ -2,7 +2,21 @@
 
 # discord-yt-music-bot
 
-A Discord bot that plays YouTube audio in voice channels. It plays the real audio from the exact YouTube video you give it — never a re-uploaded or "mirror" audio track. Supports direct URL playback, search-and-pick via button menus, per-guild queues with prefetch, and configurable admin controls.
+A Discord bot that plays YouTube audio in voice channels — the **real audio from the exact video you give it**, never a re-uploaded or "mirror" audio track. It supports direct-URL playback, search-and-pick via button menus, per-guild queues with prefetch, a real-time web control panel with Discord login, and configurable admin controls.
+
+---
+
+## How It Works
+
+**Exact-link, never a mirror.** Give it a YouTube URL and it plays _that_ video's audio. Give it search terms and it shows a button picker so **you** choose the exact result — it never silently substitutes a re-upload or a separate "audio" track.
+
+**The video's own audio — no ads.** It extracts the chosen video's audio stream with `yt-dlp` (trying several player clients for reliability on datacenter IPs) and downloads it to a local cache, then streams that file into Discord voice. Because it pulls the content stream directly, there are no video ads and no SSAI mid-rolls. Optional **SponsorBlock** segment removal is supported.
+
+**Highest-quality audio path.** When the source stream is already Opus, it is passed through to Discord **without re-encoding** (best possible quality); otherwise `ffmpeg` transcodes to Opus. Voice traffic is end-to-end encrypted (Discord's DAVE protocol) automatically.
+
+**Per-guild orchestration.** Each server has its own queue and a mutex-guarded playback controller. Upcoming tracks are pre-downloaded (`PREFETCH_DEPTH`) so playback is gapless, and the bot auto-leaves after `IDLE_TIMEOUT_SEC` of inactivity. An active-session snapshot is written to the cache, so after a restart the bot **rejoins and resumes** automatically.
+
+**One brain, two front-ends.** A Fastify server hosts a React control panel, a REST API, and a per-guild WebSocket. You log in with Discord OAuth2; the bot then verifies (via the gateway) that you are actually a **member** (or an admin) of a guild before letting you control it. The web panel and Discord commands share the **same** controller — anything you do on the panel affects the same playback as `?` commands, and the panel mirrors state live over the WebSocket (now-playing with a moving progress bar, the queue, and controls).
 
 ---
 
@@ -13,147 +27,145 @@ A Discord bot that plays YouTube audio in voice channels. It plays the real audi
 1. Go to <https://discord.com/developers/applications> and click **New Application**.
 2. Give it a name (e.g. `yt-music-bot`) and click **Create**.
 3. Select **Bot** in the left sidebar.
-4. Click **Add Bot** (or **Reset Token** if it already exists), then copy the **Token** — this is your `DISCORD_TOKEN`.
+4. Click **Reset Token** and copy the **Token** — this is your `DISCORD_TOKEN`.
 
 ### 2. Enable Privileged Intents
 
-Still on the **Bot** page, scroll down to **Privileged Gateway Intents** and enable:
+Still on the **Bot** page, under **Privileged Gateway Intents**, enable **both**:
 
-- **Message Content Intent** (required to read command text)
+- **Message Content Intent** — required to read `?` command text.
+- **Server Members Intent** — required so the **web panel** can verify that a logged-in user is a member of the server before allowing control. Without it, panel controls (play/pause/skip) may be rejected with `forbidden`.
 
 Save changes.
 
 ### 3. Invite the Bot to Your Server (OAuth2)
 
-1. Go to **OAuth2 > URL Generator** in the left sidebar.
+1. Go to **OAuth2 → URL Generator**.
 2. Under **Scopes**, check `bot`.
-3. Under **Bot Permissions**, check:
-   - View Channels
-   - Send Messages
-   - Connect
-   - Speak
-   - Use Voice Activity
-4. Copy the generated URL, open it in a browser, and select the server to invite the bot to.
+3. Under **Bot Permissions**, check: **View Channels, Send Messages, Connect, Speak, Use Voice Activity**.
+4. Open the generated URL and select the server to invite the bot.
+
+> The bot must have **Connect** _and_ **Speak** in the specific voice channel. If a channel permission override denies **Speak**, the bot will join but produce no audio.
 
 ---
 
 ## Configuration
 
-All configuration lives in the `environment:` block of `docker-compose.yml`. Open that file and replace the placeholder values (marked `CHANGE_ME`) with your real credentials before running the bot. Do **not** commit a `docker-compose.yml` containing real secrets — keep your filled-in copy local.
+All configuration lives in the `environment:` block of `docker-compose.yml` — there is **no `.env` file**. Replace the `CHANGE_ME` placeholders with your real values. Do **not** commit a `docker-compose.yml` containing real secrets; keep your filled-in copy local.
 
-| Variable                 | Required | Default                      | Description                                                                                     |
-| ------------------------ | -------- | ---------------------------- | ----------------------------------------------------------------------------------------------- |
-| `DISCORD_TOKEN`          | yes      | —                            | Bot token from the Developer Portal                                                             |
-| `COMMAND_PREFIX`         | no       | `?`                          | Command prefix (e.g. `?play`, `?skip`)                                                          |
-| `CACHE_DIR`              | no       | `/data/cache`                | Directory for downloaded audio files                                                            |
-| `CACHE_MAX_MB`           | no       | `2048`                       | Maximum cache size in megabytes                                                                 |
-| `IDLE_TIMEOUT_SEC`       | no       | `300`                        | Seconds of silence before bot leaves the voice channel                                          |
-| `PREFETCH_DEPTH`         | no       | `1`                          | Number of upcoming tracks to pre-download                                                       |
-| `MAX_TRANSCODE_JOBS`     | no       | `2`                          | Maximum concurrent yt-dlp downloads                                                             |
-| `SEARCH_RESULT_COUNT`    | no       | `5`                          | Number of search results shown in the picker (max 5)                                            |
-| `ADMIN_USER_IDS`         | no       | —                            | Comma-separated Discord user IDs with admin privileges (can queue and control from any channel) |
-| `MAX_TRACK_DURATION_SEC` | no       | —                            | Reject tracks longer than this (seconds); unset = no limit                                      |
-| `YT_PROXY`               | no       | —                            | HTTP proxy URL for yt-dlp requests                                                              |
-| `YT_COOKIES`             | no       | —                            | Path to a Netscape-format cookies file for yt-dlp                                               |
-| `PO_TOKEN_PROVIDER_URL`  | no       | —                            | URL of a PO token provider for YouTube age-gated content                                        |
-| `SPONSORBLOCK_REMOVE`    | no       | —                            | SponsorBlock categories to skip, comma-separated (e.g. `sponsor,selfpromo`)                     |
-| `YT_PLAYER_CLIENTS`      | no       | `android_vr,web_embedded,tv` | yt-dlp player clients to try                                                                    |
-| `YTDLP_TIMEOUT_MS`       | no       | `60000`                      | Timeout for yt-dlp downloads in milliseconds                                                    |
+### Bot
+
+| Variable                 | Required | Default                      | Description                                                                                                                               |
+| ------------------------ | -------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `DISCORD_TOKEN`          | yes      | —                            | Bot token from the Developer Portal                                                                                                       |
+| `COMMAND_PREFIX`         | no       | `?`                          | Command prefix (e.g. `?play`, `?skip`)                                                                                                    |
+| `CACHE_DIR`              | no       | `/data/cache`                | Directory for downloaded audio + the session snapshot                                                                                     |
+| `CACHE_MAX_MB`           | no       | `2048`                       | Max cache size (MB); least-recently-used files are evicted above this                                                                     |
+| `IDLE_TIMEOUT_SEC`       | no       | `300`                        | **Initial default** seconds of silence before the bot leaves the voice channel — the web panel can override this **per guild at runtime** |
+| `PREFETCH_DEPTH`         | no       | `1`                          | Upcoming tracks to pre-download (higher = smoother, more memory)                                                                          |
+| `MAX_TRANSCODE_JOBS`     | no       | `2`                          | Max concurrent yt-dlp downloads (higher = more CPU/memory)                                                                                |
+| `MAX_TRACK_DURATION_SEC` | no       | —                            | Reject tracks longer than this; unset = no limit                                                                                          |
+| `SEARCH_RESULT_COUNT`    | no       | `5`                          | Number of search results in the picker (max 5)                                                                                            |
+| `ADMIN_USER_IDS`         | no       | —                            | Comma-separated Discord user IDs with admin privileges (control any channel)                                                              |
+| `LOG_LEVEL`              | no       | `info`                       | pino log level (`debug`, `info`, `warn`, `error`)                                                                                         |
+| `YT_PLAYER_CLIENTS`      | no       | `android_vr,web_embedded,tv` | yt-dlp player clients to try (see note below)                                                                                             |
+| `YT_PROXY`               | no       | —                            | Residential/SOCKS proxy for yt-dlp, if your IP is blocked by YouTube                                                                      |
+| `YT_COOKIES`             | no       | —                            | Path to a mounted Netscape `cookies.txt` (helps on flagged IPs)                                                                           |
+| `PO_TOKEN_PROVIDER_URL`  | no       | —                            | PO-token provider URL; only set when running the `pot` sidecar                                                                            |
+| `SPONSORBLOCK_REMOVE`    | no       | —                            | SponsorBlock categories to skip (e.g. `sponsor,intro,outro,selfpromo`)                                                                    |
+
+### Web panel (also required for the panel)
+
+| Variable                | Required | Default                           | Description                                                               |
+| ----------------------- | -------- | --------------------------------- | ------------------------------------------------------------------------- |
+| `DISCORD_CLIENT_ID`     | yes      | —                                 | OAuth2 application Client ID                                              |
+| `DISCORD_CLIENT_SECRET` | yes      | —                                 | OAuth2 application Client Secret                                          |
+| `PUBLIC_BASE_URL`       | yes      | —                                 | Public HTTPS origin (e.g. `https://music.example.com`); no trailing slash |
+| `OAUTH_REDIRECT_URI`    | no       | `<PUBLIC_BASE_URL>/auth/callback` | Must exactly match a Discord OAuth2 redirect URI                          |
+| `SESSION_SECRET`        | yes      | —                                 | Random string ≥ 32 chars used to sign session cookies (NOT your token)    |
+| `PORT`                  | no       | `8080`                            | Port the HTTP server listens on                                           |
+| `HOST`                  | no       | `0.0.0.0`                         | Interface to bind                                                         |
+| `TRUST_PROXY`           | no       | `true`                            | Set `false` only if **not** behind a reverse proxy                        |
+| `ALLOWED_WS_ORIGINS`    | no       | `<PUBLIC_BASE_URL>`               | Comma-separated origins allowed to open the live WebSocket                |
+
+> Generate `SESSION_SECRET` with `openssl rand -base64 32`. Never reuse your bot token for it.
 
 ---
 
 ## Running
 
-### Local development (with `tsx` hot-reload)
+### Local development (`tsx` hot-reload)
 
 ```bash
 npm install
-DISCORD_TOKEN=your-token-here npm run dev
+DISCORD_TOKEN=your-token npm run dev      # bot  (:8080)
+npm run dev:web                           # panel (:5173, proxies /api /auth /ws → :8080)
 ```
 
 ### Production build
 
 ```bash
-npm run build
-DISCORD_TOKEN=your-token-here node dist/index.js
+npm run build                             # build:web (Vite → dist/public) + tsc (→ dist)
+DISCORD_TOKEN=your-token node dist/index.js
 ```
 
-### Docker & Deploy
+### Docker & deploy
 
-The deploy flow is:
+The deploy flow needs no local build and no `.env`:
 
-1. **GitHub Actions** builds the image and pushes it to `ghcr.io/atvriders/discord-yt-music-bot:latest`.
-2. **You** edit the `environment:` block in `docker-compose.yml` to fill in your real credentials (replace all `CHANGE_ME` placeholders).
-3. **`docker compose up -d`** pulls the pre-built GHCR image and runs it with the inline config — no local build, no `.env` file needed.
+1. **GitHub Actions** builds the image and pushes `ghcr.io/atvriders/discord-yt-music-bot:latest` (and a `:<sha>` tag) on every push to `master`, plus a weekly rebuild to keep `yt-dlp` fresh.
+2. **You** fill in the `environment:` block of `docker-compose.yml`.
+3. **`docker compose up -d`** pulls the pre-built image and runs it.
 
 ```bash
-# Edit docker-compose.yml first, then:
 docker compose up -d
 ```
 
-> **Security note**: Do not commit your filled-in `docker-compose.yml` to the repo. Keep it local. The version in the repo contains only safe placeholder values.
+#### First-time setup
 
-#### First-Time Setup
+1. **GHCR visibility** — after the first build, set the [package](https://github.com/Atvriders/discord-yt-music-bot/pkgs/container/discord-yt-music-bot) to **Public** so pulls need no auth.
+2. **Forked repo** — the first Actions build needs a manual trigger: **Actions → build → Run workflow**.
 
-1. **GHCR package visibility**: After the first build completes on GitHub, visit the [package page](https://github.com/Atvriders/discord-yt-music-bot/pkgs/container/discord-yt-music-bot) and set the package to **Public**. Subsequent pulls will not require authentication.
-2. **Fork first build**: If you forked this repo, the first GitHub Actions build requires a manual trigger. Go to **Actions > build > Run workflow > Run workflow**.
+#### Updating to a new build (important)
 
-#### Weekly Updates
+A plain `docker compose up -d` may keep your **local** cached image even when a newer `:latest` exists. Force a real re-pull + recreate:
 
-The CI runs on a weekly schedule (Monday 6 AM UTC) to keep `yt-dlp` and embedded EJS templates fresh. You can also manually trigger a rebuild via **Actions > build > Run workflow**.
+```bash
+docker compose pull bot && docker compose up -d --force-recreate bot
+```
 
-#### PO Token Sidecar
+In **Portainer**, enable **"Re-pull image"** when redeploying the stack — otherwise it reuses the old image. To confirm what's actually running:
 
-To enable the optional `bgutil-ytdlp-pot-provider` sidecar (for YouTube age-gated content), run:
+```bash
+docker inspect "$(docker compose ps -q bot)" --format 'image: {{.Image}}'
+docker image inspect ghcr.io/atvriders/discord-yt-music-bot:latest --format 'latest: {{.Id}}'
+# the two SHAs should match
+```
+
+#### PO-token sidecar (optional)
+
+Only needed if you switch `YT_PLAYER_CLIENTS` to `web,mweb`:
 
 ```bash
 docker compose --profile pot up -d
 ```
 
-`PO_TOKEN_PROVIDER_URL` in `docker-compose.yml` is already set to `http://bgutil-pot:4416` for this case; set it to `""` if you are not using the sidecar.
-
-#### Configuration
-
-All env vars are documented in the **Configuration** section above and are pre-populated in the `environment:` block of `docker-compose.yml`. For the web panel, update:
-
-- `OAUTH_REDIRECT_URI` to your public URL + `/auth/callback` (must match Discord's OAuth2 redirect URI exactly)
-- `PUBLIC_BASE_URL` to your public HTTPS origin (e.g. `https://music.example.com`)
-
-#### Volumes
-
-The named `cache` volume (`/data/cache`) stores downloaded audio files and the active session snapshot. It persists across container restarts and is automatically backed up on shutdown.
+and set `PO_TOKEN_PROVIDER_URL=http://bgutil-pot:4416`. With the default zero-PO-token clients you do **not** need this.
 
 ---
 
-## Web Panel
+## Deployment Notes & Gotchas
 
-The bot exposes an HTTP API + WebSocket for a browser-based control panel. All bot env vars remain required; add the following for the web layer:
+These are the things that most commonly break a self-host:
 
-| Variable                | Required | Default                           | Description                                                               |
-| ----------------------- | -------- | --------------------------------- | ------------------------------------------------------------------------- |
-| `DISCORD_CLIENT_ID`     | yes      | —                                 | OAuth2 application Client ID from the Developer Portal                    |
-| `DISCORD_CLIENT_SECRET` | yes      | —                                 | OAuth2 application Client Secret                                          |
-| `PUBLIC_BASE_URL`       | yes      | —                                 | Public HTTPS origin (e.g. `https://music.example.com`); no trailing slash |
-| `OAUTH_REDIRECT_URI`    | no       | `<PUBLIC_BASE_URL>/auth/callback` | Override the OAuth redirect URI if it differs from the default            |
-| `SESSION_SECRET`        | yes      | —                                 | Random string ≥ 32 characters used to sign session cookies                |
-| `PORT`                  | no       | `8080`                            | Port the HTTP server listens on                                           |
-| `HOST`                  | no       | `0.0.0.0`                         | Interface to bind                                                         |
-| `TRUST_PROXY`           | no       | `true`                            | Set to `false` only if not behind a reverse proxy                         |
-| `ALLOWED_WS_ORIGINS`    | no       | `<PUBLIC_BASE_URL>`               | Comma-separated list of allowed WebSocket upgrade origins                 |
+- **The cache volume must be writable by the container's non-root user.** The container starts as root only long enough to `chown` `/data/cache` (via a `gosu` entrypoint), then drops to an unprivileged user — so a named volume _or_ a bind-mounted host directory works automatically. If you previously had a root-owned volume causing `EACCES` (silent no-audio + snapshot crash-loop), pulling the current image fixes it.
+- **`ALLOWED_WS_ORIGINS` must equal `PUBLIC_BASE_URL` exactly.** The live "now playing" box, progress bar, and queue are driven entirely by a WebSocket; if the browser's `Origin` isn't allowlisted, the upgrade is rejected (`403 bad_origin`) and the panel never updates — even though Discord audio plays fine.
+- **`YT_PLAYER_CLIENTS` should stay on the zero-PO-token defaults** (`android_vr,web_embedded,tv`). Using `web`/`mweb` requires the PO-token sidecar above, or extraction silently fails (resolves metadata but downloads nothing → no audio).
+- **Your proxy/CDN must forward WebSocket upgrades** (see the nginx snippet below). Behind **Cloudflare**, ensure zone **Network → WebSockets** is **On** (default). With a **Cloudflare Tunnel**, WebSockets are forwarded automatically — just avoid forcing an HTTP/2 origin connection, which breaks the `Upgrade`.
+- **Voice "Speak" permission** — if the bot is in the channel but silent with no error, check it has **Connect + Speak** there.
+- **Memory** — `node` + `yt-dlp` + `ffmpeg` per `PREFETCH_DEPTH`/`MAX_TRANSCODE_JOBS` can be heavy on a small VPS. If the container is OOM-killed mid-song (it restarts and resumes), lower `PREFETCH_DEPTH`/`MAX_TRANSCODE_JOBS` and/or set a `mem_limit`.
 
-### OAuth2 Redirect URI
-
-In the [Discord Developer Portal](https://discord.com/developers/applications), open your application, go to **OAuth2 > Redirects**, and add the exact URI:
-
-```
-<PUBLIC_BASE_URL>/auth/callback
-```
-
-The URI must be an **exact match** (Discord rejects anything that differs by even a trailing slash).
-
-### Reverse Proxy
-
-Run the bot behind nginx, Caddy, or similar that terminates TLS and forwards to `PORT`. Example nginx snippet:
+### Reverse proxy (nginx)
 
 ```nginx
 location / {
@@ -168,65 +180,46 @@ location / {
 }
 ```
 
-Keep `TRUST_PROXY=true` (the default) so the bot reads the real client IP from `X-Forwarded-For` for rate limiting.
+Keep `TRUST_PROXY=true` so rate limiting reads the real client IP from `X-Forwarded-For`.
 
-### Manual Verification Checklist (Web Panel)
+### OAuth2 redirect URI
 
-The items below require a real Discord application, a valid `SESSION_SECRET`, and a running reverse-proxy with TLS.
+In the [Developer Portal](https://discord.com/developers/applications) → your app → **OAuth2 → Redirects**, add the **exact** URI (Discord rejects even a trailing-slash mismatch):
 
-- [ ] `/healthz` returns `{"ok":true}` with HTTP 200
-- [ ] `GET /auth/login` responds with 302 → `discord.com/oauth2/authorize` and sets a `sid` session cookie
-- [ ] After completing the Discord OAuth flow the browser is redirected to `/` and `GET /api/me` returns the logged-in user's `id`, `username`, and `avatarUrl`
-- [ ] `GET /api/guilds/:id/state` returns queue state for a guild you are in and `403` for one you are not in
-- [ ] `POST /api/guilds/:id/skip` (with a valid session) returns `{"ok":true}`
-- [ ] `POST /auth/logout` destroys the session; subsequent `GET /api/me` returns `401`
-- [ ] Opening a WebSocket to `/ws` (with an authenticated session cookie and a matching `Origin` header) and sending `{"subscribe":"<guildId>"}` triggers a `state` push; playing or skipping a track causes a live `state` push over the socket
+```
+<PUBLIC_BASE_URL>/auth/callback
+```
 
 ---
 
 ## Web Control Panel
 
-The web control panel provides a browser-based interface for queuing tracks, viewing now-playing, managing the queue, and controlling playback across multiple Discord servers.
+A browser interface for queuing, viewing now-playing, managing the queue, and controlling playback across all the servers you share with the bot. It uses a YouTube-style dark theme.
 
-### Local Development
+What it does:
 
-Start the Vite dev server with:
+- **Discord login** — OAuth2; only servers you actually belong to appear, and control is gated on membership/admin.
+- **Remembers your last server** — defaults back to the server you last used.
+- **Auto-selects your voice channel** — if you're already in a voice channel, the picker defaults to it (your manual choice still wins).
+- **Live now-playing with a moving progress bar** — elapsed/duration ticks in real time and freezes when paused; updates instantly on play/skip/pause from either the panel or Discord. (Display-only — there is no click-to-seek.)
+- **Instant submit** — paste a link and press Enter; the box clears and shows "Resolving…" immediately while extraction runs in the background, then "Queued: …".
+- **Queue management** — see pending tracks + requesters, remove (✕), and reorder (▲/▼), all reflected live.
+- **Idle-timeout setting** — choose how long the bot stays in the voice channel after playback ends (1/5/10/15/30 minutes, or "Never"), per server, from a dropdown. Defaults to 5 minutes and overrides `IDLE_TIMEOUT_SEC` at runtime; changes apply immediately (a running idle timer restarts).
 
-```bash
-npm run dev:web
-```
+### Manual verification (web panel)
 
-This launches the panel on `http://localhost:5173` with a development proxy that forwards `/api`, `/auth`, and `/ws` requests to the bot running on `:8080`. Run the bot in another terminal with `npm run dev`.
+Requires a real Discord app, a valid `SESSION_SECRET`, and a TLS reverse proxy.
 
-### Production
-
-The production build compiles the web panel into `dist/public`, which the bot serves directly at `PUBLIC_BASE_URL` from the same Fastify process:
-
-```bash
-npm run build
-```
-
-This runs `build:web` (Vite → `dist/public`) and `tsc` (TypeScript → `dist`). The panel requires the Plan 3 OAuth setup: `PUBLIC_BASE_URL`, `OAUTH_REDIRECT_URI=<base>/auth/callback`, `SESSION_SECRET`, and the Discord OAuth2 credentials (`DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`).
-
-### Design
-
-The panel uses an "After-Hours" analog-radio aesthetic with custom design tokens, a warm color palette, and staggered reveals for visual hierarchy.
-
-### Manual Verification Checklist
-
-The browser-based flow cannot be covered by unit tests. Verify the following with a real Discord application and a running bot:
-
-- [ ] Open the panel, click **Login with Discord**, complete the OAuth flow, and land on the server selector
-- [ ] The server selector lists only the Discord servers you belong to
-- [ ] With the bot playing in one of your servers, the **Now Playing** card updates in real-time as you (or someone in Discord) play, skip, or pause a track
-- [ ] The **Progress** slider shows the current playback position and updates live
-- [ ] Paste a YouTube URL into the **Add** input and press Enter — the track queues instantly
-- [ ] Type a search query (e.g. "lofi hip hop") and press Enter — a picker modal appears; click a result to queue it
-- [ ] The **Queue** list shows all pending tracks and their requesters; clicking **✕** removes a track
-- [ ] Open the panel for a server you cannot control; the panel displays **✕ No access** and disables all controls
-- [ ] An admin can move the bot to their channel mid-session via `?play` in another channel or by selecting a voice channel from the panel; the current track resumes in the new channel
-- [ ] The panel's voice-channel picker lets you start playback in a chosen channel when the bot isn't connected; the bot joins that channel and begins playing
-- [ ] The queue **▲/▼** buttons reorder tracks and the change shows live in the **Queue** list
+- [ ] `/healthz` returns `{"ok":true}` (HTTP 200)
+- [ ] `GET /auth/login` → 302 to `discord.com/oauth2/authorize`, sets the `sid` cookie; after consent you land on `/` and `GET /api/me` returns your `id`/`username`/`avatarUrl`
+- [ ] The server selector lists only servers you belong to and defaults to your last-used one
+- [ ] With the bot playing, **Now Playing** updates live and the progress bar advances; pausing freezes it
+- [ ] Paste a URL → box clears + "Resolving…" → "Queued: …"; a search query opens the picker
+- [ ] The voice-channel picker defaults to the channel you're in; **Queue** shows tracks + requesters; ✕ removes; ▲/▼ reorder — all live
+- [ ] The **Leave channel after tracks end** dropdown reflects the current per-guild setting (default 5 min); changing it persists for that guild and takes effect immediately; `GET /api/guilds/:id/settings` returns `{ "idleTimeoutSec": … }` and `POST` with `{ "idleTimeoutSec": 0..3600 }` applies it (out-of-range → `400`)
+- [ ] A server you can't control shows **No access** with controls disabled
+- [ ] `POST /api/guilds/:id/skip` with a valid session returns `{"ok":true}`; without a session, `401`; `GET /api/guilds/:id/state` returns `403` for a guild you're not in
+- [ ] `POST /auth/logout` destroys the session; `GET /api/me` then returns `401`
 
 ---
 
@@ -234,65 +227,47 @@ The browser-based flow cannot be covered by unit tests. Verify the following wit
 
 All commands use the configured prefix (default `?`).
 
-| Command                | Description                          |
-| ---------------------- | ------------------------------------ |
-| `?play <youtube-url>`  | Queue a video directly by URL        |
-| `?play <search terms>` | Search YouTube and show a picker     |
-| `?<search terms>`      | Shorthand for `?play <search terms>` |
-| `?skip`                | Skip the currently playing track     |
-| `?pause`               | Pause playback                       |
-| `?resume`              | Resume playback                      |
-| `?stop`                | Stop playback and clear the queue    |
-| `?queue`               | Show the current queue               |
-| `?np`                  | Show the now-playing track           |
-| `?remove <n>`          | Remove queue item number `n`         |
-| `?help`                | Show command help                    |
+| Command                | Description                                                                                               |
+| ---------------------- | --------------------------------------------------------------------------------------------------------- |
+| `?play <youtube-url>`  | Queue a video directly by URL                                                                             |
+| `?play <search terms>` | Search YouTube and show a button picker                                                                   |
+| `?<search terms>`      | Shorthand for `?play <search terms>`                                                                      |
+| `?skip`                | Skip the currently playing track                                                                          |
+| `?pause`               | Pause playback (bot stays in the channel)                                                                 |
+| `?resume`              | Resume playback                                                                                           |
+| `?stop`                | Stop playback and clear the queue; **the bot stays in the channel** (it leaves later on the idle timeout) |
+| `?queue`               | Show the current queue                                                                                    |
+| `?np`                  | Show the now-playing track                                                                                |
+| `?remove <n>`          | Remove queue item number `n`                                                                              |
+| `?help`                | Show command help                                                                                         |
 
 ---
 
-## Manual Verification Checklist
+## Manual Verification (Discord)
 
-The items below cannot be covered by unit tests. Verify them with a real bot token and a Discord server.
+Requires a real bot token and a server.
 
-### Gateway / Login
+### Gateway / voice
 
-- [ ] Bot starts without error (`discord-yt-music-bot is online` in stdout)
-- [ ] Bot appears as online in the Discord member list
+- [ ] Bot logs `discord-yt-music-bot is online` and appears online in Discord
+- [ ] Join a voice channel, `?play https://www.youtube.com/watch?v=<id>` → bot joins and plays within ~10s
 
-### Voice Joining
+### Playback controls
 
-- [ ] Join a voice channel, then type `?play https://www.youtube.com/watch?v=<id>` in a text channel
-- [ ] Bot joins the voice channel and begins playing within ~10 seconds
+- [ ] `?skip` advances (or goes idle if the queue is empty)
+- [ ] `?pause` pauses; bot stays in channel — `?resume` resumes
+- [ ] `?stop` stops playback and clears the queue; the bot **stays in the channel** and leaves later once `IDLE_TIMEOUT_SEC` elapses with nothing playing
 
-### Playback Controls
+### Search / queue
 
-- [ ] `?skip` skips to the next queued track (or goes idle if queue is empty)
-- [ ] `?pause` pauses audio; bot stays in channel
-- [ ] `?resume` resumes paused audio
-- [ ] `?stop` stops playback, clears the queue, and the bot leaves the channel
+- [ ] `?play lofi hip hop` → numbered list with buttons 1–5; clicking **2** queues exactly the second result, attributed to the clicker
+- [ ] `?queue` lists pending tracks; `?np` shows the current track + requester; `?remove 1` removes the first upcoming track
 
-### Search Picker
+### Idle auto-leave & admin
 
-- [ ] Type `?play lofi hip hop` (or any search query) — bot replies with a numbered list and buttons 1–5
-- [ ] Clicking button **2** (for example) queues exactly the second result and updates the message
-- [ ] The queued track attribution shows the user who clicked the button
+- [ ] After the queue ends and `IDLE_TIMEOUT_SEC` passes with no new tracks, the bot leaves
+- [ ] A user in `ADMIN_USER_IDS` can queue/control from any channel; non-admins must be in the bot's channel
 
-### Queue / Now Playing
+### Error handling
 
-- [ ] `?queue` with multiple tracks in the queue shows the full list
-- [ ] `?np` shows the currently playing track and the requester's display name
-- [ ] `?remove 1` removes the first upcoming track from the queue
-
-### Idle Auto-Leave
-
-- [ ] Queue a short track and wait; after the track ends and `IDLE_TIMEOUT_SEC` elapses with no new tracks, the bot leaves the voice channel
-
-### Admin Controls
-
-- [ ] A non-admin user trying to run `?play` while the bot is in a different channel receives `❌ You must be in the bot's voice channel` (or similar rejection)
-- [ ] A user whose ID is in `ADMIN_USER_IDS` can queue and control from any channel; the bot does not relocate to a new channel mid-session
-
-### Error Handling
-
-- [ ] Providing an invalid or private/age-restricted YouTube URL returns a friendly `❌` message, not a crash
-- [ ] Providing a URL to a deleted video returns a friendly `❌` message
+- [ ] An invalid, private, age-restricted, or deleted video returns a friendly `❌` message, not a crash

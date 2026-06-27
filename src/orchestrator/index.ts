@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { GuildQueue } from "../queue/index.js";
 import { Mutex } from "../util/mutex.js";
 import type { Semaphore } from "../util/semaphore.js";
@@ -15,30 +16,65 @@ export interface ControllerDeps {
     unpin(id: string): void;
   };
   cacheDir: string;
-  createSession: (channelId: string) => Promise<VoiceSession>;
+  // The factory receives the controller's current idle timeout so freshly-created
+  // sessions honor the runtime (per-guild) value, not just the static default.
+  createSession: (channelId: string, idleTimeoutMs: number) => Promise<VoiceSession>;
   makeResource: (filePath: string, item: QueueItem) => unknown | Promise<unknown>;
   prefetchDepth: number;
+  /** Initial idle-disconnect timeout (ms); the panel can override it per guild at runtime. */
+  idleTimeoutMs: number;
   downloads: Semaphore;
   queue?: GuildQueue;
+  now?: () => number;
   onTrackError?: (info: { videoId: string; title: string; reason: string }) => void;
 }
 
-export class GuildController {
+/**
+ * Snapshot shape broadcast to the panel. The current (now-playing) item gains
+ * elapsed-position info; the snapshot gains a top-level `paused` flag so the UI
+ * can render a moving — but display-only — progress bar.
+ */
+export interface ControllerSnapshot {
+  current: (QueueItem & { positionMs: number; durationMs: number }) | null;
+  upcoming: QueueItem[];
+  history: QueueItem[];
+  paused: boolean;
+  /** How long (seconds) the bot stays in voice after playback ends; runtime-adjustable per guild. */
+  idleTimeoutSec: number;
+}
+
+export class GuildController extends EventEmitter {
   readonly queue: GuildQueue;
   private session: VoiceSession | null = null;
   private readonly lock = new Mutex();
   private readonly pinned = new Set<string>();
+  private readonly now: () => number;
+
+  // Playback-position tracking for the current track. `startedAt` is the epoch
+  // ms the track began; `pausedAccumMs` is the total paused time so far; while
+  // paused, `pausedAt` holds the moment the pause began.
+  private startedAt: number | null = null;
+  private pausedAccumMs = 0;
+  private pausedAt: number | null = null;
+
+  // Runtime-adjustable idle-disconnect timeout (ms), seeded from the configured default.
+  private idleTimeoutMs: number;
 
   constructor(
     readonly guildId: string,
     private readonly deps: ControllerDeps,
   ) {
+    super();
+    this.idleTimeoutMs = deps.idleTimeoutMs;
+    this.now = deps.now ?? (() => Date.now());
     this.queue = deps.queue ?? new GuildQueue();
     this.queue.on("prefetch", (videoId: string | null) => {
       if (videoId) void this.prefetch(videoId);
     });
     this.queue.on("changed", () => {
       void this.maybeStart();
+      // Re-broadcast to the panel on every queue mutation (add/remove/reorder/advance).
+      this.emit("changed");
     });
   }
 
@@ -46,8 +82,60 @@ export class GuildController {
     return this.session?.channelId ?? null;
   }
 
-  snapshot() {
-    return this.queue.snapshot();
+  get isPaused(): boolean {
+    return this.pausedAt !== null;
+  }
+
+  /** Current idle-disconnect timeout in seconds (per-guild, runtime-adjustable). */
+  getIdleTimeoutSec(): number {
+    return Math.round(this.idleTimeoutMs / 1000);
+  }
+
+  /**
+   * Set the idle-disconnect timeout (seconds). Updates the value used for new
+   * sessions, applies it immediately to the live session (restarting a running
+   * idle timer), and emits "changed" so the panel reflects it live.
+   */
+  setIdleTimeoutSec(sec: number): void {
+    this.idleTimeoutMs = sec * 1000;
+    this.session?.setIdleTimeout(this.idleTimeoutMs);
+    this.emit("changed");
+  }
+
+  /** Elapsed ms of the current track, excluding paused time. */
+  private positionMs(): number {
+    if (this.startedAt === null) return 0;
+    const pausedNow = this.pausedAt !== null ? this.now() - this.pausedAt : 0;
+    const elapsed = this.now() - this.startedAt - this.pausedAccumMs - pausedNow;
+    return Math.max(0, elapsed);
+  }
+
+  // Reset position tracking the moment a new track starts playing.
+  private markTrackStarted(): void {
+    this.startedAt = this.now();
+    this.pausedAccumMs = 0;
+    this.pausedAt = null;
+  }
+
+  snapshot(): ControllerSnapshot {
+    const snap = this.queue.snapshot();
+    const current = snap.current
+      ? {
+          ...snap.current,
+          positionMs: this.positionMs(),
+          durationMs:
+            snap.current.meta.durationSec && snap.current.meta.durationSec > 0
+              ? snap.current.meta.durationSec * 1000
+              : 0,
+        }
+      : null;
+    return {
+      current,
+      upcoming: snap.upcoming,
+      history: snap.history,
+      paused: this.isPaused,
+      idleTimeoutSec: this.getIdleTimeoutSec(),
+    };
   }
 
   async restore(channelId: string, items: QueueItem[]): Promise<void> {
@@ -58,7 +146,7 @@ export class GuildController {
 
   // Inline session create + listener wiring (shared by ensureConnected and moveTo; NOT locked itself).
   private async connectSessionLocked(channelId: string): Promise<void> {
-    const session = await this.deps.createSession(channelId);
+    const session = await this.deps.createSession(channelId, this.idleTimeoutMs);
     session.on("trackEnd", () => {
       if (this.session === session) void this.playNext();
     });
@@ -98,13 +186,22 @@ export class GuildController {
   }
 
   skip(): void {
-    this.session?.skip();
+    this.session?.skip(); // emits trackEnd -> advance -> queue "changed" -> broadcast
   }
   pause(): void {
-    this.session?.pause();
+    if (this.session && this.pausedAt === null) {
+      this.session.pause();
+      this.pausedAt = this.now();
+      this.emit("changed");
+    }
   }
   resume(): void {
-    this.session?.resume();
+    if (this.session && this.pausedAt !== null) {
+      this.session.resume();
+      this.pausedAccumMs += this.now() - this.pausedAt;
+      this.pausedAt = null;
+      this.emit("changed");
+    }
   }
   async remove(itemId: string): Promise<boolean> {
     return this.queue.remove(itemId);
@@ -115,7 +212,9 @@ export class GuildController {
   async stop(): Promise<void> {
     await this.queue.clear();
     this.session?.stop();
-    await this.leave();
+    // Stay in the voice channel after Stop; the normal idle timeout disconnects later.
+    this.session?.startIdleTimer();
+    this.emit("changed");
   }
 
   private async maybeStart(): Promise<void> {
@@ -140,6 +239,7 @@ export class GuildController {
       this.deps.cache.pin(item.meta.videoId);
       this.pinned.add(item.meta.videoId);
       session.play(await this.deps.makeResource(path, item));
+      this.markTrackStarted();
       return true;
     } catch (err) {
       this.deps.onTrackError?.({
@@ -189,6 +289,9 @@ export class GuildController {
   private async leave(): Promise<void> {
     this.session?.destroy();
     this.session = null;
+    this.startedAt = null;
+    this.pausedAt = null;
+    this.pausedAccumMs = 0;
     for (const id of this.pinned) this.deps.cache.unpin(id);
     this.pinned.clear();
   }

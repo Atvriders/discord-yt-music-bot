@@ -89,6 +89,43 @@ describe("VoiceSession", () => {
     expect(onIdle2).not.toHaveBeenCalled();
   });
 
+  it("setIdleTimeout updates the timeout used by a future startIdleTimer", () => {
+    vi.useFakeTimers();
+    const { session } = makeSession(1000);
+    const onIdle = vi.fn();
+    session.on("idle", onIdle);
+    session.setIdleTimeout(5000);
+    session.startIdleTimer();
+    vi.advanceTimersByTime(1000); // old timeout would have fired here
+    expect(onIdle).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(4000); // 5000 total
+    expect(onIdle).toHaveBeenCalledTimes(1);
+  });
+
+  it("setIdleTimeout restarts a RUNNING idle timer with the new value (takes effect immediately)", () => {
+    vi.useFakeTimers();
+    const { session } = makeSession(1000);
+    const onIdle = vi.fn();
+    session.on("idle", onIdle);
+    session.startIdleTimer();
+    vi.advanceTimersByTime(500); // 500ms into the original 1000ms timer
+    session.setIdleTimeout(3000); // restart with 3000ms from now
+    vi.advanceTimersByTime(999); // original (1000) would have already fired without restart
+    expect(onIdle).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(2001); // 3000 since restart
+    expect(onIdle).toHaveBeenCalledTimes(1);
+  });
+
+  it("setIdleTimeout does NOT start a timer if one is not running", () => {
+    vi.useFakeTimers();
+    const { session } = makeSession(1000);
+    const onIdle = vi.fn();
+    session.on("idle", onIdle);
+    session.setIdleTimeout(2000);
+    vi.advanceTimersByTime(10000);
+    expect(onIdle).not.toHaveBeenCalled();
+  });
+
   it("play() cancels the idle timer", () => {
     vi.useFakeTimers();
     const idleMs = 1000;
