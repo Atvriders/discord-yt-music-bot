@@ -36,7 +36,9 @@ async function main(): Promise<void> {
     if (snapshotTimer) clearTimeout(snapshotTimer);
     snapshotTimer = setTimeout(() => {
       snapshotTimer = null;
-      void writeSnapshot(media.cacheDir, collectSnapshot(hub, Date.now()));
+      writeSnapshot(media.cacheDir, collectSnapshot(hub, Date.now())).catch((err) =>
+        log.error({ err }, "session snapshot write failed"),
+      );
     }, 3000);
   };
 
