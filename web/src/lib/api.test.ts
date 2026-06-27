@@ -25,10 +25,15 @@ describe("api client", () => {
     expect((init as RequestInit).method).toBe("POST");
     expect(JSON.parse(String((init as RequestInit).body))).toEqual({ input: "https://youtu.be/x", voiceChannelId: "C1" });
   });
-  it("control hits the action route", async () => {
+  it("control hits the action route with no body or JSON content-type (avoids Fastify empty-body 400)", async () => {
     const fn = mockOnce(true, { ok: true });
-    await api.control("G1", "skip");
-    expect(fn.mock.calls[0]![0]).toBe("/api/guilds/G1/skip");
+    await api.control("G1", "pause");
+    const [url, init] = fn.mock.calls[0]!;
+    expect(url).toBe("/api/guilds/G1/pause");
+    const i = init as RequestInit;
+    expect(i.method).toBe("POST");
+    expect(i.body).toBeUndefined();
+    expect(i.headers).toBeUndefined();
   });
   it("throws ApiError with the status on non-OK", async () => {
     mockOnce(false, { error: "forbidden" }, 403);

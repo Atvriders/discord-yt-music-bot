@@ -14,7 +14,15 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 function post<T>(url: string, body?: unknown): Promise<T> {
-  return req<T>(url, { method: "POST", headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+  // Only send a JSON content-type when there is actually a body. Fastify rejects an
+  // empty body sent with `content-type: application/json` (FST_ERR_CTP_EMPTY_JSON_BODY
+  // → 400), which would break bodyless control POSTs (pause/resume/skip/stop).
+  const init: RequestInit = { method: "POST" };
+  if (body !== undefined) {
+    init.headers = { "content-type": "application/json" };
+    init.body = JSON.stringify(body);
+  }
+  return req<T>(url, init);
 }
 
 export type ControlAction = "skip" | "pause" | "resume" | "stop";
