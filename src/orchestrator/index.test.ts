@@ -31,7 +31,12 @@ class FakeSession extends EventEmitter {
   channelId = "C1";
 }
 
-function makeController(overrides: { downloadFn?: (id: string) => Promise<string> } = {}) {
+function makeController(
+  overrides: {
+    downloadFn?: (id: string) => Promise<string>;
+    onTrackError?: ReturnType<typeof vi.fn>;
+  } = {},
+) {
   const session = new FakeSession();
   const cacheStore = new Map<string, string>();
   const deps = {
@@ -50,6 +55,7 @@ function makeController(overrides: { downloadFn?: (id: string) => Promise<string
     makeResource: (p: string) => ({ res: p }),
     prefetchDepth: 1,
     downloads: new Semaphore(2),
+    onTrackError: overrides.onTrackError,
   };
   const ctrl = new GuildController("G1", deps as never);
   return { ctrl, session, deps };
@@ -107,11 +113,13 @@ describe("GuildController", () => {
   it("C1: skips a track whose download fails and plays the next one", async () => {
     const badId = "bbbbbbbbbbb";
     const goodId = "ggggggggggg";
+    const onTrackError = vi.fn();
     const { ctrl, session } = makeController({
       downloadFn: async (id: string) => {
         if (id === badId) throw new Error("gone");
         return `/cache/${id}.webm`;
       },
+      onTrackError,
     });
     await ctrl.ensureConnected("C1");
     await ctrl.enqueue(meta(badId), requester);
@@ -120,6 +128,11 @@ describe("GuildController", () => {
     await new Promise((r) => setTimeout(r, 10));
     expect(ctrl.snapshot().current?.meta.videoId).toBe(goodId);
     expect(session.play).toHaveBeenCalledTimes(1);
+    expect(onTrackError).toHaveBeenCalledWith({
+      videoId: badId,
+      title: badId,
+      reason: "download_failed",
+    });
   });
 
   it("I1: concurrent ensureConnected calls create only one session", async () => {

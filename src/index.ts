@@ -40,6 +40,9 @@ async function main(): Promise<void> {
     }, 3000);
   };
 
+  const web = loadWebConfig();
+  const broadcaster = new GuildBroadcaster();
+
   // The hub creates one controller per guild; the controller's voice factory needs the
   // guild's channel object, which the bot resolves at connect time. We bridge via a
   // per-guild "connect" closure captured from discord.js when ensureConnected is called.
@@ -58,6 +61,7 @@ async function main(): Promise<void> {
       makeResource: (filePath, item) => createPassthroughResource(filePath, item),
       prefetchDepth: bot.prefetchDepth,
       downloads,
+      onTrackError: (info) => broadcaster.broadcast(guildId, { type: "trackError", ...info }),
     });
     // Wire debounced snapshot on queue changes.
     controller.queue.on("changed", scheduleSnapshot);
@@ -76,9 +80,6 @@ async function main(): Promise<void> {
   client.on("error", (err) => log.error({ err }, "[client error]"));
   await client.login(bot.discordToken);
   log.info("discord-yt-music-bot is online");
-
-  const web = loadWebConfig();
-  const broadcaster = new GuildBroadcaster();
   const app = await buildApp({
     cfg: web,
     hub,

@@ -1,14 +1,28 @@
 import { useEffect, useReducer } from "react";
 import type { Snapshot } from "../types.js";
 
-export interface WsState { snapshot: Snapshot | null; status: "connecting" | "live" | "forbidden" | "closed"; }
-export const initialWsState: WsState = { snapshot: null, status: "connecting" };
+export interface WsState {
+  snapshot: Snapshot | null;
+  status: "connecting" | "live" | "forbidden" | "closed";
+  lastError?: { title: string; reason: string; seq: number } | null;
+}
+export const initialWsState: WsState = { snapshot: null, status: "connecting", lastError: null };
 
 export function applyWsMessage(prev: WsState, raw: string): WsState {
-  let msg: { type?: string; state?: Snapshot };
+  let msg: { type?: string; state?: Snapshot; title?: string; reason?: string };
   try { msg = JSON.parse(raw); } catch { return prev; }
-  if (msg.type === "state" && msg.state) return { snapshot: msg.state, status: "live" };
+  if (msg.type === "state" && msg.state) return { ...prev, snapshot: msg.state, status: "live" };
   if (msg.type === "error" || msg.type === "revoked") return { ...prev, status: "forbidden" };
+  if (msg.type === "trackError") {
+    return {
+      ...prev,
+      lastError: {
+        title: msg.title ?? "track",
+        reason: msg.reason ?? "failed",
+        seq: (prev.lastError?.seq ?? 0) + 1,
+      },
+    };
+  }
   return prev;
 }
 

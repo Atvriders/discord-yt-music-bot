@@ -3,7 +3,7 @@ import type { TrackMeta } from "../types.js";
 import { fmtTime } from "../lib/format.js";
 
 export function AddBar({ onPlay, onPick, busy }: {
-  onPlay: (input: string) => Promise<TrackMeta[] | null>; // returns candidates for a search, else null
+  onPlay: (input: string) => Promise<{ candidates: TrackMeta[] | null }>; // returns candidates for a search, else null
   onPick: (videoId: string) => void; busy?: boolean;
 }) {
   const [input, setInput] = useState("");
@@ -12,7 +12,7 @@ export function AddBar({ onPlay, onPick, busy }: {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!input.trim()) return;
-    const c = await onPlay(input.trim());
+    const { candidates: c } = await onPlay(input.trim());
     setCandidates(c);
     if (!c) setInput("");
   }

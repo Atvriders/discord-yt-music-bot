@@ -3,6 +3,7 @@ import { Mutex } from "../util/mutex.js";
 import type { Semaphore } from "../util/semaphore.js";
 import type { VoiceSession } from "../voice/session.js";
 import type { QueueItem, Requester, TrackMeta } from "../types/index.js";
+import { YtError } from "../youtube/errors.js";
 
 export interface ControllerDeps {
   youtube: { download(videoId: string, outDir: string): Promise<string> };
@@ -19,6 +20,7 @@ export interface ControllerDeps {
   prefetchDepth: number;
   downloads: Semaphore;
   queue?: GuildQueue;
+  onTrackError?: (info: { videoId: string; title: string; reason: string }) => void;
 }
 
 export class GuildController {
@@ -139,7 +141,12 @@ export class GuildController {
       this.pinned.add(item.meta.videoId);
       session.play(await this.deps.makeResource(path, item));
       return true;
-    } catch {
+    } catch (err) {
+      this.deps.onTrackError?.({
+        videoId: item.meta.videoId,
+        title: item.meta.title,
+        reason: err instanceof YtError ? err.kind : "download_failed",
+      });
       return false;
     }
   }

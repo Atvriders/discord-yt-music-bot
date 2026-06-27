@@ -19,4 +19,10 @@ describe("applyWsMessage", () => {
   it("ignores malformed frames", () => {
     expect(applyWsMessage({ ...initialWsState, status: "live" }, "not json")).toMatchObject({ status: "live" });
   });
+  it("sets lastError on a trackError frame and increments seq", () => {
+    const s1 = applyWsMessage(initialWsState, JSON.stringify({ type: "trackError", title: "X", reason: "po_token_sabr" }));
+    expect(s1.lastError).toMatchObject({ title: "X", reason: "po_token_sabr", seq: 1 });
+    const s2 = applyWsMessage(s1, JSON.stringify({ type: "trackError", title: "Y", reason: "download_failed" }));
+    expect(s2.lastError).toMatchObject({ title: "Y", reason: "download_failed", seq: 2 });
+  });
 });
