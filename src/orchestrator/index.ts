@@ -5,7 +5,13 @@ import type { Semaphore } from "../util/semaphore.js";
 import type { VoiceSession } from "../voice/session.js";
 import type { AudioInfo, QueueItem, Requester, TrackMeta } from "../types/index.js";
 import { YtError, YtErrorKind } from "../youtube/errors.js";
-import { DEFAULT_SETTINGS, applySettingsPatch, type GuildSettings } from "./settings.js";
+import {
+  DEFAULT_SETTINGS,
+  applySettingsPatch,
+  type FxPreset,
+  type GuildSettings,
+} from "./settings.js";
+import type { PlaylistStore, PlaylistSummary } from "./playlists.js";
 
 interface DownloadResult {
   path: string;
@@ -36,6 +42,15 @@ export interface AudioOptions {
   crossfadeSec: number;
   /** Apply ffmpeg `loudnorm` (EBU R128) normalization. */
   normalizeLoudness: boolean;
+  /** Audio FX preset appended to the ffmpeg `-af` chain. "none" = no preset. */
+  fx?: FxPreset;
+  /**
+   * Playback volume percentage (0–200, 100 = unchanged). Applied via @discordjs/voice
+   * INLINE volume on the created resource — so a non-100 value forces the PCM/transcode
+   * path (no Opus passthrough). The resource factory reads this to decide whether to
+   * enable inline volume and at what gain.
+   */
+  volumePct?: number;
 }
 
 export interface MakeResourceOpts {
@@ -79,10 +94,27 @@ export interface ControllerDeps {
   /** Seed for the per-guild settings (crossfade/normalize/repeat + idle). idleTimeoutSec is overridden by idleTimeoutMs. */
   settings?: GuildSettings;
   onTrackError?: (info: { videoId: string; title: string; reason: string }) => void;
+  /**
+   * Fired when a track actually STARTS playing (post-download, audio resource live). Used to
+   * drive the bot's global Discord presence ("Listening to <title>"). Best-effort/cosmetic —
+   * the host swallows any failure; it must never affect playback.
+   */
+  onTrackStart?: (meta: TrackMeta) => void;
+  /**
+   * Fired when this guild's voice session goes idle and is torn down (nothing left to play).
+   * Lets the host clear/revert the global presence if this guild was the one being shown.
+   */
+  onIdle?: () => void;
   /** Observability hook for AudioPlayer stream errors (logging only; recovery is via trackEnd). */
   onSessionError?: (err: unknown) => void;
   /** Called after any settings mutation so the host can persist (debounced) the change. */
   onSettingsChange?: (settings: GuildSettings) => void;
+  /**
+   * Per-guild saved-playlist store (optional). When provided, the controller exposes
+   * savePlaylist / loadPlaylist / listPlaylists / deletePlaylist backed by it. Omitted in
+   * unit fixtures that don't exercise playlists — the methods then behave as no-ops.
+   */
+  playlists?: PlaylistStore;
 }
 
 /**
@@ -109,6 +141,19 @@ export interface ControllerSnapshot {
   autoplaySource: GuildSettings["autoplaySource"];
   /** Per-guild max track length (seconds) accepted on enqueue; 0 = no limit. */
   maxTrackDurationSec: number;
+  /** Playback volume percentage (0–200, 100 = unchanged). */
+  volume: number;
+  /** Audio FX preset (none | bassboost | nightcore | vaporwave | eightd | treble | karaoke). */
+  fx: GuildSettings["fx"];
+}
+
+/**
+ * Minimal shape of a @discordjs/voice AudioResource the controller cares about. The
+ * factory returns an opaque `unknown`; when inline volume is enabled the resource
+ * exposes a `volume` knob we re-apply live on a volume change without re-creating it.
+ */
+interface InlineVolumeResource {
+  volume?: { setVolume(value: number): void } | null;
 }
 
 export class GuildController extends EventEmitter {
@@ -131,6 +176,12 @@ export class GuildController extends EventEmitter {
   private autoplayChain = 0;
   // Guard against re-entrant autoplay attempts while one is already resolving.
   private autoplayInFlight = false;
+
+  // The resource currently playing, kept so a live volume change can re-apply inline
+  // volume WITHOUT re-creating the stream (the fast path for setVolume). Null when
+  // nothing is playing or the current resource has no inline volume (volume === 100,
+  // Opus passthrough) — in that case a volume change must re-resource at position.
+  private currentResource: InlineVolumeResource | null = null;
 
   // Playback-position tracking for the current track. `startedAt` is the epoch
   // ms the track began; `pausedAccumMs` is the total paused time so far; while
@@ -200,13 +251,80 @@ export class GuildController extends EventEmitter {
    * Validate + merge a settings patch. Applies the resulting idle timeout to the live
    * session (restarting a running idle timer), notifies the host for persistence, and
    * emits "changed" so the panel reflects every field live. Returns the new settings.
+   *
+   * VOLUME / FX take effect on the CURRENT track immediately:
+   *   - volume: if the live resource carries an inline-volume knob, re-apply it in place
+   *     (cheap, no stream restart). Otherwise (it was an Opus passthrough at vol 100, or
+   *     we're crossing 100 ⇄ non-100 which changes whether inline volume is even enabled)
+   *     re-create the resource at the current position.
+   *   - fx: always re-creates the resource (the preset is baked into the ffmpeg chain).
    */
   updateSettings(patch: Partial<Record<keyof GuildSettings, unknown>>): GuildSettings {
-    this._settings = applySettingsPatch(this._settings, patch);
+    const before = this._settings;
+    this._settings = applySettingsPatch(before, patch);
     this.session?.setIdleTimeout(this.idleTimeoutMs);
+
+    const volumeChanged = this._settings.volume !== before.volume;
+    const fxChanged = this._settings.fx !== before.fx;
+    if (volumeChanged || fxChanged) {
+      // An fx change, or a volume change that crosses the 100 boundary (toggling the
+      // passthrough/inline-volume mode), needs a fresh resource. A volume change that
+      // stays non-100 (and on a resource that already has inline volume) is applied live.
+      const crossed100 = volumeChanged && (before.volume === 100 || this._settings.volume === 100);
+      if (fxChanged || crossed100 || !this.currentResource?.volume) {
+        void this.reResourceCurrent();
+      } else {
+        this.applyInlineVolume(this.currentResource);
+      }
+    }
+
     this.deps.onSettingsChange?.(this._settings);
     this.emit("changed");
     return { ...this._settings };
+  }
+
+  /**
+   * Set playback volume (0–200 %). Thin wrapper over updateSettings so the existing
+   * persistence + live re-apply / re-resource path is reused.
+   */
+  setVolume(pct: number): GuildSettings {
+    return this.updateSettings({ volume: pct });
+  }
+
+  /** Set the audio FX preset. Thin wrapper over updateSettings (re-resources live). */
+  setFx(fx: FxPreset): GuildSettings {
+    return this.updateSettings({ fx });
+  }
+
+  /**
+   * Re-create the audio resource for the CURRENT track at its current playback position
+   * so an audio-setting change (volume mode flip / fx preset) applies live. Reuses the
+   * same seek/re-resource machinery as seek(): ffmpeg `-ss` to the current offset, the
+   * current audio options (incl. the new fx/volume), preserving the paused state.
+   *
+   * Best-effort and serialized under the playback lock. A no-op when nothing is playing.
+   */
+  private async reResourceCurrent(): Promise<void> {
+    await this.lock.runExclusive(async () => {
+      const session = this.session;
+      const current = this.queue.current;
+      if (!session || !current) return;
+      const positionMs = this.positionMs();
+      const path = await this.ensureDownloaded(current.meta.videoId);
+      if (this.session !== session) return; // torn down while awaiting the download
+      current.audio = this.deps.cache.getAudio(current.meta.videoId);
+      this.deps.cache.pin(current.meta.videoId);
+      this.pinned.add(current.meta.videoId);
+      const wasPaused = this.pausedAt !== null;
+      await this.playResource(session, path, current, {
+        seekMs: positionMs,
+        audio: this.audioOptions(),
+      });
+      if (wasPaused) session.pause();
+      // Re-anchor so the moving bar resumes exactly where it was (preserving pause).
+      this.markTrackStarted(positionMs, true);
+      this.emit("changed");
+    });
   }
 
   /** Audio post-processing options derived from current settings. */
@@ -214,7 +332,31 @@ export class GuildController extends EventEmitter {
     return {
       crossfadeSec: this._settings.crossfadeSec,
       normalizeLoudness: this._settings.normalizeLoudness,
+      fx: this._settings.fx,
+      volumePct: this._settings.volume,
     };
+  }
+
+  /**
+   * Build the audio resource for `path`/`item`, apply the current INLINE volume to it
+   * (so a non-100 volume is honored from the first frame), remember it as the current
+   * resource for live volume changes, and hand it to the session to play.
+   */
+  private async playResource(
+    session: VoiceSession,
+    path: string,
+    item: QueueItem,
+    opts?: MakeResourceOpts,
+  ): Promise<void> {
+    const resource = (await this.deps.makeResource(path, item, opts)) as InlineVolumeResource;
+    this.applyInlineVolume(resource);
+    this.currentResource = resource;
+    session.play(resource);
+  }
+
+  /** Apply the current per-guild volume to a resource's inline volume knob, if present. */
+  private applyInlineVolume(resource: InlineVolumeResource | null): void {
+    resource?.volume?.setVolume(this._settings.volume / 100);
   }
 
   /** Elapsed ms of the current track, excluding paused time. */
@@ -260,6 +402,8 @@ export class GuildController extends EventEmitter {
       autoplay: this._settings.autoplay,
       autoplaySource: this._settings.autoplaySource,
       maxTrackDurationSec: this._settings.maxTrackDurationSec,
+      volume: this._settings.volume,
+      fx: this._settings.fx,
     };
   }
 
@@ -383,12 +527,10 @@ export class GuildController extends EventEmitter {
       this.deps.cache.pin(current.meta.videoId);
       this.pinned.add(current.meta.videoId);
       const wasPaused = this.pausedAt !== null;
-      session.play(
-        await this.deps.makeResource(path, current, {
-          seekMs: positionMs,
-          audio: this.audioOptions(),
-        }),
-      );
+      await this.playResource(session, path, current, {
+        seekMs: positionMs,
+        audio: this.audioOptions(),
+      });
       // A fresh resource always starts playing; re-apply pause if we were paused.
       if (wasPaused) session.pause();
       this.markTrackStarted(positionMs, true);
@@ -402,6 +544,32 @@ export class GuildController extends EventEmitter {
   async reorder(itemId: string, toIndex: number): Promise<boolean> {
     return this.queue.reorder(itemId, toIndex);
   }
+  /** Shuffle the upcoming list (Fisher-Yates). `rng` is injectable for deterministic tests. */
+  async shuffle(rng?: () => number): Promise<void> {
+    return this.queue.shuffle(rng);
+  }
+  /**
+   * Skip straight to a chosen upcoming item: drop every upcoming item BEFORE it (they are
+   * removed, not archived as played history), then advance so the target becomes current
+   * and starts playing. Returns false if the id isn't in the upcoming list. The drop +
+   * advance run under the playback lock so they can't interleave with a concurrent
+   * trackEnd/autoplay advance.
+   */
+  async jumpTo(itemId: string): Promise<boolean> {
+    return this.lock.runExclusive(async () => {
+      const upcoming = this.queue.snapshot().upcoming;
+      const idx = upcoming.findIndex((i) => i.id === itemId);
+      if (idx === -1) return false;
+      // Drop the items strictly before the target so it sits at the head of upcoming.
+      for (let i = 0; i < idx; i++) await this.queue.remove(upcoming[i]!.id);
+      // Advance unconditionally to the target (archives the current track and promotes the
+      // now-head target), then play it. We bypass playNextLocked deliberately: its repeat="one"
+      // branch would replay the current track instead of honoring the explicit jump.
+      const target = await this.queue.advance();
+      if (target) await this.playItemLocked(target);
+      return true;
+    });
+  }
   async stop(): Promise<void> {
     await this.queue.clear();
     // An explicit stop ends the autoplay chain — it must not silently refill the queue.
@@ -413,10 +581,54 @@ export class GuildController extends EventEmitter {
     this.startedAt = null;
     this.pausedAt = null;
     this.pausedAccumMs = 0;
+    this.currentResource = null;
     this.session?.stop();
     // Stay in the voice channel after Stop; the normal idle timeout disconnects later.
     this.session?.startIdleTimer();
     this.emit("changed");
+  }
+
+  // ── Saved playlists (per-guild, persisted via deps.playlists) ─────────────────────
+  // These delegate to the optional PlaylistStore. When no store is wired (unit fixtures),
+  // list/delete report "nothing" and save/load are inert, so the controller never throws
+  // merely because playlists weren't configured.
+
+  /**
+   * Save the CURRENT track plus everything UPCOMING as a named playlist for this guild
+   * (in play order). History is intentionally excluded — a playlist is "what is/was about
+   * to play", matching what a user sees as the live queue. Throws if the queue is empty
+   * (nothing to save) or the name is blank.
+   */
+  async savePlaylist(name: string): Promise<void> {
+    if (!this.deps.playlists) return;
+    const snap = this.queue.snapshot();
+    const metas = [...(snap.current ? [snap.current] : []), ...snap.upcoming].map((i) => i.meta);
+    await this.deps.playlists.save(this.guildId, name, metas);
+  }
+
+  /**
+   * Enqueue every track of a named playlist for this guild, attributed to `requester`,
+   * in saved order. Returns how many tracks were enqueued (0 when the playlist doesn't
+   * exist or no store is wired). Reuses enqueue() so the bot starts playing if idle and
+   * the usual queue events/broadcasts fire.
+   */
+  async loadPlaylist(name: string, requester: Requester): Promise<number> {
+    const tracks = this.deps.playlists?.get(this.guildId, name);
+    if (!tracks || tracks.length === 0) return 0;
+    for (const meta of tracks) await this.queue.add(meta, requester);
+    await this.maybeStart();
+    return tracks.length;
+  }
+
+  /** Summaries of this guild's saved playlists (empty when no store is wired). */
+  listPlaylists(): PlaylistSummary[] {
+    return this.deps.playlists?.list(this.guildId) ?? [];
+  }
+
+  /** Delete a named playlist for this guild; returns whether it existed. */
+  async deletePlaylist(name: string): Promise<boolean> {
+    if (!this.deps.playlists) return false;
+    return this.deps.playlists.delete(this.guildId, name);
   }
 
   private async maybeStart(): Promise<void> {
@@ -445,13 +657,16 @@ export class GuildController extends EventEmitter {
       item.audio = this.deps.cache.getAudio(item.meta.videoId);
       this.deps.cache.pin(item.meta.videoId);
       this.pinned.add(item.meta.videoId);
-      session.play(await this.deps.makeResource(path, item, { audio: this.audioOptions() }));
+      await this.playResource(session, path, item, { audio: this.audioOptions() });
       this.markTrackStarted();
       // Remember what just started so autoplay can seed its next pull from it (by id for
       // radio, by artist/channel for artist), and record the id so autoplay never
       // re-queues a track we've already played.
       this.lastPlayedMeta = item.meta;
       this.autoplaySeen.add(item.meta.videoId);
+      // Drive the bot's global Discord presence ("Listening to <title>"). Best-effort:
+      // the host swallows failures; a presence hiccup must never affect playback.
+      this.deps.onTrackStart?.(item.meta);
       // Re-broadcast now that the new track has actually started: the "changed"
       // fired from queue.advance() ran BEFORE markTrackStarted(), so the panel's
       // now-playing snapshot for this track still carried the PREVIOUS track's
@@ -490,6 +705,10 @@ export class GuildController extends EventEmitter {
     // Nothing left in the queue. If autoplay is on, try to keep the music going with
     // YouTube's radio for the last track before falling back to idling.
     if (await this.tryAutoplayLocked()) return;
+    // The queue ran dry naturally: nothing is playing any more, so drop the reference to
+    // the just-finished resource (already cleared on stop/teardown). Leaving it stale lets
+    // a later live volume change re-apply onto a dead resource.
+    this.currentResource = null;
     session.startIdleTimer();
   }
 
@@ -585,6 +804,7 @@ export class GuildController extends EventEmitter {
   private leaveInternal(): void {
     this.session?.destroy();
     this.session = null;
+    this.currentResource = null;
     this.startedAt = null;
     this.pausedAt = null;
     this.pausedAccumMs = 0;
@@ -594,5 +814,8 @@ export class GuildController extends EventEmitter {
     this.lastPlayedMeta = null;
     this.autoplaySeen.clear();
     this.autoplayChain = 0;
+    // Nothing is playing in this guild any more — let the host clear/revert the global
+    // Discord presence if this guild was the one being shown. Best-effort/cosmetic.
+    this.deps.onIdle?.();
   }
 }

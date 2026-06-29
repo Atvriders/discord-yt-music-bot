@@ -5,6 +5,7 @@ import {
   CROSSFADE_MAX_SEC,
   IDLE_TIMEOUT_MAX_SEC,
   MAX_TRACK_DURATION_CEILING_SEC,
+  VOLUME_MAX,
 } from "./settings.js";
 
 describe("applySettingsPatch", () => {
@@ -101,6 +102,44 @@ describe("applySettingsPatch", () => {
     expect(applySettingsPatch(base, { maxTrackDurationSec: "abc" }).maxTrackDurationSec).toBe(7200);
     expect(applySettingsPatch(base, { maxTrackDurationSec: NaN }).maxTrackDurationSec).toBe(7200);
     expect(applySettingsPatch(base, {}).maxTrackDurationSec).toBe(7200);
+  });
+
+  it("defaults volume to 100 (% = unchanged)", () => {
+    expect(DEFAULT_SETTINGS.volume).toBe(100);
+  });
+
+  it("clamps volume into [0, max] and rounds", () => {
+    expect(applySettingsPatch(DEFAULT_SETTINGS, { volume: 150 }).volume).toBe(150);
+    expect(applySettingsPatch(DEFAULT_SETTINGS, { volume: -10 }).volume).toBe(0);
+    expect(applySettingsPatch(DEFAULT_SETTINGS, { volume: 9999 }).volume).toBe(VOLUME_MAX);
+    expect(applySettingsPatch(DEFAULT_SETTINGS, { volume: 73.6 }).volume).toBe(74);
+  });
+
+  it("keeps base volume for a non-numeric / null patch value", () => {
+    const base = { ...DEFAULT_SETTINGS, volume: 60 };
+    expect(applySettingsPatch(base, { volume: "loud" }).volume).toBe(60);
+    expect(applySettingsPatch(base, { volume: NaN }).volume).toBe(60);
+    expect(applySettingsPatch(base, { volume: null }).volume).toBe(60);
+    expect(applySettingsPatch(base, {}).volume).toBe(60);
+  });
+
+  it("defaults fx to 'none' and accepts only the known presets, else keeps base", () => {
+    expect(DEFAULT_SETTINGS.fx).toBe("none");
+    for (const fx of [
+      "bassboost",
+      "nightcore",
+      "vaporwave",
+      "eightd",
+      "treble",
+      "karaoke",
+    ] as const) {
+      expect(applySettingsPatch(DEFAULT_SETTINGS, { fx }).fx).toBe(fx);
+    }
+    expect(applySettingsPatch(DEFAULT_SETTINGS, { fx: "bogus" }).fx).toBe("none");
+    // A non-default base survives an invalid patch value (kept, not reset to none).
+    const base = { ...DEFAULT_SETTINGS, fx: "nightcore" as const };
+    expect(applySettingsPatch(base, { fx: "bogus" }).fx).toBe("nightcore");
+    expect(applySettingsPatch(base, { fx: 42 }).fx).toBe("nightcore");
   });
 
   it("ignores unrelated / non-numeric input gracefully", () => {

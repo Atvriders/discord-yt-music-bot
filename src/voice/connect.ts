@@ -55,15 +55,22 @@ export async function createVoiceSession(
 /**
  * Audio resource for the cached file.
  *
- * Fast path (offset 0, no audio post-processing): Opus-passthrough — probe the
- * container and pass the Opus stream straight through (ffmpeg only if non-Opus),
+ * Fast path (offset 0, no audio post-processing, volume 100): Opus-passthrough — probe
+ * the container and pass the Opus stream straight through (ffmpeg only if non-Opus),
  * exactly as before.
  *
- * Transcoded path: required when EITHER a `seekMs` offset is requested (Opus frames
- * aren't randomly seekable) OR audio post-processing is enabled (loudnorm / the
- * pseudo-crossfade afade chain — see orchestrator/settings.ts CROSSFADE HONESTY). We
- * run ffmpeg with `-ss` and/or `-af`, emitting Opus in an Ogg container. The ffmpeg
+ * Transcoded path: required when ANY of:
+ *   - a `seekMs` offset is requested (Opus frames aren't randomly seekable);
+ *   - audio post-processing is enabled (loudnorm / the pseudo-crossfade afade chain /
+ *     an FX preset — see orchestrator/settings.ts);
+ *   - the volume is not 100 % — inline volume needs raw PCM, so we can't passthrough Opus.
+ * We run ffmpeg with `-ss` and/or `-af`, emitting Opus in an Ogg container. The ffmpeg
  * spin-up is what produces the brief audible gap on scrub.
+ *
+ * INLINE VOLUME: when a non-100 volume is requested the resource is created with
+ * `{ inlineVolume: true }` so the controller can `resource.volume.setVolume(v/100)` on
+ * play and live thereafter. Inline volume forces PCM decoding (no Opus passthrough),
+ * which is exactly why a non-100 volume drops out of the fast path.
  */
 export async function createPassthroughResource(
   filePath: string,
@@ -80,8 +87,12 @@ export async function createPassthroughResource(
         seekMs,
       )
     : null;
-  if (seekMs > 0 || filter) {
-    return createTranscodedResource(filePath, metadata, seekMs, filter);
+  const volumePct = opts.audio?.volumePct ?? 100;
+  // Inline volume is enabled whenever volume != 100. It requires PCM (no Opus
+  // passthrough), so it also forces the transcoded path.
+  const inlineVolume = volumePct !== 100;
+  if (seekMs > 0 || filter || inlineVolume) {
+    return createTranscodedResource(filePath, metadata, seekMs, filter, inlineVolume);
   }
   const { stream, type } = await demuxProbe(createReadStream(filePath));
   return createAudioResource(stream, { inputType: type, inlineVolume: false, metadata });
@@ -89,13 +100,20 @@ export async function createPassthroughResource(
 
 /**
  * Transcode the cached file via ffmpeg, optionally seeking with `-ss` and/or applying
- * an `-af` audio-filter chain, producing an Ogg/Opus stream.
+ * an `-af` audio-filter chain.
+ *
+ * Output format depends on whether INLINE VOLUME is requested:
+ *   - inlineVolume=false → Ogg/Opus (cheap, @discordjs/voice passes it through).
+ *   - inlineVolume=true  → raw signed-16-bit-LE stereo 48k PCM (StreamType.Raw) so the
+ *     resource's volume transformer can scale samples directly; @discordjs/voice then
+ *     encodes to Opus. This is the PCM path inline volume requires.
  */
 function createTranscodedResource(
   filePath: string,
   metadata: unknown,
   seekMs: number,
   filter: string | null,
+  inlineVolume = false,
 ): AudioResource {
   const args = ["-loglevel", "error"];
   if (seekMs > 0) {
@@ -103,7 +121,12 @@ function createTranscodedResource(
   }
   args.push("-i", filePath, "-vn");
   if (filter) args.push("-af", filter);
-  args.push("-c:a", "libopus", "-b:a", "128k", "-f", "ogg", "pipe:1");
+  if (inlineVolume) {
+    // Raw PCM for the volume transformer: s16le, stereo, 48 kHz (Discord's native rate).
+    args.push("-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1");
+  } else {
+    args.push("-c:a", "libopus", "-b:a", "128k", "-f", "ogg", "pipe:1");
+  }
   // Pipe (not ignore) stderr so transcode failures (bad filter, missing codec, corrupt
   // file, OOM) leave a trace instead of silently ending the stream → trackEnd. `-loglevel
   // error` already keeps the volume low, so buffering it is cheap.
@@ -122,8 +145,8 @@ function createTranscodedResource(
     }
   });
   const resource = createAudioResource(ff.stdout, {
-    inputType: StreamType.OggOpus,
-    inlineVolume: false,
+    inputType: inlineVolume ? StreamType.Raw : StreamType.OggOpus,
+    inlineVolume,
     metadata,
   });
   // Reap ffmpeg when the consumer is done with the stream.

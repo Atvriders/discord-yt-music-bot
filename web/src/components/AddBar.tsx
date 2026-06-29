@@ -29,29 +29,35 @@ export function AddBar({ onPlay, onQueueAll, busy }: {
   }
   const disabled = busy || pending;
   return (
-    <section className="card reveal p-5 sm:p-6" style={{ animationDelay: "120ms" }}>
-      <form onSubmit={submit} className="flex gap-2.5">
+    <section className="card p-5 sm:p-6">
+      <span className="eyebrow">Add to queue</span>
+      <form onSubmit={submit} className="mt-3 flex flex-col gap-2.5 sm:flex-row">
         <input value={input} onChange={(e) => setInput(e.target.value)} disabled={disabled}
           placeholder="Paste a YouTube link, or search a song…" aria-label="Add a track"
-          className="flex-1 bg-transparent outline-none text-sm px-4 py-3 rounded-xl"
+          className="flex-1 outline-none text-sm px-4 py-3"
           style={{ border: "1px solid var(--color-line)", color: "var(--color-ink)" }} />
-        <button className="pill pill-primary" disabled={disabled} type="submit">
+        <button className="pill pill-primary justify-center" disabled={disabled} type="submit">
           {pending ? (<><span className="spinner" aria-hidden /> Resolving…</>) : "Queue it"}
         </button>
       </form>
       {candidates && candidates.length === 0 && (
-        <p className="mt-4 text-sm" style={{ color: "var(--color-ink-faint)" }}>
+        <p className="mt-4 text-sm font-mono" style={{ color: "var(--color-ink-faint)" }}>
           No matches — try a different search.
         </p>
       )}
       {candidates && candidates.length > 0 && (
-        <div className="mt-4">
+        // The "Pick the exact track" header lives inside <Picker/> (shared by
+        // AddBar and Discover), so this wrapper only supplies the separator rule.
+        <div className="mt-5 pt-5" style={{ borderTop: "1px solid var(--color-line)" }}>
           <Picker
             candidates={candidates}
             busy={busy}
             // Queue every selected candidate IN ORDER via one batched, ordered request.
             onQueueSelected={onQueueAll}
-            onQueued={() => { setCandidates(null); setInput(""); }}
+            onQueued={() => {
+              setCandidates(null);
+              setInput("");
+            }}
           />
         </div>
       )}

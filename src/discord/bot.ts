@@ -11,9 +11,12 @@ import { parseCommand } from "./command-parser.js";
 import { handleCommand } from "./handlers.js";
 import { decodePick } from "./picker.js";
 import { buildBotBio } from "./bio.js";
+import { decodeNpAction, type NpAction } from "./np-message.js";
 import { selectVoiceChannel } from "../orchestrator/voice-selection.js";
+import { canControl } from "../auth/authz.js";
 import { YtError, YtErrorKind } from "../youtube/errors.js";
 import type { GuildHub } from "../orchestrator/hub.js";
+import type { GuildController } from "../orchestrator/index.js";
 import type { YouTubeService } from "../youtube/index.js";
 import type { Requester } from "../types/index.js";
 import type { Logger } from "pino";
@@ -35,6 +38,35 @@ export interface BotDeps {
   // The public web-panel base URL (WebConfig.publicBaseUrl), used to add the "Panel:"
   // line to the bot's About Me. Optional: omit when running without the web panel.
   baseUrl?: string;
+  /**
+   * Called whenever a `?`-command runs in a guild, with the text channel it ran in. The
+   * host stores this as the guild's "last command channel" so the live now-playing
+   * manager knows where to post. Optional — omit when running without the panel/np feature.
+   */
+  onCommandChannel?: (guildId: string, channelId: string) => void;
+}
+
+/** Apply a now-playing control-button action to a guild controller. Shared by the button
+ * router so the mapping customId -> action -> controller method lives in one place. */
+export async function applyNpAction(
+  controller: Pick<GuildController, "isPaused" | "pause" | "resume" | "skip" | "stop" | "shuffle">,
+  action: NpAction,
+): Promise<void> {
+  switch (action) {
+    case "pauseresume":
+      if (controller.isPaused) controller.resume();
+      else controller.pause();
+      return;
+    case "skip":
+      controller.skip();
+      return;
+    case "stop":
+      await controller.stop();
+      return;
+    case "shuffle":
+      await controller.shuffle();
+      return;
+  }
 }
 
 /**
@@ -82,6 +114,10 @@ export function createBot(deps: BotDeps): Client {
     const cmd = parseCommand(message.content, deps.prefix);
     if (cmd.kind === "none") return;
 
+    // Remember the text channel of the most recent command for this guild so the live
+    // now-playing message can be posted there. Best-effort; the host swallows failures.
+    deps.onCommandChannel?.(message.guildId, message.channelId);
+
     try {
       const controller = deps.hub.get(message.guildId);
       const result = await handleCommand(cmd, {
@@ -115,6 +151,46 @@ export function createBot(deps: BotDeps): Client {
 
   const onInteraction = async (interaction: Interaction): Promise<void> => {
     if (!interaction.isButton()) return;
+
+    // Live now-playing control buttons (pause/resume, skip, stop, shuffle). Authorized by
+    // the same membership/admin check the panel uses (canControl), then routed to the
+    // controller action and reflected in the message.
+    const npAction = decodeNpAction(interaction.customId);
+    if (npAction && interaction.inGuild()) {
+      const allowed = await canControl(
+        client as never,
+        interaction.user.id,
+        interaction.guildId,
+        deps.adminUserIds,
+      ).catch(() => false);
+      if (!allowed) {
+        await interaction
+          .reply({
+            content: "❌ You don't have permission to control playback here.",
+            ephemeral: true,
+          })
+          .catch(() => {});
+        return;
+      }
+      try {
+        await interaction.deferUpdate();
+      } catch {
+        return;
+      }
+      try {
+        const controller = deps.hub.get(interaction.guildId);
+        await applyNpAction(controller, npAction);
+        // The controller emits "changed", which the now-playing manager debounces into an
+        // edit of this very message — so we don't edit it here ourselves.
+      } catch (err) {
+        deps.log.error({ err }, "[bot] now-playing control failed");
+        await interaction
+          .followUp({ content: "❌ That control didn't work.", ephemeral: true })
+          .catch(() => {});
+      }
+      return;
+    }
+
     const videoId = decodePick(interaction.customId);
     if (!videoId || !interaction.inGuild()) return;
 

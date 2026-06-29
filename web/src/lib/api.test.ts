@@ -59,6 +59,22 @@ describe("api client", () => {
     expect(r.queued).toEqual({ id: "i1", title: "X" });
   });
 
+  it("loadPlaylist POSTs the voiceChannelId (path-encodes the name)", async () => {
+    const fn = mockOnce(true, { ok: true, queued: 3 });
+    const r = await api.loadPlaylist("G1", "road trip", "C1");
+    const [url, init] = fn.mock.calls[0]!;
+    expect(url).toBe("/api/guilds/G1/playlists/road%20trip/load");
+    expect((init as RequestInit).method).toBe("POST");
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({ voiceChannelId: "C1" });
+    expect(r.queued).toBe(3);
+  });
+  it("loadPlaylist sends no voiceChannelId field when none is given", async () => {
+    const fn = mockOnce(true, { ok: true, queued: 1 });
+    await api.loadPlaylist("G1", "chill");
+    const [, init] = fn.mock.calls[0]!;
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({ voiceChannelId: undefined });
+  });
+
   it("remove POSTs the itemId to the queue/remove route", async () => {
     const fn = mockOnce(true, { ok: true });
     const r = await api.remove("G1", "item-9");

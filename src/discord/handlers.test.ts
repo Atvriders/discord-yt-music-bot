@@ -29,6 +29,7 @@ function ctx(overrides: Partial<Parameters<typeof handleCommand>[1]> = {}) {
     stop: vi.fn(async () => {}),
     remove: vi.fn(async () => true),
     snapshot: vi.fn(() => ({ current: null, upcoming: [], history: [] })),
+    setVolume: vi.fn((pct: number) => ({ volume: pct })),
   };
   const youtube = { resolve: vi.fn(), search: vi.fn() };
   const { controller: _c, youtube: _y, ...rest } = overrides;
@@ -165,6 +166,13 @@ describe("handleCommand — controls", () => {
     expect(c.controller.stop).toHaveBeenCalled();
   });
 
+  it("volume calls controller.setVolume and reports the new percentage", async () => {
+    const c = ctx();
+    const res = await handleCommand({ kind: "volume", percent: 150 }, c as never);
+    expect(c.controller.setVolume).toHaveBeenCalledWith(150);
+    expect(res).toEqual({ type: "message", content: expect.stringContaining("150%") });
+  });
+
   it("remove maps a 1-based index to the upcoming item id", async () => {
     const c = ctx();
     c.controller.snapshot.mockReturnValue({
@@ -198,5 +206,29 @@ describe("handleCommand — controls", () => {
   it("help lists commands", async () => {
     const res = await handleCommand({ kind: "help" }, ctx() as never);
     expect(res).toEqual({ type: "message", content: expect.stringContaining("?play") });
+  });
+
+  it("history lists recently played, most-recent first, capped at 10", async () => {
+    const c = ctx();
+    // 12 finished tracks, oldest-first (as the queue stores history).
+    const history = Array.from({ length: 12 }, (_, i) => ({
+      id: `h${i}`,
+      meta: { title: `Track ${i}` },
+      requester: { displayName: "dj" },
+    }));
+    c.controller.snapshot.mockReturnValue({ current: null, upcoming: [], history } as never);
+    const res = await handleCommand({ kind: "history" }, c as never);
+    if (res.type !== "message") throw new Error("expected message");
+    // Most recent (Track 11) is listed first; only the last 10 are shown (Track 2..11).
+    expect(res.content).toContain("1. Track 11");
+    expect(res.content).toContain("Track 2");
+    expect(res.content).not.toContain("Track 0");
+  });
+
+  it("history reports nothing when no tracks have played", async () => {
+    const c = ctx();
+    c.controller.snapshot.mockReturnValue({ current: null, upcoming: [], history: [] } as never);
+    const res = await handleCommand({ kind: "history" }, c as never);
+    expect(res).toEqual({ type: "message", content: expect.stringContaining("No history") });
   });
 });

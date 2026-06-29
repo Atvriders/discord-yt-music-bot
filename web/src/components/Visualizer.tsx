@@ -30,28 +30,68 @@ const BARS = [
 
 export function Visualizer({ playing }: { playing: boolean }) {
   return (
-    <div
-      className={`viz${playing ? " viz-on" : ""}`}
-      role="presentation"
-      aria-hidden="true"
-      data-testid="visualizer"
-      data-playing={playing ? "true" : "false"}
-      title="Decorative visualizer (synthetic — not the real audio)"
-    >
-      {BARS.map((b, i) => (
+    <div role="presentation" aria-hidden="true">
+      {/* Carved VU-meter housing: a recessed well machined into the faceplate,
+          with an engraved silkscreen label + a mono "signal" readout that lights
+          red when the deck is powered (playing). */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: "0.4rem",
+        }}
+      >
+        <span className="eyebrow">Levels</span>
         <span
-          key={i}
-          className="viz-bar"
-          style={
-            {
-              animationDuration: b.dur,
-              animationDelay: b.delay,
-              "--viz-peak": b.peak,
-              "--viz-base": b.base,
-            } as React.CSSProperties
-          }
-        />
-      ))}
+          className="font-mono"
+          style={{
+            fontSize: "0.62rem",
+            letterSpacing: "0.04em",
+            color: playing ? "var(--color-ember-soft)" : "var(--color-ink-faint)",
+            textShadow: playing ? "0 0 8px rgba(255,0,0,.45)" : "none",
+            transition: "color var(--dur-fast) var(--ease-mech)",
+          }}
+        >
+          {playing ? "● SIGNAL" : "○ SILENT"}
+        </span>
+      </div>
+
+      {/* The lit needle array. The recessed surround reads as carved into the
+          plate; the bars (.viz / .viz-bar / .viz-on) are the backlit VU columns.
+          Class names + per-bar custom props are unchanged so motion + tests hold. */}
+      <div
+        style={{
+          padding: "0.45rem 0.7rem 0.3rem",
+          borderRadius: "var(--radius-sm)",
+          background: "linear-gradient(180deg, #0a0809, var(--color-sunken))",
+          boxShadow: "var(--shadow-inset)",
+        }}
+      >
+        <div
+          className={`viz${playing ? " viz-on" : ""}`}
+          role="presentation"
+          aria-hidden="true"
+          data-testid="visualizer"
+          data-playing={playing ? "true" : "false"}
+          title="Decorative visualizer (synthetic — not the real audio)"
+        >
+          {BARS.map((b, i) => (
+            <span
+              key={i}
+              className="viz-bar"
+              style={
+                {
+                  animationDuration: b.dur,
+                  animationDelay: b.delay,
+                  "--viz-peak": b.peak,
+                  "--viz-base": b.base,
+                } as React.CSSProperties
+              }
+            />
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

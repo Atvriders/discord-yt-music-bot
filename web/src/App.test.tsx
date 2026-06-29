@@ -397,6 +397,42 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByText(/Queued: My Song — only an admin can move the bot/i)).toBeTruthy());
   });
 
+  it("load playlist: forwards the current voiceChannelId so the bot connects + plays", async () => {
+    const wsRef: { current: { deliver: (s: unknown) => void } | null } = { current: null };
+    vi.stubGlobal("WebSocket", makeFakeWS({ current: null, upcoming: [], history: [], paused: false, idleTimeoutSec: 300 }, wsRef) as unknown as typeof WebSocket);
+    let loadBody: string | undefined;
+    vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
+      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "Booth" }] }) });
+      if (url.includes("/voice-channels")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [{ id: "C1", name: "General" }], currentChannelId: "C1" }) });
+      if (url.endsWith("/api/guilds/G1/playlists")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ playlists: [{ name: "chill", trackCount: 3, savedAt: 1000 }] }) });
+      if (url.includes("/playlists/chill/load")) { loadBody = String(init?.body); return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ ok: true, queued: 3 }) }); }
+      return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: [], history: [], paused: false }) });
+    }));
+    render(<App />);
+    // The current channel (C1) auto-selects; click Load on the "chill" playlist.
+    const loadBtn = await screen.findByRole("button", { name: /Load chill/i });
+    fireEvent.click(loadBtn);
+    await waitFor(() => expect(screen.getByText(/Loaded 3 tracks from chill/i)).toBeTruthy());
+    expect(JSON.parse(loadBody!)).toEqual({ voiceChannelId: "C1" }); // forwarded the channel
+  });
+
+  it("load playlist: surfaces the no_voice_channel error via the banner", async () => {
+    const wsRef: { current: { deliver: (s: unknown) => void } | null } = { current: null };
+    vi.stubGlobal("WebSocket", makeFakeWS({ current: null, upcoming: [], history: [], paused: false, idleTimeoutSec: 300 }, wsRef) as unknown as typeof WebSocket);
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "Booth" }] }) });
+      // No current channel and a channel list present, but the user never picks one, so the
+      // panel's noVoiceTarget guard fires before any backend call (mirrors play/pick).
+      if (url.includes("/voice-channels")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [{ id: "C1", name: "General" }], currentChannelId: null }) });
+      if (url.endsWith("/api/guilds/G1/playlists")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ playlists: [{ name: "chill", trackCount: 3, savedAt: 1000 }] }) });
+      return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: [], history: [], paused: false }) });
+    }));
+    render(<App />);
+    const loadBtn = await screen.findByRole("button", { name: /Load chill/i });
+    fireEvent.click(loadBtn);
+    await waitFor(() => expect(screen.getByText(/Pick a voice channel first/i)).toBeTruthy());
+  });
+
   it("bulk-queue: surfaces ONE aggregated summary banner (not N racing banners) and queues IN ORDER", async () => {
     const wsRef: { current: { deliver: (s: unknown) => void } | null } = { current: null };
     vi.stubGlobal("WebSocket", makeFakeWS({

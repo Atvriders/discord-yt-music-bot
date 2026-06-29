@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { GatewayIntentBits, GuildMember, Events, Routes } from "discord.js";
-import { createBot, setBotBio, REQUIRED_INTENTS, type BotDeps } from "./bot.js";
+import { createBot, setBotBio, applyNpAction, REQUIRED_INTENTS, type BotDeps } from "./bot.js";
+import { encodeNpAction } from "./np-message.js";
 import { YtError, YtErrorKind } from "../youtube/errors.js";
 import type { TrackMeta } from "../types/index.js";
 
@@ -224,6 +225,195 @@ describe("createBot — InteractionCreate", () => {
     await Promise.resolve();
 
     expect(controller.enqueue).not.toHaveBeenCalled();
+  });
+});
+
+describe("applyNpAction — customId -> controller action mapping", () => {
+  function npController() {
+    return {
+      isPaused: false,
+      pause: vi.fn(),
+      resume: vi.fn(),
+      skip: vi.fn(),
+      stop: vi.fn(async () => {}),
+      shuffle: vi.fn(async () => {}),
+    };
+  }
+
+  it("pauseresume pauses when playing, resumes when paused", async () => {
+    const c = npController();
+    await applyNpAction(c as never, "pauseresume");
+    expect(c.pause).toHaveBeenCalledOnce();
+    expect(c.resume).not.toHaveBeenCalled();
+
+    const paused = { ...npController(), isPaused: true };
+    await applyNpAction(paused as never, "pauseresume");
+    expect(paused.resume).toHaveBeenCalledOnce();
+    expect(paused.pause).not.toHaveBeenCalled();
+  });
+
+  it("maps skip/stop/shuffle to their controller methods", async () => {
+    const c = npController();
+    await applyNpAction(c as never, "skip");
+    await applyNpAction(c as never, "stop");
+    await applyNpAction(c as never, "shuffle");
+    expect(c.skip).toHaveBeenCalledOnce();
+    expect(c.stop).toHaveBeenCalledOnce();
+    expect(c.shuffle).toHaveBeenCalledOnce();
+  });
+});
+
+describe("createBot — now-playing control buttons (InteractionCreate)", () => {
+  interface NpMockController {
+    isPaused: boolean;
+    pause: ReturnType<typeof vi.fn>;
+    resume: ReturnType<typeof vi.fn>;
+    skip: ReturnType<typeof vi.fn>;
+    stop: ReturnType<typeof vi.fn>;
+    shuffle: ReturnType<typeof vi.fn>;
+  }
+
+  function npDeps(): { deps: BotDeps; controller: NpMockController } {
+    const controller: NpMockController = {
+      isPaused: false,
+      pause: vi.fn(),
+      resume: vi.fn(),
+      skip: vi.fn(),
+      stop: vi.fn(async () => {}),
+      shuffle: vi.fn(async () => {}),
+    };
+    const deps: BotDeps = {
+      hub: { get: vi.fn(() => controller) } as never,
+      youtube: { resolve: vi.fn() } as never,
+      prefix: "?",
+      searchLimit: 5,
+      adminUserIds: new Set<string>(),
+      log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    };
+    return { deps, controller };
+  }
+
+  function npInteraction(action: Parameters<typeof encodeNpAction>[0]) {
+    const reply = vi.fn(async () => {});
+    const deferUpdate = vi.fn(async () => {});
+    const followUp = vi.fn(async () => {});
+    const interaction = {
+      isButton: () => true,
+      inGuild: () => true,
+      customId: encodeNpAction(action),
+      guildId: "100000000000000000",
+      user: { id: "200000000000000000", username: "user", displayAvatarURL: () => "http://a" },
+      reply,
+      deferUpdate,
+      followUp,
+    };
+    return { interaction, reply, deferUpdate, followUp };
+  }
+
+  // Force canControl(client, …) to resolve allowed/forbidden by stubbing the client's
+  // guild cache + member fetch (the membership path), independent of admin ids.
+  function stubGuildCache(client: object, opts: { member: boolean }): void {
+    const guild = {
+      members: {
+        fetch: vi.fn(async (_id: string) => {
+          if (!opts.member) throw new Error("Unknown Member");
+          return {};
+        }),
+      },
+    };
+    Object.defineProperty(client, "guilds", {
+      value: { cache: new Map([["100000000000000000", guild]]) },
+      configurable: true,
+    });
+  }
+
+  it("ALLOWED (guild member): defers and routes skip to the controller", async () => {
+    const { deps, controller } = npDeps();
+    const client = createBot(deps);
+    stubGuildCache(client, { member: true });
+    const { interaction, deferUpdate, reply } = npInteraction("skip");
+
+    client.emit(Events.InteractionCreate, interaction as never);
+    await vi.waitFor(() => expect(controller.skip).toHaveBeenCalled());
+
+    expect(deferUpdate).toHaveBeenCalledOnce();
+    expect(reply).not.toHaveBeenCalled(); // no ephemeral error
+  });
+
+  it("ALLOWED via admin id even when guild cache is empty", async () => {
+    const { deps, controller } = npDeps();
+    deps.adminUserIds = new Set(["200000000000000000"]);
+    const client = createBot(deps);
+    // no guild cache stub -> membership path would fail, but admin short-circuits
+    const { interaction, deferUpdate } = npInteraction("stop");
+
+    client.emit(Events.InteractionCreate, interaction as never);
+    await vi.waitFor(() => expect(controller.stop).toHaveBeenCalled());
+    expect(deferUpdate).toHaveBeenCalledOnce();
+  });
+
+  it("FORBIDDEN: replies ephemerally and never defers or touches the controller", async () => {
+    const { deps, controller } = npDeps();
+    const client = createBot(deps);
+    stubGuildCache(client, { member: false });
+    const { interaction, reply, deferUpdate } = npInteraction("stop");
+
+    client.emit(Events.InteractionCreate, interaction as never);
+    await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+
+    expect(reply).toHaveBeenCalledWith(
+      expect.objectContaining({ ephemeral: true, content: expect.stringContaining("permission") }),
+    );
+    expect(deferUpdate).not.toHaveBeenCalled();
+    expect(controller.stop).not.toHaveBeenCalled();
+  });
+
+  it("pauseresume routes to pause when playing and resume when paused", async () => {
+    const { deps, controller } = npDeps();
+    const client = createBot(deps);
+    stubGuildCache(client, { member: true });
+
+    const a = npInteraction("pauseresume");
+    client.emit(Events.InteractionCreate, a.interaction as never);
+    await vi.waitFor(() => expect(controller.pause).toHaveBeenCalled());
+
+    controller.isPaused = true;
+    const b = npInteraction("pauseresume");
+    client.emit(Events.InteractionCreate, b.interaction as never);
+    await vi.waitFor(() => expect(controller.resume).toHaveBeenCalled());
+  });
+
+  it("records the command's text channel via onCommandChannel when a command runs", async () => {
+    const controller = {
+      skip: vi.fn(),
+      snapshot: vi.fn(() => ({ current: null, upcoming: [], history: [] })),
+    };
+    const onCommandChannel = vi.fn();
+    const deps: BotDeps = {
+      hub: { get: vi.fn(() => controller) } as never,
+      youtube: { resolve: vi.fn(), search: vi.fn() } as never,
+      prefix: "?",
+      searchLimit: 5,
+      adminUserIds: new Set<string>(),
+      log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      onCommandChannel,
+    };
+    const client = createBot(deps);
+    const reply = vi.fn(async () => {});
+    const message = {
+      author: { bot: false, id: "u1", username: "u", displayAvatarURL: () => "a" },
+      inGuild: () => true,
+      guildId: "g1",
+      channelId: "text-chan-1",
+      content: "?skip",
+      member: { displayName: "U", voice: { channelId: null } },
+      guild: { members: { me: { voice: { channelId: null } } } },
+      reply,
+    };
+
+    client.emit(Events.MessageCreate, message as never);
+    await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+    expect(onCommandChannel).toHaveBeenCalledWith("g1", "text-chan-1");
   });
 });
 

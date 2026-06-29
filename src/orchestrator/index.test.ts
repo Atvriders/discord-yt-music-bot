@@ -41,6 +41,8 @@ function makeController(
     relatedFn?: (id: string) => Promise<TrackMeta[]>;
     artistTracksFn?: (meta: TrackMeta) => Promise<TrackMeta[]>;
     onTrackError?: ReturnType<typeof vi.fn>;
+    onTrackStart?: ReturnType<typeof vi.fn>;
+    onIdle?: ReturnType<typeof vi.fn>;
     now?: () => number;
     settings?: Partial<import("./settings.js").GuildSettings>;
   } = {},
@@ -82,6 +84,8 @@ function makeController(
     downloads: new Semaphore(2),
     now: overrides.now,
     onTrackError: overrides.onTrackError,
+    onTrackStart: overrides.onTrackStart,
+    onIdle: overrides.onIdle,
     settings: { ...DEFAULT_SETTINGS, ...overrides.settings },
   };
   const ctrl = new GuildController("G1", deps as never);
@@ -98,6 +102,31 @@ describe("GuildController", () => {
     expect(deps.youtube.download).toHaveBeenCalledWith("aaaaaaaaaaa", "/cache");
     expect(session.play).toHaveBeenCalledTimes(1);
     expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+  });
+
+  it("fires onTrackStart with the started track's meta (drives presence)", async () => {
+    const onTrackStart = vi.fn();
+    const { ctrl } = makeController({ onTrackStart });
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(onTrackStart).toHaveBeenCalledTimes(1);
+    expect(onTrackStart.mock.calls[0]![0]).toMatchObject({
+      videoId: "aaaaaaaaaaa",
+      title: "aaaaaaaaaaa",
+    });
+  });
+
+  it("fires onIdle when the voice session goes idle and is torn down (reverts presence)", async () => {
+    const onIdle = vi.fn();
+    const { ctrl, session } = makeController({ onIdle });
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    // The idle-disconnect timer firing emits "idle" -> leaveInternal tears down the session.
+    session.emit("idle");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(onIdle).toHaveBeenCalled();
   });
 
   it("attaches the downloaded audio format to snapshot.current", async () => {
@@ -135,6 +164,52 @@ describe("GuildController", () => {
     ctrl.skip(); // FakeSession.skip emits trackEnd
     await new Promise((r) => setTimeout(r, 0));
     expect(ctrl.snapshot().current?.meta.videoId).toBe("bbbbbbbbbbb");
+  });
+
+  it("shuffle permutes the upcoming list without touching the current track", async () => {
+    const { ctrl } = makeController();
+    await ctrl.ensureConnected("C1");
+    for (const v of ["aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc", "ddddddddddd", "eeeeeeeeeee"]) {
+      await ctrl.enqueue(meta(v), requester);
+    }
+    await new Promise((r) => setTimeout(r, 0));
+    // a* is now current; b..e are upcoming.
+    const before = ctrl.snapshot().upcoming.map((i) => i.meta.videoId);
+    await ctrl.shuffle(() => 0); // deterministic cascade — a known non-identity permutation
+    const after = ctrl.snapshot().upcoming.map((i) => i.meta.videoId);
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+    expect([...after].sort()).toEqual([...before].sort());
+    expect(after).not.toEqual(before);
+  });
+
+  it("jumpTo plays the chosen item and DROPS the upcoming items before it", async () => {
+    const { ctrl } = makeController();
+    await ctrl.ensureConnected("C1");
+    for (const v of ["aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc", "ddddddddddd"]) {
+      await ctrl.enqueue(meta(v), requester);
+    }
+    await new Promise((r) => setTimeout(r, 0));
+    // current = a; upcoming = [b, c, d]
+    const target = ctrl.snapshot().upcoming.find((i) => i.meta.videoId === "ccccccccccc")!;
+    const ok = await ctrl.jumpTo(target.id);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ok).toBe(true);
+    // c is now playing; the preceding b was dropped (not archived as a "played" track),
+    // and only d remains upcoming.
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("ccccccccccc");
+    expect(ctrl.snapshot().upcoming.map((i) => i.meta.videoId)).toEqual(["ddddddddddd"]);
+  });
+
+  it("jumpTo returns false for an unknown item id (no state change)", async () => {
+    const { ctrl } = makeController();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    const ok = await ctrl.jumpTo("does-not-exist");
+    expect(ok).toBe(false);
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+    expect(ctrl.snapshot().upcoming.map((i) => i.meta.videoId)).toEqual(["bbbbbbbbbbb"]);
   });
 
   it("idle event leaves the channel", async () => {
@@ -441,7 +516,7 @@ describe("GuildController playback position + paused", () => {
       expect(makeResource).toHaveBeenCalledTimes(1);
       expect(makeResource.mock.calls[0]![2]).toEqual({
         seekMs: 30_000,
-        audio: { crossfadeSec: 0, normalizeLoudness: false },
+        audio: { crossfadeSec: 0, normalizeLoudness: false, fx: "none", volumePct: 100 },
       });
       expect(session.play).toHaveBeenCalledTimes(1);
       // Position re-anchored to the seek target.
@@ -705,7 +780,12 @@ describe("GuildController settings", () => {
     await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
     await new Promise((r) => setTimeout(r, 0));
     const opts = makeResource.mock.calls[0]![2] as { audio?: unknown };
-    expect(opts.audio).toEqual({ crossfadeSec: 4, normalizeLoudness: true });
+    expect(opts.audio).toEqual({
+      crossfadeSec: 4,
+      normalizeLoudness: true,
+      fx: "none",
+      volumePct: 100,
+    });
   });
 
   it("repeat=one replays the current track on trackEnd (no advance)", async () => {
@@ -959,5 +1039,176 @@ describe("GuildController settings", () => {
 
       expect(ctrl.snapshot().current?.meta.videoId).toBe("zzzzzzzzzzz");
     });
+  });
+});
+
+describe("GuildController volume + fx", () => {
+  // A controller whose makeResource returns a resource carrying an inline-volume knob
+  // (a setVolume spy) so we can assert live volume re-application vs re-resourcing.
+  function makeVolController(settings?: Partial<import("./settings.js").GuildSettings>) {
+    let t = 1000;
+    const now = () => t;
+    const session = new FakeSession();
+    const cacheStore = new Map<string, string>();
+    const audioStore = new Map<string, AudioInfo | null>();
+    // Each resource gets its own setVolume spy; we capture the latest so tests can assert.
+    const setVolumeSpies: ReturnType<typeof vi.fn>[] = [];
+    const makeResource = vi.fn(
+      (p: string, _item: unknown, opts?: { seekMs?: number; audio?: { volumePct?: number } }) => {
+        const setVolume = vi.fn();
+        setVolumeSpies.push(setVolume);
+        // Mirror the real factory: only a non-100 volume yields an inline-volume knob.
+        const hasInline = (opts?.audio?.volumePct ?? 100) !== 100;
+        return { res: p, seekMs: opts?.seekMs ?? 0, volume: hasInline ? { setVolume } : null };
+      },
+    );
+    const deps = {
+      youtube: {
+        download: vi.fn(async (id: string) => ({ path: `/cache/${id}.webm`, audio: AUDIO })),
+      },
+      cache: {
+        get: (id: string) => cacheStore.get(id) ?? null,
+        getAudio: (id: string) => audioStore.get(id) ?? null,
+        has: (id: string) => cacheStore.has(id),
+        register: (id: string, p: string, audio: AudioInfo | null = null) => {
+          cacheStore.set(id, p);
+          audioStore.set(id, audio);
+        },
+        pin: vi.fn(),
+        unpin: vi.fn(),
+      },
+      cacheDir: "/cache",
+      createSession: vi.fn(async () => session as never),
+      makeResource,
+      prefetchDepth: 1,
+      idleTimeoutMs: 300_000,
+      downloads: new Semaphore(2),
+      now,
+      settings: settings ? { ...DEFAULT_SETTINGS, ...settings } : undefined,
+    };
+    const ctrl = new GuildController("G1", deps as never);
+    return {
+      ctrl,
+      session,
+      makeResource,
+      setVolumeSpies,
+      advanceClock: (ms: number) => (t += ms),
+    };
+  }
+
+  it("defaults volume to 100 and fx to none in the snapshot", () => {
+    const { ctrl } = makeVolController();
+    expect(ctrl.snapshot().volume).toBe(100);
+    expect(ctrl.snapshot().fx).toBe("none");
+  });
+
+  it("starts a non-100 track with inline volume applied from the first frame", async () => {
+    const { ctrl, setVolumeSpies, makeResource } = makeVolController({ volume: 50 });
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    // The resource was built with volumePct 50 → inline volume set to 0.5.
+    expect(makeResource.mock.calls[0]![2]).toMatchObject({ audio: { volumePct: 50 } });
+    expect(setVolumeSpies[0]).toHaveBeenCalledWith(0.5);
+  });
+
+  it("setVolume re-applies live (no re-resource) when staying non-100", async () => {
+    const { ctrl, makeResource, setVolumeSpies } = makeVolController({ volume: 80 });
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    makeResource.mockClear();
+    // 80 → 120: both non-100, the current resource has an inline knob → live re-apply.
+    ctrl.setVolume(120);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(makeResource).not.toHaveBeenCalled();
+    expect(setVolumeSpies[0]).toHaveBeenLastCalledWith(1.2);
+    expect(ctrl.snapshot().volume).toBe(120);
+  });
+
+  it("setVolume re-resources at the current position when crossing 100 (passthrough ⇄ inline)", async () => {
+    const { ctrl, makeResource, advanceClock } = makeVolController({ volume: 100 });
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    makeResource.mockClear();
+    advanceClock(7000); // 7s into the track
+    ctrl.setVolume(150);
+    await new Promise((r) => setTimeout(r, 0));
+    // 100 → 150 flips passthrough→inline: the resource is rebuilt at the 7s offset.
+    expect(makeResource).toHaveBeenCalledTimes(1);
+    expect(makeResource.mock.calls[0]![2]).toMatchObject({
+      seekMs: 7000,
+      audio: { volumePct: 150 },
+    });
+    expect(ctrl.snapshot().current?.positionMs).toBe(7000);
+  });
+
+  it("setFx re-resources at the current position with the new preset baked in", async () => {
+    const { ctrl, makeResource, advanceClock } = makeVolController();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    makeResource.mockClear();
+    advanceClock(3000);
+    ctrl.setFx("nightcore");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(makeResource).toHaveBeenCalledTimes(1);
+    expect(makeResource.mock.calls[0]![2]).toMatchObject({
+      seekMs: 3000,
+      audio: { fx: "nightcore" },
+    });
+    expect(ctrl.snapshot().fx).toBe("nightcore");
+  });
+
+  it("setFx while paused keeps the track paused at the same position after re-resource", async () => {
+    const { ctrl, session, advanceClock } = makeVolController();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    advanceClock(4000);
+    ctrl.pause();
+    session.pause.mockClear();
+    ctrl.setFx("bassboost");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ctrl.snapshot().paused).toBe(true);
+    expect(ctrl.snapshot().current?.positionMs).toBe(4000);
+    // The fresh resource was re-paused after play.
+    expect(session.pause).toHaveBeenCalled();
+  });
+
+  it("does not re-resource when an unrelated setting changes", async () => {
+    const { ctrl, makeResource } = makeVolController();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    makeResource.mockClear();
+    ctrl.updateSettings({ repeat: "all" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(makeResource).not.toHaveBeenCalled();
+  });
+
+  it("clears currentResource when the queue runs dry naturally (no stale inline-volume re-apply)", async () => {
+    const { ctrl, session, setVolumeSpies } = makeVolController({ volume: 50 });
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    // The first (and only) track started with an inline-volume knob (volume 50).
+    expect(setVolumeSpies).toHaveLength(1);
+
+    // Queue runs dry NATURALLY: the track ends, playNextLocked finds nothing and idles.
+    session.emit("trackEnd");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ctrl.snapshot().current).toBeNull();
+    expect(session.startIdleTimer).toHaveBeenCalled();
+
+    // currentResource must have been nulled on the natural-idle path. If it were stale,
+    // a non-100→non-100 volume change would take the live re-apply branch and call the
+    // OLD resource's setVolume spy. With it cleared, that branch is skipped (re-resource
+    // path is a no-op since nothing is playing), so the spy is never called again.
+    setVolumeSpies[0]!.mockClear();
+    ctrl.setVolume(120);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(setVolumeSpies[0]).not.toHaveBeenCalled();
   });
 });

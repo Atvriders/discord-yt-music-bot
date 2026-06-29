@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { buildAudioFilter } from "./filter.js";
 
-const off = { crossfadeSec: 0, normalizeLoudness: false };
+const off = { crossfadeSec: 0, normalizeLoudness: false, fx: "none" as const };
 
 describe("buildAudioFilter", () => {
   it("returns null when no processing is requested", () => {
@@ -56,5 +56,32 @@ describe("buildAudioFilter", () => {
   it("combines loudnorm and crossfade in one chain", () => {
     const f = buildAudioFilter({ crossfadeSec: 2, normalizeLoudness: true }, 30, false);
     expect(f).toBe("loudnorm,afade=t=in:st=0:d=2,afade=t=out:st=28:d=2");
+  });
+
+  it("returns null for the 'none' fx preset with no other processing", () => {
+    expect(buildAudioFilter(off, 180, false)).toBeNull();
+  });
+
+  it("emits the correct ffmpeg fragment for each FX preset", () => {
+    const cases: Record<string, string> = {
+      bassboost: "bass=g=15",
+      nightcore: "aresample=48000,asetrate=48000*1.25",
+      vaporwave: "asetrate=48000*0.8,aresample=48000",
+      eightd: "apulsator=hz=0.09",
+      treble: "treble=g=10",
+      karaoke: "stereotools=mlev=0.015",
+    };
+    for (const [fx, frag] of Object.entries(cases)) {
+      expect(buildAudioFilter({ ...off, fx: fx as never }, 180, false)).toBe(frag);
+    }
+  });
+
+  it("appends the FX preset after loudnorm + crossfade", () => {
+    const f = buildAudioFilter(
+      { crossfadeSec: 2, normalizeLoudness: true, fx: "bassboost" },
+      30,
+      false,
+    );
+    expect(f).toBe("loudnorm,afade=t=in:st=0:d=2,afade=t=out:st=28:d=2,bass=g=15");
   });
 });

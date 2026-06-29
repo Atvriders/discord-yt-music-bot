@@ -131,6 +131,51 @@ describe("GuildQueue", () => {
     expect(q.snapshot().upcoming.map((i) => i.id)).toEqual(["id1"]);
   });
 
+  it("shuffle permutes the upcoming items while preserving the exact set", async () => {
+    const q = newQueue();
+    const ids: string[] = [];
+    for (let i = 0; i < 6; i++) {
+      const it = await q.add(meta(`v${String(i).padStart(10, "0")}`), requester);
+      ids.push(it.id);
+    }
+    const before = q.snapshot().upcoming.map((i) => i.id);
+    // Deterministic RNG: 0 picks index 0 on every Fisher-Yates step, yielding a known
+    // non-identity permutation (a cascade of swaps with the head) so we can assert the
+    // order actually changed.
+    const changed = vi.fn();
+    q.on("changed", changed);
+    await q.shuffle(() => 0);
+    const after = q.snapshot().upcoming.map((i) => i.id);
+    // Same multiset of ids (nothing lost/added/duplicated).
+    expect([...after].sort()).toEqual([...before].sort());
+    // Order actually permuted (not the identity).
+    expect(after).not.toEqual(before);
+    expect(changed).toHaveBeenCalledTimes(1);
+  });
+
+  it("shuffle leaves current/history untouched and is a no-op (still emits) on a short queue", async () => {
+    const q = newQueue();
+    await q.add(meta("aaaaaaaaaaa"), requester);
+    await q.advance(); // current = id1, upcoming empty
+    const b = await q.add(meta("bbbbbbbbbbb"), requester); // upcoming = [id2]
+    const changed = vi.fn();
+    q.on("changed", changed);
+    await q.shuffle();
+    expect(q.current?.id).toBe("id1");
+    expect(q.snapshot().upcoming.map((i) => i.id)).toEqual([b.id]);
+    expect(changed).toHaveBeenCalledTimes(1);
+  });
+
+  it("shuffle defaults to Math.random and keeps the set intact", async () => {
+    const q = newQueue();
+    const created: string[] = [];
+    for (const v of ["aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc", "ddddddddddd"]) {
+      created.push((await q.add(meta(v), requester)).id);
+    }
+    await q.shuffle();
+    expect([...q.snapshot().upcoming.map((i) => i.id)].sort()).toEqual([...created].sort());
+  });
+
   it("serializes concurrent adds without losing or duplicating items", async () => {
     const q = newQueue();
     await Promise.all(

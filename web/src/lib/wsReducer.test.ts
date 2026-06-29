@@ -17,6 +17,8 @@ const snap: Snapshot = {
   autoplay: false,
   autoplaySource: "radio",
   maxTrackDurationSec: 0,
+  volume: 100,
+  fx: "none",
 };
 
 describe("applyWsMessage", () => {

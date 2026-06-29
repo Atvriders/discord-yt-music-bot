@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { GuildSettings, Me, TrackMeta, VoiceChannel } from "../types.js";
+import type { GuildSettings, Me, PlaylistSummary, TrackMeta, VoiceChannel } from "../types.js";
 import { api, ApiError, type ControlAction } from "../lib/api.js";
 import { useGuildState } from "../lib/useGuildState.js";
 import { Grain } from "./Grain.js";
@@ -12,6 +12,8 @@ import { AddBar } from "./AddBar.js";
 import { Discover } from "./Discover.js";
 import { VoiceChannelPicker } from "./VoiceChannelPicker.js";
 import { Settings } from "./Settings.js";
+import { History } from "./History.js";
+import { Playlists } from "./Playlists.js";
 
 type BannerMsg = { kind: "success"; text: string } | { kind: "error"; text: string };
 
@@ -23,19 +25,33 @@ function readStoredGuildId(): string | null {
 
 function StatusBanner({ msg, onDismiss }: { msg: BannerMsg; onDismiss: () => void }) {
   const isError = msg.kind === "error";
+  // The left signal stripe (index.css keys off the inline --color-danger var) reads
+  // red on error / cream on success, like a console status lamp.
+  const accent = isError ? "var(--color-danger, #ff5a52)" : "var(--color-ember-soft)";
   return (
     <div
+      role="status"
+      aria-live="polite"
       className="card reveal flex items-center gap-3 px-4 py-3 text-sm"
       style={{
-        borderColor: isError ? "var(--color-danger, #e05252)" : "var(--color-line)",
-        color: isError ? "var(--color-danger, #e05252)" : "var(--color-ink)",
+        animationDelay: "40ms",
+        borderColor: isError ? "var(--color-danger, #ff5a52)" : "var(--color-line)",
+        borderLeft: `3px solid ${accent}`,
+        color: isError ? "var(--color-danger, #ff5a52)" : "var(--color-ink)",
       }}
     >
-      <span className="flex-1 min-w-0 truncate">{msg.text}</span>
+      <span className="eyebrow shrink-0" style={{ color: accent }}>
+        {isError ? "Fault" : "Signal"}
+      </span>
+      <span className="flex-1 min-w-0 truncate font-mono text-xs" style={{ letterSpacing: "-0.01em" }}>
+        {msg.text}
+      </span>
       <button
+        type="button"
         onClick={onDismiss}
         aria-label="Dismiss"
-        style={{ color: "var(--color-ink-faint)", fontSize: "1rem", lineHeight: 1 }}
+        className="pill-ghost shrink-0"
+        style={{ width: "1.6rem", height: "1.6rem", padding: 0, justifyContent: "center", borderRadius: "var(--radius-pill)", fontSize: "1rem", lineHeight: 1 }}
       >
         ×
       </button>
@@ -53,6 +69,7 @@ export function App() {
   // failed" so the picker can show a recoverable error rather than vanishing silently.
   const [channelsLoadFailed, setChannelsLoadFailed] = useState(false);
   const [voiceChannelId, setVoiceChannelId] = useState<string | null>(null);
+  const [playlists, setPlaylists] = useState<PlaylistSummary[]>([]);
   // True once the user manually picks a channel for this guild, so later channel
   // refreshes don't clobber their choice with the auto-detected current channel.
   const manualChannelRef = useRef(false);
@@ -131,6 +148,16 @@ export function App() {
     if (!guildId) { setChannels([]); setVoiceChannelId(null); setChannelsLoadFailed(false); return; }
     loadChannels(guildId);
   }, [guildId, loadChannels]);
+
+  // Load this guild's saved playlists (and clear them on guild switch). A fetch failure
+  // is non-fatal — the panel just shows an empty list.
+  const reloadPlaylists = useCallback((g: string) => {
+    api.listPlaylists(g).then((r) => setPlaylists(r.playlists ?? [])).catch(() => setPlaylists([]));
+  }, []);
+  useEffect(() => {
+    if (!guildId) { setPlaylists([]); return; }
+    reloadPlaylists(guildId);
+  }, [guildId, reloadPlaylists]);
 
   useEffect(() => {
     api.me().then((m) => {
@@ -354,7 +381,112 @@ export function App() {
     }
   }, [guildId, refreshIfNotLive, showBanner]);
 
-  if (!authChecked) return <main className="min-h-full grid place-items-center"><span className="eyebrow">Loading…</span></main>;
+  const onShuffle = useCallback(async () => {
+    if (!guildId) return;
+    try {
+      await api.shuffle(guildId);
+      await refreshIfNotLive();
+    } catch (err) {
+      const reason = err instanceof ApiError ? err.message : "Something went wrong";
+      showBanner({ kind: "error", text: `Couldn't shuffle — ${reason}` });
+    }
+  }, [guildId, refreshIfNotLive, showBanner]);
+
+  // "Play next" reuses the reorder endpoint, moving the item to the front of upcoming.
+  const onPlayNext = useCallback(async (itemId: string) => {
+    if (!guildId) return;
+    try {
+      await api.reorder(guildId, itemId, 0);
+      await refreshIfNotLive();
+    } catch (err) {
+      const reason = err instanceof ApiError ? err.message : "Something went wrong";
+      showBanner({ kind: "error", text: `Couldn't move — ${reason}` });
+    }
+  }, [guildId, refreshIfNotLive, showBanner]);
+
+  const onJump = useCallback(async (itemId: string) => {
+    if (!guildId) return;
+    try {
+      await api.jump(guildId, itemId);
+      await refreshIfNotLive();
+    } catch (err) {
+      const reason = err instanceof ApiError ? err.message : "Something went wrong";
+      showBanner({ kind: "error", text: `Couldn't jump — ${reason}` });
+    }
+  }, [guildId, refreshIfNotLive, showBanner]);
+
+  // Re-queue a track from history by its videoId. Reuses the single-pick flow (which
+  // resolves + enqueues into the current voice target), then surfaces the outcome.
+  const onRequeue = useCallback(async (videoId: string) => {
+    if (!guildId) return;
+    if (noVoiceTarget) {
+      showBanner({ kind: "error", text: "Pick a voice channel first" });
+      return;
+    }
+    const r = await pickOne(videoId);
+    if (r.reason === "stale") return;
+    if (r.ok) {
+      showBanner({ kind: "success", text: r.title ? `Queued: ${r.title}` : "Re-queued" });
+      await refreshIfNotLive();
+    } else {
+      showBanner({ kind: "error", text: `Couldn't re-queue — ${r.reason ?? "failed"}` });
+    }
+  }, [guildId, noVoiceTarget, pickOne, showBanner, refreshIfNotLive]);
+
+  const onSavePlaylist = useCallback(async (name: string) => {
+    if (!guildId) return;
+    try {
+      const { playlists: updated } = await api.savePlaylist(guildId, name);
+      setPlaylists(updated);
+      showBanner({ kind: "success", text: `Saved playlist: ${name}` });
+    } catch (err) {
+      const reason = err instanceof ApiError ? err.message : "Something went wrong";
+      showBanner({ kind: "error", text: `Couldn't save playlist — ${reason}` });
+    }
+  }, [guildId, showBanner]);
+
+  const onLoadPlaylist = useCallback(async (name: string) => {
+    if (!guildId) return;
+    if (noVoiceTarget) {
+      showBanner({ kind: "error", text: "Pick a voice channel first" });
+      return;
+    }
+    try {
+      // Forward the current voice channel (same value play/pick use) so the bot connects
+      // and the loaded tracks start playing instead of queueing into the void.
+      const r = await api.loadPlaylist(guildId, name, voiceChannelId ?? undefined);
+      const base = `Loaded ${r.queued} track${r.queued === 1 ? "" : "s"} from ${name}`;
+      showBanner({
+        kind: "success",
+        text: r.moveSuppressed ? `${base} — only an admin can move the bot` : base,
+      });
+      await refreshIfNotLive();
+    } catch (err) {
+      const reason = err instanceof ApiError ? err.message : "Something went wrong";
+      showBanner({ kind: "error", text: `Couldn't load playlist — ${reason}` });
+    }
+  }, [guildId, voiceChannelId, noVoiceTarget, showBanner, refreshIfNotLive]);
+
+  const onDeletePlaylist = useCallback(async (name: string) => {
+    if (!guildId) return;
+    try {
+      const { playlists: updated } = await api.deletePlaylist(guildId, name);
+      setPlaylists(updated);
+      showBanner({ kind: "success", text: `Deleted playlist: ${name}` });
+    } catch (err) {
+      const reason = err instanceof ApiError ? err.message : "Something went wrong";
+      showBanner({ kind: "error", text: `Couldn't delete playlist — ${reason}` });
+    }
+  }, [guildId, showBanner]);
+
+  if (!authChecked) return (
+    <main className="min-h-full grid place-items-center">
+      <Grain />
+      <span className="eyebrow" style={{ color: "var(--color-ember-soft)" }}>
+        <span className="spinner" aria-hidden />Loading…
+      </span>
+    </main>
+  );
   if (!me) return <LoginGate />;
 
   const snap = live.snapshot;
@@ -362,21 +494,36 @@ export function App() {
     <div className="min-h-full">
       <Grain />
       <div className="mx-auto max-w-4xl px-5 sm:px-8 py-7 flex flex-col gap-5">
-        <ServerSelector me={me} activeGuildId={guildId} onSelect={setGuildId}
-          onLogout={() => { api.logout().finally(() => (location.href = "/")); }} />
+        <div className="reveal" style={{ animationDelay: "60ms" }}>
+          <ServerSelector me={me} activeGuildId={guildId} onSelect={setGuildId}
+            onLogout={() => { api.logout().finally(() => (location.href = "/")); }} />
+        </div>
         {!guildId ? (
-          <p className="card p-8 text-center" style={{ color: "var(--color-ink-dim)" }}>Pick a server to take the controls.</p>
+          <div className="card reveal p-10 text-center" style={{ animationDelay: "120ms" }}>
+            <span className="eyebrow" style={{ color: "var(--color-ember-soft)" }}>Standby</span>
+            <p className="font-display mt-3" style={{ fontSize: "1.5rem", color: "var(--color-ink)" }}>
+              Pick a server to take the controls.
+            </p>
+          </div>
         ) : (
           <>
+            <div className="reveal" style={{ animationDelay: "120ms" }}>
             <NowPlaying
               item={snap?.current ?? null}
+              guildId={guildId}
               paused={snap?.paused ?? false}
               playing={!!snap?.current && !paused}
               receivedAt={live.receivedAt}
               canSeek={live.status === "live" && !!snap?.current}
               onSeek={onSeek}
             />
-            <div className="flex items-center justify-between flex-wrap gap-3">
+            </div>
+            {/* Transport strip — the console's control rail: keys, channel + settings
+                wells, and the signal-status counter. */}
+            <div
+              className="card reveal flex items-center justify-between flex-wrap gap-3 px-4 py-3"
+              style={{ animationDelay: "150ms" }}
+            >
               <div className="flex items-center gap-4 flex-wrap">
                 <Controls onAction={control} paused={paused} disabled={!snap?.current} />
                 <VoiceChannelPicker
@@ -394,22 +541,51 @@ export function App() {
                   autoplay={snap?.autoplay}
                   autoplaySource={snap?.autoplaySource}
                   maxTrackDurationSec={snap?.maxTrackDurationSec}
+                  volume={snap?.volume}
+                  fx={snap?.fx}
                   disabled={live.status === "forbidden"}
                   onChange={onSetIdleTimeout}
                   onAudioChange={onPatchSettings}
                 />
               </div>
-              <span className="font-mono text-xs" style={{ color: "var(--color-ink-faint)" }}>
+              <span
+                className="font-mono text-xs"
+                style={{
+                  // The "on air" lamp reads red when live; faint cream otherwise.
+                  color: live.status === "live"
+                    ? "var(--color-ember-soft)"
+                    : live.status === "forbidden"
+                      ? "var(--color-danger)"
+                      : "var(--color-ink-faint)",
+                  letterSpacing: "0.04em",
+                  textShadow: live.status === "live" ? "0 0 10px rgba(255,0,0,0.55)" : "none",
+                }}
+              >
                 {live.status === "live" ? "● live" : live.status === "forbidden" ? "✕ no access" : "○ " + live.status}
               </span>
             </div>
             {banner && <StatusBanner msg={banner} onDismiss={dismissBanner} />}
-            <AddBar onPlay={onPlay} onQueueAll={onQueueAll} busy={noVoiceTarget} />
-            <Discover onSearch={onPlay} onQueueAll={onQueueAll} busy={noVoiceTarget} />
-            <Queue items={snap?.upcoming ?? []} onRemove={onRemove} onReorder={onReorder} />
+            <div className="reveal" style={{ animationDelay: "180ms" }}>
+              <AddBar onPlay={onPlay} onQueueAll={onQueueAll} busy={noVoiceTarget} />
+            </div>
+            <div className="reveal" style={{ animationDelay: "220ms" }}>
+              <Discover onSearch={onPlay} onQueueAll={onQueueAll} busy={noVoiceTarget} />
+            </div>
+            <div className="reveal" style={{ animationDelay: "260ms" }}>
+              <Queue items={snap?.upcoming ?? []} current={snap?.current ?? null} onRemove={onRemove} onReorder={onReorder} onShuffle={onShuffle} onPlayNext={onPlayNext} onJump={onJump} />
+            </div>
+            <div className="reveal" style={{ animationDelay: "300ms" }}>
+              <History history={snap?.history ?? []} onRequeue={onRequeue} disabled={noVoiceTarget} />
+            </div>
+            <div className="reveal" style={{ animationDelay: "340ms" }}>
+              <Playlists playlists={playlists} onSave={onSavePlaylist} onLoad={onLoadPlaylist} onDelete={onDeletePlaylist} disabled={live.status === "forbidden"} />
+            </div>
           </>
         )}
-        <footer className="text-center font-mono text-xs pt-4" style={{ color: "var(--color-ink-faint)" }}>
+        <footer
+          className="reveal text-center font-mono text-xs pt-4"
+          style={{ color: "var(--color-ink-faint)", animationDelay: "380ms", letterSpacing: "0.02em" }}
+        >
           the real audio from the exact video — never a mirror track · YouTube Music Bot
         </footer>
       </div>

@@ -5,7 +5,10 @@ import { Semaphore } from "./util/semaphore.js";
 import { GuildController } from "./orchestrator/index.js";
 import { DEFAULT_SETTINGS } from "./orchestrator/settings.js";
 import { GuildHub } from "./orchestrator/hub.js";
+import { PlaylistStore } from "./orchestrator/playlists.js";
 import { createBot } from "./discord/bot.js";
+import { NowPlayingManager, makeClientNpGateway } from "./discord/np-message.js";
+import { PresenceController } from "./discord/presence.js";
 import { createVoiceSession, createPassthroughResource } from "./voice/connect.js";
 import type { Client } from "discord.js";
 import { buildApp } from "./server/app.js";
@@ -31,6 +34,10 @@ async function main(): Promise<void> {
   await cache.init();
   const downloads = new Semaphore(bot.maxConcurrentDownloads);
 
+  // Per-guild saved playlists, persisted under the media cache dir (loaded once at boot).
+  const playlists = new PlaylistStore(media.cacheDir);
+  await playlists.init();
+
   // Debounced snapshot writer — defined before hub so the factory closure captures it.
   let snapshotTimer: ReturnType<typeof setTimeout> | null = null;
   const scheduleSnapshot = (): void => {
@@ -45,6 +52,20 @@ async function main(): Promise<void> {
 
   const web = loadWebConfig();
   const broadcaster = new GuildBroadcaster();
+
+  // Reflects playback in the bot's (global) Discord presence. Assigned after the gateway
+  // client exists; the hub factory below captures it lazily (controllers are only built
+  // after login, by which point `presence` is set). Best-effort — never affects playback.
+  let presence: PresenceController | null = null;
+
+  // Per-guild "last command text channel" — the channel the most recent `?`-command ran
+  // in. The live now-playing message posts here; we only post once it's known.
+  const lastTextChannelId = new Map<string, string>();
+
+  // Live now-playing message manager. Assigned after the gateway client exists (its
+  // gateway needs client.channels); the hub factory below captures it lazily and attaches
+  // each controller as it is created. Best-effort — never affects playback.
+  let nowPlaying: NowPlayingManager | null = null;
 
   // The hub creates one controller per guild; the controller's voice factory needs the
   // guild's channel object, which the bot resolves at connect time. We bridge via a
@@ -75,14 +96,24 @@ async function main(): Promise<void> {
       downloads,
       onTrackError: (info) =>
         broadcaster.broadcast(guildId, { type: "trackError", guildId, ...info }),
+      // Reflect the freshly-started track in the bot's global presence ("Listening to …").
+      onTrackStart: (meta) => presence?.onTrackStart(guildId, meta.title),
+      // Revert presence to the default when this guild's session goes idle.
+      onIdle: () => presence?.onIdle(guildId),
       // AudioPlayer stream errors are logged for observability; queue recovery happens via
       // the Playing->Idle trackEnd path, so we deliberately do NOT advance from here.
       onSessionError: (err) => log.error({ err, guildId }, "audio player error"),
       // Persist settings changes (debounced) so they survive a restart.
       onSettingsChange: () => scheduleSnapshot(),
+      // Shared per-guild saved-playlist store (persists itself on save/delete).
+      playlists,
     });
     // Wire debounced snapshot on queue changes.
     controller.queue.on("changed", scheduleSnapshot);
+    // Wire the live now-playing message (post/edit/finalize) off playback changes. The
+    // manager is created post-login but always before any controller (controllers are only
+    // built on the first command, by which point the gateway is up). Best-effort.
+    nowPlaying?.attach(guildId, controller);
     return controller;
   });
 
@@ -95,7 +126,24 @@ async function main(): Promise<void> {
     log,
     // Drives the "Panel:" line in the bot's About Me; built from the real configured URL.
     baseUrl: web.publicBaseUrl,
+    // Track where each guild's last command ran so the live now-playing message posts there.
+    onCommandChannel: (guildId, channelId) => lastTextChannelId.set(guildId, channelId),
   });
+
+  // Now that the gateway client exists, build the now-playing manager (its gateway adapts
+  // client.channels). Controllers created earlier in this tick (none yet) and all future
+  // ones attach via the hub factory closure above. Failures are logged, never thrown.
+  nowPlaying = new NowPlayingManager({
+    gateway: makeClientNpGateway(client),
+    channelFor: (guildId) => lastTextChannelId.get(guildId) ?? null,
+    onError: (err) => log.warn({ err }, "[np] now-playing message update failed"),
+  });
+
+  // Now that the gateway client exists, build the presence controller the hub factory
+  // captured. Apply the default presence once the gateway is ready so the bot shows
+  // "Listening to ?help · <panel>" before anything has played.
+  presence = new PresenceController(client, { baseUrl: web.publicBaseUrl });
+  client.once("ready", () => presence?.applyDefault());
 
   client.on("error", (err) => log.error({ err }, "[client error]"));
   await client.login(bot.discordToken);

@@ -1,95 +1,740 @@
-@import url("https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap");
+/* =============================================================================
+   LATE-NIGHT STUDIO × YouTube red/black
+   Design system for the discord-yt-music-bot web control panel.
+
+   A premium hi-fi audio console rendered in YouTube's palette: red (#ff0000) as
+   the dominant accent + glow over deep dark, warm cream inks, film grain, real
+   VU-meter motifs, dramatic layered shadows, tactile press states, and a
+   staggered console power-on reveal.
+
+   Structure mirrors the existing Tailwind v4 CSS-first file so it can drop in:
+     1. font imports
+     2. @theme token block
+     3. base / body (console deck + grain + vignette)
+     4. typography helpers
+     5. component classes (.card, .pill, inputs, .vu, .viz, banners, etc.)
+     6. keyframes + reveal + reduced-motion
+   Every class name and CSS custom property the React components consume is
+   preserved; only the look changes.
+   ========================================================================== */
+
+@import url("https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,500&family=Hanken+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap");
 @import "tailwindcss";
 
+/* -----------------------------------------------------------------------------
+   1. THEME TOKENS
+   The @theme block exposes Tailwind utilities (text-ember, bg-raised, …) AND the
+   raw custom properties the components read via inline style="var(--color-…)".
+   Keep the existing names so nothing breaks; the values are re-tuned for warmth
+   and depth. A second :root block below carries non-color console tokens
+   (shadows, motion, grain) that aren't part of Tailwind's color/font scales.
+   -------------------------------------------------------------------------- */
 @theme {
-  --color-bg: #0f0f0f;
-  --color-raised: #212121;
-  --color-sunken: #181818;
-  --color-ink: #f1f1f1;
-  --color-ink-dim: #aaaaaa;
-  --color-ink-faint: #717171;
-  --color-ember: #ff0000;
-  --color-ember-soft: #ff5c52;
-  --color-gold: #ff0000;
-  --color-line: rgba(255, 255, 255, 0.12);
-  --color-playing: #2ba640;
-  --color-danger: #f14c4c;
-  --font-display: "Roboto", system-ui, sans-serif;
-  --font-sans: "Roboto", system-ui, sans-serif;
-  --font-mono: "Roboto Mono", ui-monospace, monospace;
+  /* --- Surfaces: a warm near-black deck that lifts toward the operator. ---- */
+  --color-bg: #0a0a0b;        /* deepest: the room behind the console        */
+  --color-raised: #1a1718;    /* the console faceplate (cards sit here)      */
+  --color-sunken: #121011;    /* recessed wells: inputs, the VU track        */
+
+  /* --- Inks: warm cream, not clinical white. Reads as backlit silkscreen. - */
+  --color-ink: #f6efe7;       /* primary cream                               */
+  --color-ink-dim: #b6aaa0;   /* secondary, warm taupe                       */
+  --color-ink-faint: #79706a; /* tertiary / metadata, mono labels            */
+
+  /* --- The red signal. #ff0000 is the dominant accent + glow throughout. -- */
+  --color-ember: #ff0000;        /* YouTube red — needles, fills, primary CTA */
+  --color-ember-soft: #ff5a52;   /* hotter highlight: live dot, handle, glow  */
+  --color-ember-deep: #b00000;   /* pressed / shadow side of the red          */
+  --color-gold: #ffb23e;         /* warm amber for the upper VU band & trim   */
+
+  /* --- Structure + status ------------------------------------------------- */
+  --color-line: rgba(246, 239, 231, 0.1);  /* hairline seams in the faceplate */
+  --color-playing: #ff0000;                /* "now playing" reads as red here */
+  --color-danger: #ff5a52;                 /* destructive == hot red sibling  */
+  --color-accent: #ff0000;                 /* Picker fallback uses this        */
+
+  /* --- Type: a display serif + a clean grotesque + a console mono. -------- */
+  --font-display: "Fraunces", "Times New Roman", serif;
+  --font-sans: "Hanken Grotesk", system-ui, sans-serif;
+  --font-mono: "Space Mono", ui-monospace, "SFMono-Regular", monospace;
 }
 
-:root { color-scheme: dark; }
-html, body, #root { height: 100%; }
+/* Non-Tailwind console tokens: shadows, radii, grain, glow, motion. */
+:root {
+  color-scheme: dark;
+
+  /* Radii — generous, faceplate-machined corners. */
+  --radius-sm: 10px;
+  --radius: 16px;
+  --radius-lg: 22px;
+  --radius-pill: 999px;
+
+  /* Layered shadows: a real object on a dark deck casts a soft contact shadow
+     AND catches a faint top rim-light. Combine depth + inner top highlight. */
+  --shadow-rim: inset 0 1px 0 0 rgba(255, 255, 255, 0.05);
+  --shadow-1:
+    0 1px 0 0 rgba(255, 255, 255, 0.04),
+    0 2px 6px -2px rgba(0, 0, 0, 0.6),
+    0 12px 28px -12px rgba(0, 0, 0, 0.7);
+  --shadow-2:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.06),
+    0 4px 10px -4px rgba(0, 0, 0, 0.65),
+    0 24px 60px -22px rgba(0, 0, 0, 0.85);
+  /* Recessed wells (inputs, VU track) read as carved INTO the faceplate. */
+  --shadow-inset:
+    inset 0 2px 5px -1px rgba(0, 0, 0, 0.75),
+    inset 0 -1px 0 0 rgba(255, 255, 255, 0.04);
+  /* The signature red glow — used on the hero, the live dot, primary press. */
+  --glow-red: 0 0 0 1px rgba(255, 0, 0, 0.5), 0 0 22px -2px rgba(255, 0, 0, 0.55);
+  --glow-red-soft: 0 0 30px -6px rgba(255, 0, 0, 0.45);
+
+  /* Motion tokens — short, mechanical easings for tactile chrome. */
+  --ease-mech: cubic-bezier(0.2, 0.8, 0.2, 1);   /* settles like a damped knob */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);     /* reveal / glide              */
+  --dur-press: 90ms;
+  --dur-fast: 150ms;
+  --dur-mid: 280ms;
+  --dur-reveal: 620ms;
+
+  /* Tiny SVG film grain, encoded once and reused as a tiled background. */
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* -----------------------------------------------------------------------------
+   2. BASE / THE CONSOLE DECK
+   The body is the dark room: a subtle warm radial pool of light from the top,
+   a vignette pulling the corners down, and a fixed grain layer over everything
+   so the whole panel reads as a textured, photographed object.
+   -------------------------------------------------------------------------- */
+html,
+body,
+#root {
+  height: 100%;
+}
+
 body {
   margin: 0;
-  background: var(--color-bg);
   color: var(--color-ink);
   font-family: var(--font-sans);
+  font-feature-settings: "ss01", "cv01";
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* Warm overhead pool + cool floor, layered on the near-black deck. */
+  background-color: var(--color-bg);
+  background-image:
+    radial-gradient(120% 80% at 50% -10%, rgba(255, 0, 0, 0.07), transparent 55%),
+    radial-gradient(90% 60% at 50% 0%, rgba(255, 120, 60, 0.05), transparent 60%),
+    linear-gradient(180deg, #121011 0%, var(--color-bg) 38%, #060607 100%);
+  background-attachment: fixed;
 }
-body::before { content: none; }
 
-.font-display { font-family: var(--font-display); font-weight: 700; letter-spacing: -0.005em; }
-.font-mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-.eyebrow { font-family: var(--font-sans); font-size: 0.72rem; font-weight: 500; letter-spacing: 0.04em; text-transform: none; color: var(--color-ink-dim); }
+/* Vignette + film grain laid over the whole document (under the UI, z -1). */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(130% 100% at 50% 0%, transparent 55%, rgba(0, 0, 0, 0.55) 100%);
+}
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  opacity: 0.05;
+  mix-blend-mode: overlay;
+  background-image: var(--grain);
+  background-size: 160px 160px;
+}
 
-.card { background: var(--color-raised); border: 1px solid var(--color-line); border-radius: 12px; box-shadow: none; }
+/* Custom selection: red ink on a faint red wash. */
+::selection {
+  background: rgba(255, 0, 0, 0.28);
+  color: var(--color-ink);
+}
 
-.hero-glow { position: relative; }
-.hero-glow::after { content: none; }
+/* Themed scrollbar so even the chrome stays in the console palette. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 0, 0, 0.4) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: linear-gradient(var(--color-ember-deep), var(--color-ember));
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--color-ember);
+  background-clip: padding-box;
+}
 
+:focus-visible {
+  outline: 2px solid var(--color-ember-soft);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* -----------------------------------------------------------------------------
+   3. TYPOGRAPHY
+   Fraunces display (high-contrast serif, soft/dramatic) for headings; Hanken
+   Grotesk for body; Space Mono for timecodes & technical labels. The eyebrow
+   becomes an engraved silkscreen label — uppercase, tracked, with a red tick.
+   -------------------------------------------------------------------------- */
+.font-display {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-optical-sizing: auto;
+  letter-spacing: -0.018em;
+  line-height: 1.04;
+}
+
+.font-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+/* Engraved console label. The leading red tick reinforces the VU/signal motif.
+   Components pass color:var(--color-ember-soft) inline for the "Now playing"
+   eyebrow; the default is the warm dim ink. */
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5ch;
+  font-family: var(--font-sans);
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--color-ink-faint);
+}
+.eyebrow::before {
+  content: "";
+  width: 0.5ch;
+  height: 0.5ch;
+  border-radius: 1px;
+  background: currentColor;
+  opacity: 0.55;
+  box-shadow: 0 0 6px -1px currentColor;
+}
+
+/* -----------------------------------------------------------------------------
+   4. CARD — the console faceplate panel
+   A raised, machined plate: warm gradient face, hairline seam, rim-light along
+   the top edge, soft contact shadow below. Hover lifts it a hair.
+   -------------------------------------------------------------------------- */
+.card {
+  position: relative;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 40%),
+    linear-gradient(180deg, #201c1d 0%, var(--color-raised) 60%, #161314 100%);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-1);
+  transition: box-shadow var(--dur-mid) var(--ease-mech),
+    transform var(--dur-mid) var(--ease-mech),
+    border-color var(--dur-mid) var(--ease-mech);
+}
+/* Hairline "screw-line" highlight tracing the very top edge of the plate. */
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: var(--shadow-rim);
+}
+.card:hover {
+  border-color: rgba(246, 239, 231, 0.16);
+  box-shadow: var(--shadow-2);
+}
+
+/* -----------------------------------------------------------------------------
+   HERO GLOW — the now-playing / login panel
+   This is the showpiece: a red light leaks from behind the top edge of the
+   plate (the "amp is on") and a faint scanline sheen crosses the face.
+   -------------------------------------------------------------------------- */
+.hero-glow {
+  position: relative;
+  background:
+    radial-gradient(80% 120% at 0% 0%, rgba(255, 0, 0, 0.1), transparent 45%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 35%),
+    linear-gradient(180deg, #241d1e 0%, var(--color-raised) 55%, #161314 100%);
+  box-shadow: var(--shadow-2), var(--glow-red-soft);
+  overflow: hidden;
+}
+/* The leaked red light behind the panel's top edge. */
+.hero-glow::after {
+  content: "";
+  position: absolute;
+  inset: -40% -10% auto -10%;
+  height: 70%;
+  pointer-events: none;
+  background: radial-gradient(60% 100% at 50% 0%, rgba(255, 0, 0, 0.22), transparent 70%);
+  filter: blur(6px);
+  opacity: 0.9;
+}
+
+/* -----------------------------------------------------------------------------
+   5. PILL / BUTTONS — tactile console keys
+   Default: a raised, beveled key. Hover brightens the cap; :active depresses it
+   (translateY + the rim-light flips to an inset shadow) for a real press feel.
+     .pill-primary  -> the lit red transport key (Pause/Resume, Queue, primary)
+     .pill-ghost    -> a flat utility key that flushes RED on hover (destructive
+                       + secondary actions: Stop, Remove, Shuffle, Browse, ▲▼)
+   -------------------------------------------------------------------------- */
 .pill {
-  display: inline-flex; align-items: center; gap: 0.5rem;
-  border-radius: 999px; border: 1px solid var(--color-line);
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--color-ink); padding: 0.55rem 1.05rem; font-weight: 500; font-size: 0.92rem;
-  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-line);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent 60%),
+    linear-gradient(180deg, #221e1f, #181516);
+  color: var(--color-ink);
+  padding: 0.55rem 1.05rem;
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: 0.9rem;
+  letter-spacing: -0.005em;
+  cursor: pointer;
+  box-shadow: var(--shadow-rim), 0 2px 5px -2px rgba(0, 0, 0, 0.7);
+  transition:
+    transform var(--dur-press) var(--ease-mech),
+    background var(--dur-fast) var(--ease-mech),
+    color var(--dur-fast) var(--ease-mech),
+    border-color var(--dur-fast) var(--ease-mech),
+    box-shadow var(--dur-fast) var(--ease-mech);
+  -webkit-tap-highlight-color: transparent;
+}
+.pill:hover {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent 60%),
+    linear-gradient(180deg, #2a2526, #1e1a1b);
+  border-color: rgba(246, 239, 231, 0.2);
+  color: var(--color-ink);
+}
+.pill:active {
+  transform: translateY(1px);
+  box-shadow: inset 0 2px 5px -1px rgba(0, 0, 0, 0.8);
+}
+
+/* The lit red transport key. Glows; presses into the deck. */
+.pill-primary {
+  border-color: transparent;
+  color: #fff;
+  font-weight: 700;
+  background:
+    linear-gradient(180deg, var(--color-ember-soft), var(--color-ember) 45%, var(--color-ember-deep));
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.35),
+    0 1px 2px 0 rgba(0, 0, 0, 0.5),
+    var(--glow-red);
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
+}
+.pill-primary:hover {
+  background:
+    linear-gradient(180deg, #ff6f66, #ff1a1a 45%, var(--color-ember));
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.4),
+    0 1px 2px 0 rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(255, 0, 0, 0.6),
+    0 0 30px -2px rgba(255, 0, 0, 0.7);
+}
+.pill-primary:active {
+  transform: translateY(1px);
+  background: linear-gradient(180deg, var(--color-ember), var(--color-ember-deep));
+  box-shadow: inset 0 2px 6px 0 rgba(0, 0, 0, 0.55), var(--glow-red);
+}
+
+/* Flat utility / destructive key — flushes red on hover. */
+.pill-ghost {
+  background: rgba(246, 239, 231, 0.03);
+  box-shadow: none;
+  font-weight: 600;
+  color: var(--color-ink-dim);
+}
+.pill-ghost:hover {
+  color: var(--color-ember-soft);
+  border-color: rgba(255, 0, 0, 0.5);
+  background: rgba(255, 0, 0, 0.1);
+  box-shadow: 0 0 18px -6px rgba(255, 0, 0, 0.6);
+}
+.pill-ghost:active {
+  transform: translateY(1px);
+  background: rgba(255, 0, 0, 0.18);
+}
+
+/* An active/pressed toggle pill (ServerSelector active guild uses aria-pressed
+   + an inline ember border; Discover/Picker active preset uses .pill-primary).
+   Give aria-pressed a subtle lit ring so it reads as engaged even on .pill. */
+.pill[aria-pressed="true"]:not(.pill-primary) {
+  border-color: rgba(255, 0, 0, 0.55);
+  color: var(--color-ember-soft);
+  box-shadow: var(--shadow-rim), 0 0 16px -6px rgba(255, 0, 0, 0.6);
+}
+
+/* -----------------------------------------------------------------------------
+   6. FORM CONTROLS — recessed wells + machined sliders
+   Inputs/selects are carved INTO the faceplate (inset shadow, sunken fill) and
+   light up with a red ring on focus. The range slider is a real VU fader.
+   The components set border/color inline; we add fill, depth, radius, focus.
+   -------------------------------------------------------------------------- */
+input[type="text"],
+input[type="search"],
+input:not([type]),
+select,
+textarea {
+  background: var(--color-sunken) !important;
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-inset);
+  transition: box-shadow var(--dur-fast) var(--ease-mech),
+    border-color var(--dur-fast) var(--ease-mech);
+  font-family: var(--font-sans);
+}
+input::placeholder {
+  color: var(--color-ink-faint);
+}
+input:focus,
+input:focus-visible,
+select:focus,
+select:focus-visible,
+textarea:focus {
+  outline: none;
+  border-color: rgba(255, 0, 0, 0.55) !important;
+  box-shadow: var(--shadow-inset), 0 0 0 3px rgba(255, 0, 0, 0.18),
+    0 0 18px -6px rgba(255, 0, 0, 0.5);
+}
+
+/* Native <select> arrow tinted into the palette. */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--color-ink-dim) 50%),
+    linear-gradient(135deg, var(--color-ink-dim) 50%, transparent 50%) !important;
+  background-position:
+    calc(100% - 18px) calc(50% + 1px),
+    calc(100% - 13px) calc(50% + 1px) !important;
+  background-size: 5px 5px, 5px 5px !important;
+  background-repeat: no-repeat !important;
+  padding-right: 2.2rem !important;
+}
+
+/* Checkboxes -> small console toggle lamps. Unchecked = dark well; checked =
+   lit red lamp with a glow. (accent-color covers the inner mark cross-browser
+   while the box-shadow supplies the lamp glow.) */
+input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 1.05rem;
+  height: 1.05rem;
+  border-radius: 5px;
+  border: 1px solid var(--color-line);
+  background: var(--color-sunken);
+  box-shadow: var(--shadow-inset);
+  cursor: pointer;
+  position: relative;
+  transition: background var(--dur-fast) var(--ease-mech),
+    box-shadow var(--dur-fast) var(--ease-mech),
+    border-color var(--dur-fast) var(--ease-mech);
+}
+input[type="checkbox"]:checked {
+  background: linear-gradient(180deg, var(--color-ember-soft), var(--color-ember));
+  border-color: var(--color-ember);
+  box-shadow: var(--glow-red);
+}
+input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+input[type="checkbox"]:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* --- Range sliders: VU FADERS (Volume, Crossfade seconds). ----------------
+   A slim sunken track with a RED fill to the left of the thumb (a linear-
+   gradient driven by the browser's value where supported), and a machined
+   knurled thumb that glows. Cross-browser: WebKit + Firefox track/thumb. */
+input[type="range"] {
+  appearance: none;
+  -webkit-appearance: none;
+  height: 22px;
+  width: 9rem;
+  background: transparent;
   cursor: pointer;
 }
-.pill:hover { background: rgba(255, 255, 255, 0.14); border-color: rgba(255, 255, 255, 0.2); }
-.pill:active { background: rgba(255, 255, 255, 0.22); }
-.pill-primary { border-color: transparent; background: var(--color-ember); color: #fff; font-weight: 600; }
-.pill-primary:hover { background: #cc0000; }
-.pill-ghost:hover { color: var(--color-danger); border-color: rgba(241, 76, 76, 0.5); background: rgba(241, 76, 76, 0.1); }
-
-.vu { height: 6px; border-radius: 999px; background: #383838; overflow: hidden; }
-.vu > span { display: block; height: 100%; background: var(--color-ember); transition: width 0.5s linear; }
-
-/* Decorative synthetic equalizer-bar visualizer (NOT real audio analysis). */
-.viz { display: flex; align-items: flex-end; gap: 3px; height: 26px; }
-.viz-bar {
-  width: 3px;
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 6px;
   border-radius: 999px;
-  background: linear-gradient(to top, var(--color-ember), var(--color-ember-soft));
-  /* Frozen / paused pose: short flat stub. */
+  /* WebKit has no ::-moz-range-progress equivalent, so the red "fill to the left
+     of the thumb" is painted here from --range-fill (a 0–100% value the component
+     sets inline from the slider value). The red stop hard-cuts to the dark well at
+     that percentage; defaults to 0% (all dark) when the var is absent. */
+  background:
+    linear-gradient(
+      90deg,
+      var(--color-ember-deep) 0%,
+      var(--color-ember) var(--range-fill, 0%),
+      #1c1819 var(--range-fill, 0%),
+      #050505 100%
+    );
+  box-shadow: var(--shadow-inset);
+}
+input[type="range"]::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #050505, #1c1819);
+  box-shadow: var(--shadow-inset);
+}
+/* Firefox fills the "progress" portion natively -> tint it red. */
+input[type="range"]::-moz-range-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--color-ember-deep), var(--color-ember));
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  margin-top: -7px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid var(--color-ember-deep);
+  background:
+    radial-gradient(circle at 35% 30%, #fff7f6 0%, var(--color-ember-soft) 35%, var(--color-ember) 70%, var(--color-ember-deep) 100%);
+  box-shadow:
+    0 1px 3px 0 rgba(0, 0, 0, 0.6),
+    0 0 12px -2px rgba(255, 0, 0, 0.8);
+  transition: transform var(--dur-press) var(--ease-mech),
+    box-shadow var(--dur-fast) var(--ease-mech);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid var(--color-ember-deep);
+  background:
+    radial-gradient(circle at 35% 30%, #fff7f6 0%, var(--color-ember-soft) 35%, var(--color-ember) 70%, var(--color-ember-deep) 100%);
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.6), 0 0 12px -2px rgba(255, 0, 0, 0.8);
+}
+input[type="range"]:hover::-webkit-slider-thumb {
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.6), 0 0 20px 0 rgba(255, 0, 0, 0.9);
+}
+input[type="range"]:active::-webkit-slider-thumb {
+  transform: scale(1.12);
+}
+input[type="range"]:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px rgba(255, 0, 0, 0.25), 0 0 16px 0 rgba(255, 0, 0, 0.9);
+}
+input[type="range"]:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* -----------------------------------------------------------------------------
+   7. VU / PROGRESS BAR
+   .vu is the now-playing progress/scrub track. Restyle it as a backlit VU
+   strip: a recessed well with a hot red fill (the > span the component widens)
+   that carries a soft bloom and a bright leading edge. The component sets the
+   seek handle inline (it reads var(--color-ember-soft)), so it already matches.
+   -------------------------------------------------------------------------- */
+.vu {
+  height: 7px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #050505, #1b1718);
+  box-shadow: var(--shadow-inset);
+  overflow: hidden;
+}
+.vu > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background:
+    linear-gradient(90deg, var(--color-ember-deep) 0%, var(--color-ember) 60%, var(--color-ember-soft) 100%);
+  /* Bright bloom at the leading edge -> reads as a live signal level. */
+  box-shadow:
+    0 0 10px 0 rgba(255, 0, 0, 0.6),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.25);
+  transition: width 0.4s var(--ease-out);
+}
+/* When the track is interactive (overflow:visible inline) the handle escapes;
+   give it a hair more room and let the fill glow past the edge. */
+
+/* -----------------------------------------------------------------------------
+   8. VISUALIZER — the red VU needle array
+   Decorative synthetic equalizer (NOT real audio). Rendered as a row of red
+   meter bars rising from a baseline, each with a hot tip and a soft floor
+   glow. .viz-on runs the per-bar keyframes the Visualizer component sets via
+   --viz-base / --viz-peak + animationDuration/Delay.
+   -------------------------------------------------------------------------- */
+.viz {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 30px;
+  padding: 2px 0;
+  /* faint baseline rule under the meters */
+  border-bottom: 1px solid var(--color-line);
+}
+.viz-bar {
+  width: 4px;
+  border-radius: 2px 2px 1px 1px;
+  /* Amber floor -> red body -> hot tip, like a lit VU column. */
+  background: linear-gradient(
+    to top,
+    var(--color-gold) 0%,
+    var(--color-ember) 45%,
+    var(--color-ember-soft) 100%
+  );
   height: 14%;
   transform-origin: bottom;
-  transition: height 0.3s ease, opacity 0.3s ease;
-  opacity: 0.55;
+  opacity: 0.5;
+  box-shadow: 0 0 6px -1px rgba(255, 0, 0, 0.5);
+  transition: height 0.3s var(--ease-out), opacity 0.3s var(--ease-out);
   animation-name: viz-pulse;
   animation-timing-function: ease-in-out;
   animation-iteration-count: infinite;
   animation-direction: alternate;
   animation-play-state: paused;
 }
-.viz-on .viz-bar { opacity: 1; animation-play-state: running; }
+.viz-on .viz-bar {
+  opacity: 1;
+  animation-play-state: running;
+}
 @keyframes viz-pulse {
-  from { height: var(--viz-base, 24%); }
-  to { height: var(--viz-peak, 100%); }
+  from {
+    height: var(--viz-base, 24%);
+  }
+  to {
+    height: var(--viz-peak, 100%);
+  }
 }
 
-@keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
-.reveal { opacity: 0; animation: rise 0.5s ease forwards; }
+/* -----------------------------------------------------------------------------
+   9. SPINNER — a small rotating signal ring
+   -------------------------------------------------------------------------- */
+.spinner {
+  display: inline-block;
+  width: 0.85em;
+  height: 0.85em;
+  vertical-align: -0.1em;
+  margin-right: 0.2em;
+  border: 2px solid color-mix(in srgb, currentColor 30%, transparent);
+  border-top-color: var(--color-ember-soft);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 
-@keyframes spin { to { transform: rotate(360deg); } }
-.spinner { display: inline-block; width: 0.85em; height: 0.85em; vertical-align: -0.1em; margin-right: 0.15em; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin 0.7s linear infinite; }
+/* -----------------------------------------------------------------------------
+   10. REVEAL — console power-on
+   Cards/sections carry .reveal with a staggered inline animation-delay (App
+   sets 80/120/150/180ms etc.). They rise + fade + un-blur as if the panels are
+   powering up one strip at a time.
+   -------------------------------------------------------------------------- */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.992);
+    filter: blur(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: blur(0);
+  }
+}
+.reveal {
+  opacity: 0;
+  animation: rise var(--dur-reveal) var(--ease-out) forwards;
+  will-change: transform, opacity, filter;
+}
+
+/* -----------------------------------------------------------------------------
+   11. MISC STATES
+   -------------------------------------------------------------------------- */
+button:disabled,
+a[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: saturate(0.7);
+}
+button:disabled:hover {
+  transform: none;
+  box-shadow: var(--shadow-rim), 0 2px 5px -2px rgba(0, 0, 0, 0.7);
+}
+
+/* The "seeking…" / animate-pulse affordance the ProgressBar renders. */
+@keyframes pulse {
+  50% {
+    opacity: 0.4;
+  }
+}
+.animate-pulse {
+  animation: pulse 1.4s var(--ease-mech) infinite;
+}
+
+/* The status banner (App's StatusBanner uses .card + inline danger color). Add
+   a left signal stripe so success vs error reads instantly at a glance. */
+.card[style*="--color-danger"],
+.card[style*="danger"] {
+  border-left-width: 3px;
+}
+
+/* -----------------------------------------------------------------------------
+   12. REDUCED MOTION — honor the user's preference
+   Freeze every animation to a static, legible pose. No reveal, no pulse, no
+   VU motion, no spinner spin; the VU fill snaps instead of glides.
+   -------------------------------------------------------------------------- */
 @media (prefers-reduced-motion: reduce) {
-  .reveal { animation: none; opacity: 1; }
-  .spinner { animation: none; }
-  .vu > span { transition: none; }
-  /* No motion: render a static mid-height frozen pose regardless of state. */
-  .viz-bar, .viz-on .viz-bar { animation: none !important; height: 40%; opacity: 0.7; }
+  .reveal {
+    animation: none;
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+  .spinner {
+    animation: none;
+  }
+  .animate-pulse {
+    animation: none;
+  }
+  .vu > span {
+    transition: none;
+  }
+  /* Static mid-height frozen pose regardless of play state. */
+  .viz-bar,
+  .viz-on .viz-bar {
+    animation: none !important;
+    height: 42%;
+    opacity: 0.75;
+  }
+  .card,
+  .pill {
+    transition: none;
+  }
+  * {
+    scroll-behavior: auto;
+  }
 }
-
-button:disabled { opacity: 0.5; cursor: not-allowed; }

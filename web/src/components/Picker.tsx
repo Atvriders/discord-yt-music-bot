@@ -66,8 +66,9 @@ export function Picker({
   const controlsDisabled = !!busy || queuing;
 
   return (
-    <ul className="flex flex-col gap-1">
-      <li className="flex items-center justify-between gap-2 px-1 pb-1">
+    <ul className="flex flex-col gap-1.5">
+      {/* Engraved silkscreen header strip — section label + the lit transport key. */}
+      <li className="flex items-center justify-between gap-2 px-1 pb-1.5">
         <span className="eyebrow">Pick the exact track</span>
         {count > 0 && (
           <button
@@ -76,9 +77,33 @@ export function Picker({
             disabled={controlsDisabled}
             aria-label={`Queue ${count} selected track${count === 1 ? "" : "s"}`}
             className="pill pill-primary"
-            style={{ padding: "0.3rem 0.7rem", fontSize: "0.8rem" }}
+            style={{ padding: "0.34rem 0.8rem", fontSize: "0.8rem" }}
           >
-            {queuing ? "Queuing…" : `Queue selected (${count})`}
+            {queuing ? (
+              <>
+                <span className="spinner" />
+                Queuing…
+              </>
+            ) : (
+              <>
+                {/* mono counter chip on the transport key — reads as a take count */}
+                <span
+                  className="font-mono"
+                  aria-hidden
+                  style={{
+                    fontSize: "0.7rem",
+                    lineHeight: 1,
+                    padding: "0.12rem 0.36rem",
+                    borderRadius: "999px",
+                    background: "rgba(0,0,0,0.28)",
+                    boxShadow: "inset 0 1px 2px rgba(0,0,0,0.45)",
+                  }}
+                >
+                  {count}
+                </span>
+                {`Queue selected (${count})`}
+              </>
+            )}
           </button>
         )}
       </li>
@@ -86,41 +111,85 @@ export function Picker({
         const isSelected = selected.has(c.videoId);
         return (
           <li key={c.videoId}>
+            {/* Each candidate is a carved console row-key: dark well that lifts on
+                hover, and depresses + lights a red signal ring when selected. */}
             <button
               type="button"
               aria-pressed={isSelected}
               disabled={controlsDisabled}
               onClick={() => toggle(c.videoId)}
-              className="w-full flex items-center gap-3 rounded-xl px-3 py-2.5 text-left"
+              className="w-full flex items-center gap-3 text-left"
               style={{
-                transition: "background .15s",
-                background: isSelected ? "rgba(255,255,255,0.10)" : "transparent",
-                boxShadow: isSelected ? "inset 0 0 0 1px var(--color-accent, rgba(255,255,255,0.35))" : "none",
+                position: "relative",
+                padding: "0.5rem 0.7rem",
+                borderRadius: "var(--radius-sm)",
+                border: "1px solid var(--color-line)",
+                transition:
+                  "background var(--dur-fast) var(--ease-mech), box-shadow var(--dur-fast) var(--ease-mech), border-color var(--dur-fast) var(--ease-mech), transform var(--dur-press) var(--ease-mech)",
+                transform: isSelected ? "translateY(1px)" : "none",
+                background: isSelected
+                  ? "linear-gradient(180deg, rgba(255,0,0,0.10), rgba(255,0,0,0.04))"
+                  : "linear-gradient(180deg, rgba(246,239,231,0.025), transparent 70%), var(--color-sunken)",
+                borderColor: isSelected
+                  ? "rgba(255,0,0,0.55)"
+                  : "var(--color-line)",
+                boxShadow: isSelected
+                  ? "inset 0 2px 5px -1px rgba(0,0,0,0.7), inset 0 0 0 1px var(--color-accent, rgba(255,0,0,0.6)), 0 0 18px -6px rgba(255,0,0,0.6)"
+                  : "var(--shadow-rim)",
               }}
               onMouseEnter={(e) => {
-                if (!isSelected) e.currentTarget.style.background = "rgba(255,255,255,0.08)";
+                if (!isSelected) {
+                  e.currentTarget.style.background =
+                    "linear-gradient(180deg, rgba(246,239,231,0.05), transparent 70%), var(--color-sunken)";
+                  e.currentTarget.style.borderColor = "rgba(246,239,231,0.2)";
+                }
               }}
               onMouseLeave={(e) => {
-                if (!isSelected) e.currentTarget.style.background = "transparent";
+                if (!isSelected) {
+                  e.currentTarget.style.background =
+                    "linear-gradient(180deg, rgba(246,239,231,0.025), transparent 70%), var(--color-sunken)";
+                  e.currentTarget.style.borderColor = "var(--color-line)";
+                }
               }}
             >
               <Thumb url={c.thumbnailUrl} size={44} />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm">{c.title}</span>
+                {/* Track title in the display serif — the studio voice. */}
+                <span
+                  className="block truncate font-display text-sm"
+                  style={{
+                    color: isSelected ? "var(--color-ink)" : "var(--color-ink)",
+                  }}
+                >
+                  {c.title}
+                </span>
                 <span className="block truncate text-xs" style={{ color: "var(--color-ink-faint)" }}>
-                  {c.channel} · <span className="font-mono">{fmtTime(c.durationSec)}</span>
+                  {c.channel}{" "}
+                  <span aria-hidden style={{ opacity: 0.5 }}>·</span>{" "}
+                  <span className="font-mono" style={{ color: "var(--color-ink-dim)" }}>
+                    {fmtTime(c.durationSec)}
+                  </span>
                 </span>
               </span>
-              {/* Selected-state checkmark badge. */}
+              {/* Selected-state lamp: a lit red toggle lamp with a glow + white check. */}
               <span
                 aria-hidden
                 className="shrink-0 grid place-items-center rounded-full"
                 style={{
                   width: 22,
                   height: 22,
-                  border: "1px solid var(--color-line)",
-                  background: isSelected ? "var(--color-accent, #5b8cff)" : "transparent",
+                  border: isSelected
+                    ? "1px solid var(--color-ember, var(--color-accent))"
+                    : "1px solid var(--color-line)",
+                  background: isSelected
+                    ? "radial-gradient(circle at 35% 30%, var(--color-ember-soft) 0%, var(--color-accent, #ff0000) 70%, var(--color-ember-deep) 100%)"
+                    : "var(--color-sunken)",
+                  boxShadow: isSelected
+                    ? "var(--glow-red), inset 0 1px 0 0 rgba(255,255,255,0.35)"
+                    : "var(--shadow-inset)",
                   color: isSelected ? "#fff" : "transparent",
+                  transition:
+                    "background var(--dur-fast) var(--ease-mech), box-shadow var(--dur-fast) var(--ease-mech), border-color var(--dur-fast) var(--ease-mech)",
                 }}
               >
                 {isSelected && (

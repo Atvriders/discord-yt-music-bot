@@ -20,17 +20,50 @@ export function VoiceChannelPicker({ channels, value, loadFailed, onChange, onRe
       ? "no voice channels"
       : "pick a channel…";
   return (
-    <label className="flex items-center gap-2 text-xs" style={{ color: "var(--color-ink-dim)" }}>
-      <span className="eyebrow">Channel</span>
-      <select aria-label="Voice channel" value={value ?? ""} disabled={isEmpty} onChange={(e) => onChange(e.target.value)}
-        className="bg-transparent rounded-lg px-3 py-2 text-sm"
-        style={{ border: "1px solid var(--color-line)", color: "var(--color-ink)" }}>
-        <option value="" disabled>{placeholder}</option>
-        {channels.map((c) => (<option key={c.id} value={c.id} style={{ background: "var(--color-raised)" }}>{c.name}</option>))}
+    // A small machined "patch bay" strip on the faceplate: engraved label over a
+    // carved select well, with a hot-red Retry key when the signal drops.
+    <label className="inline-flex items-center gap-3">
+      <span className="eyebrow" style={{ color: "var(--color-ink-faint)" }}>
+        Channel
+      </span>
+      <select
+        aria-label="Voice channel"
+        value={value ?? ""}
+        disabled={isEmpty}
+        onChange={(e) => onChange(e.target.value)}
+        // Carved recessed well (fill + inset shadow + tinted caret come from
+        // index.css); we keep border + ink inline so the focus ring overrides cleanly.
+        className="px-3 py-2 text-sm"
+        style={{
+          border: "1px solid var(--color-line)",
+          color: "var(--color-ink)",
+          fontFamily: "var(--font-sans)",
+          fontWeight: 500,
+          minWidth: "11rem",
+        }}
+      >
+        <option value="" disabled style={{ color: "var(--color-ink-faint)" }}>
+          {placeholder}
+        </option>
+        {channels.map((c) => (
+          <option
+            key={c.id}
+            value={c.id}
+            style={{ background: "var(--color-raised)", color: "var(--color-ink)" }}
+          >
+            {c.name}
+          </option>
+        ))}
       </select>
       {loadFailed && onRetry && (
-        <button type="button" aria-label="Retry loading voice channels" onClick={onRetry}
-          className="pill pill-ghost" style={{ padding: "0.2rem 0.55rem", fontSize: "0.75rem" }}>
+        <button
+          type="button"
+          aria-label="Retry loading voice channels"
+          onClick={onRetry}
+          // Flat utility key that flushes red on hover (the console "re-arm signal").
+          className="pill pill-ghost font-mono"
+          style={{ padding: "0.25rem 0.7rem", fontSize: "0.72rem", letterSpacing: "0.04em" }}
+        >
           Retry
         </button>
       )}

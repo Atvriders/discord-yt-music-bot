@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { CurrentItem } from "../types.js";
 import { fmtAudio, fmtTime } from "../lib/format.js";
 import { Visualizer } from "./Visualizer.js";
+import { Lyrics } from "./Lyrics.js";
 
 // Display progress indicator. We extrapolate the elapsed position between WS state
 // updates so the bar MOVES smoothly. When `canSeek` is set the same bar becomes an
@@ -25,8 +26,11 @@ export function NowPlaying({
   receivedAt = 0,
   canSeek = false,
   onSeek,
+  guildId,
 }: {
   item: CurrentItem | null;
+  /** Active guild id — enables the best-effort Lyrics panel. Omit to hide it. */
+  guildId?: string | null;
   paused?: boolean;
   /**
    * Drives the decorative visualizer only: animate the synthetic bars while a
@@ -43,32 +47,68 @@ export function NowPlaying({
 
   if (!item) {
     return (
-      <section className="card hero-glow reveal p-8" style={{ animationDelay: "80ms" }}>
-        <p className="eyebrow">Now playing</p>
-        <p className="font-display text-3xl mt-3" style={{ color: "var(--color-ink-dim)" }}>Nothing is playing.</p>
-        <p className="mt-2 text-sm" style={{ color: "var(--color-ink-faint)" }}>Queue a YouTube link or search below to start the set.</p>
+      <section className="card hero-glow p-8">
+        <div className="relative z-10 flex items-start gap-4">
+          {/* Machined empty meter slot — the deck idling, no signal on the line. */}
+          <div
+            aria-hidden
+            className="shrink-0 grid place-items-center"
+            style={{
+              width: 56,
+              height: 56,
+              borderRadius: "var(--radius-sm)",
+              background: "var(--color-sunken)",
+              border: "1px solid var(--color-line)",
+              boxShadow: "var(--shadow-inset)",
+              color: "var(--color-ink-faint)",
+            }}
+          >
+            <span className="font-mono text-xs tracking-widest">––</span>
+          </div>
+          <div className="min-w-0">
+            <p className="eyebrow">Now playing</p>
+            <p className="font-display text-3xl mt-3" style={{ color: "var(--color-ink-dim)" }}>Nothing is playing.</p>
+            <p className="mt-2 text-sm" style={{ color: "var(--color-ink-faint)" }}>Queue a YouTube link or search below to start the set.</p>
+            <p className="mt-4 font-mono text-xs tracking-widest" style={{ color: "var(--color-ink-faint)" }}>
+              ── STANDBY ──
+            </p>
+          </div>
+        </div>
       </section>
     );
   }
   const { meta, requester, durationMs } = item;
   const audioLabel = fmtAudio(item.audio);
   return (
-    <section className="card hero-glow reveal p-7 sm:p-8" style={{ animationDelay: "80ms" }}>
+    <section className="card hero-glow p-7 sm:p-8">
       <div className="relative z-10 flex gap-6">
+        {/* Album art seated in a machined faceplate slot — inset rim, contact shadow. */}
         <div className="shrink-0 relative">
           <img src={meta.thumbnailUrl ?? ""} alt="" width={132} height={132}
-            className="rounded-2xl object-cover" style={{ width: 132, height: 132, boxShadow: "0 8px 24px -10px rgba(0,0,0,0.6)" }} />
-          <span className="absolute inset-0 rounded-2xl" style={{ boxShadow: "inset 0 0 0 1px var(--color-line)" }} />
+            className="object-cover" style={{ width: 132, height: 132, borderRadius: "var(--radius)", boxShadow: "0 10px 28px -12px rgba(0,0,0,0.7)" }} />
+          {/* carved seam + faint red rim-light, like a lit jewel set into the deck */}
+          <span className="absolute inset-0" aria-hidden style={{ borderRadius: "var(--radius)", boxShadow: "inset 0 0 0 1px var(--color-line), inset 0 0 22px -10px rgba(255,0,0,0.35)" }} />
         </div>
         <div className="min-w-0 flex-1">
-          <p className="eyebrow" style={{ color: "var(--color-ember-soft)" }}>● Now playing</p>
+          {/* Lit "on air" brand-plate label — red tick + ember-soft silkscreen. */}
+          <p className="eyebrow" style={{ color: "var(--color-ember-soft)" }}>Now playing</p>
           <h1 className="font-display text-3xl sm:text-4xl leading-tight mt-2 truncate" title={meta.title}>{meta.title}</h1>
           <p className="mt-1 text-sm" style={{ color: "var(--color-ink-dim)" }}>{meta.channel}</p>
           {audioLabel && (
-            <p className="mt-2 font-mono text-xs tracking-wide" style={{ color: "var(--color-ink-faint)" }}>
+            <p
+              className="mt-3 font-mono text-xs tracking-wide inline-flex items-center"
+              style={{
+                color: "var(--color-ink-faint)",
+                padding: "0.2rem 0.6rem",
+                borderRadius: "var(--radius-pill)",
+                background: "var(--color-sunken)",
+                boxShadow: "var(--shadow-inset)",
+              }}
+            >
               {audioLabel}
             </p>
           )}
+          {/* The hero's lit VU needle array. */}
           <div className="mt-4"><Visualizer playing={playing} /></div>
           <ProgressBar
             durationMs={durationMs}
@@ -77,13 +117,18 @@ export function NowPlaying({
             canSeek={canSeek}
             onSeek={onSeek}
           />
-          <div className="flex items-center gap-2 mt-4">
-            <img src={requester.avatarUrl} alt="" width={22} height={22} className="rounded-full" />
+          {/* Requester strip — a small engraved credit line on the deck. */}
+          <div
+            className="flex items-center gap-2 mt-4 pt-4"
+            style={{ borderTop: "1px solid var(--color-line)" }}
+          >
+            <img src={requester.avatarUrl} alt="" width={22} height={22} className="rounded-full" style={{ boxShadow: "0 0 0 1px var(--color-line)" }} />
             <span className="text-xs" style={{ color: "var(--color-ink-dim)" }}>
               requested by <strong style={{ color: "var(--color-ink)" }}>{requester.displayName}</strong>
               <span className="font-mono" style={{ color: "var(--color-ink-faint)" }}> · {requester.source}</span>
             </span>
           </div>
+          {guildId && <Lyrics guildId={guildId} videoId={meta.videoId} />}
         </div>
       </div>
     </section>
@@ -246,8 +291,10 @@ function ProgressBar({ durationMs, displayedMs, receivedAt, canSeek, onSeek }: P
         onPointerUp={endDrag}
         onPointerCancel={cancelDrag}
       >
+        {/* The backlit red signal level the .vu rule widens + blooms. */}
         <span data-testid="progress-fill" style={{ width: `${pct}%` }} />
         {interactive && (
+          /* Machined glowing seek knob — escapes the well (overflow:visible inline). */
           <span
             data-testid="seek-handle"
             aria-hidden
@@ -256,23 +303,26 @@ function ProgressBar({ durationMs, displayedMs, receivedAt, canSeek, onSeek }: P
               top: "50%",
               left: `${pct}%`,
               transform: "translate(-50%, -50%)",
-              width: 12,
-              height: 12,
+              width: 14,
+              height: 14,
               borderRadius: "50%",
-              background: "var(--color-ember-soft, #e0a052)",
+              border: "1px solid var(--color-ember-deep, #b00000)",
+              background:
+                "radial-gradient(circle at 35% 30%, #fff7f6 0%, var(--color-ember-soft, #ff5a52) 35%, var(--color-ember, #ff0000) 70%, var(--color-ember-deep, #b00000) 100%)",
               boxShadow: seeking
-                ? "0 0 0 3px rgba(0,0,0,0.35), 0 0 0 6px var(--color-ember-soft, #e0a052)"
-                : "0 0 0 3px rgba(0,0,0,0.35)",
+                ? "0 1px 3px 0 rgba(0,0,0,0.6), 0 0 16px 0 rgba(255,0,0,0.9)"
+                : "0 1px 3px 0 rgba(0,0,0,0.6), 0 0 12px -2px rgba(255,0,0,0.8)",
               pointerEvents: "none",
             }}
           />
         )}
       </div>
+      {/* Console counter readout: elapsed on the left, duration/"live feed" on the right. */}
       <div className="flex items-center justify-between mt-2 font-mono text-xs" style={{ color: "var(--color-ink-faint)" }}>
         <span className="flex items-center gap-2">
-          {elapsedLabel}
+          <span style={{ color: "var(--color-ink-dim)" }}>{elapsedLabel}</span>
           {seeking && (
-            <span data-testid="seeking-indicator" className="animate-pulse" style={{ color: "var(--color-ember-soft, #e0a052)" }}>
+            <span data-testid="seeking-indicator" className="animate-pulse" style={{ color: "var(--color-ember-soft, #ff5a52)" }}>
               seeking…
             </span>
           )}

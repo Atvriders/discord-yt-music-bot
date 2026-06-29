@@ -27,6 +27,8 @@ function build(sessionUserId: string | null, depOverrides: Record<string, unknow
     seek: vi.fn(async () => true),
     remove: vi.fn(async () => true),
     reorder: vi.fn(async () => true),
+    shuffle: vi.fn(async () => {}),
+    jumpTo: vi.fn(async () => true),
     snapshot: vi.fn(() => ({
       current: null,
       upcoming: [],
@@ -38,14 +40,24 @@ function build(sessionUserId: string | null, depOverrides: Record<string, unknow
       crossfadeSec: 0,
       normalizeLoudness: false,
       repeat: "off" as const,
+      volume: 100,
+      fx: "none" as const,
     },
     updateSettings: vi.fn((patch: Record<string, unknown>) => ({
       idleTimeoutSec: 300,
       crossfadeSec: 0,
       normalizeLoudness: false,
       repeat: "off",
+      volume: 100,
+      fx: "none",
       ...patch,
     })),
+    savePlaylist: vi.fn(async (_name: string) => {}),
+    loadPlaylist: vi.fn(async (_name: string, _requester: unknown) => 2),
+    listPlaylists: vi.fn(() => [{ name: "chill", trackCount: 3, savedAt: 1000 }]) as ReturnType<
+      typeof vi.fn
+    >,
+    deletePlaylist: vi.fn(async (_name: string) => true),
   };
   const guild = {
     name: "Test Guild",
@@ -436,6 +448,46 @@ describe("REST actions", () => {
     expect(res.statusCode).toBe(400);
     expect(h.controller.reorder).not.toHaveBeenCalled();
   });
+  it("shuffle forwards to the controller (200) and is auth-gated", async () => {
+    const r = await h.app.inject({ method: "POST", url: `/api/guilds/${GUILD}/shuffle` });
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toEqual({ ok: true });
+    expect(h.controller.shuffle).toHaveBeenCalledTimes(1);
+
+    const anon = build(null);
+    const r401 = await anon.app.inject({ method: "POST", url: `/api/guilds/${GUILD}/shuffle` });
+    expect(r401.statusCode).toBe(401);
+    expect(anon.controller.shuffle).not.toHaveBeenCalled();
+  });
+  it("jump forwards the itemId to jumpTo (200) and echoes ok", async () => {
+    const r = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/jump`,
+      payload: { itemId: "i9" },
+    });
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toEqual({ ok: true });
+    expect(h.controller.jumpTo).toHaveBeenCalledWith("i9");
+  });
+  it("jump with a missing itemId returns 400 and does not call jumpTo", async () => {
+    const r = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/jump`,
+      payload: {},
+    });
+    expect(r.statusCode).toBe(400);
+    expect(h.controller.jumpTo).not.toHaveBeenCalled();
+  });
+  it("jump is auth-gated (401 when not logged in)", async () => {
+    const anon = build(null);
+    const r = await anon.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/jump`,
+      payload: { itemId: "i9" },
+    });
+    expect(r.statusCode).toBe(401);
+    expect(anon.controller.jumpTo).not.toHaveBeenCalled();
+  });
   it("GET /api/guilds/:id/state returns the full snapshot payload shape", async () => {
     h.controller.snapshot.mockReturnValue({
       current: null,
@@ -468,6 +520,8 @@ describe("REST actions", () => {
       crossfadeSec: 0,
       normalizeLoudness: false,
       repeat: "off",
+      volume: 100,
+      fx: "none",
     });
   });
 
@@ -494,6 +548,17 @@ describe("REST actions", () => {
       repeat: "all",
       normalizeLoudness: true,
     });
+  });
+
+  it("POST /api/guilds/:id/settings forwards a volume + fx patch and echoes the result", async () => {
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/settings`,
+      payload: { volume: 150, fx: "bassboost" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(h.controller.updateSettings).toHaveBeenCalledWith({ volume: 150, fx: "bassboost" });
+    expect(res.json().settings).toMatchObject({ volume: 150, fx: "bassboost" });
   });
 
   it("POST /api/guilds/:id/settings forwards an idle-timeout patch (clamping is the controller's job)", async () => {
@@ -579,6 +644,268 @@ describe("REST actions", () => {
     };
     const { app } = build(USER, { client: { guilds: { cache: new Map([[GUILD, guild]]) } } });
     const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/voice-channels` });
+    expect(res.statusCode).toBe(403);
+  });
+});
+
+describe("REST playlists", () => {
+  let h: ReturnType<typeof build>;
+  beforeEach(() => {
+    h = build(USER);
+  });
+
+  it("GET /playlists returns the controller's summaries", async () => {
+    const res = await h.app.inject({ method: "GET", url: `/api/guilds/${GUILD}/playlists` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().playlists).toEqual([{ name: "chill", trackCount: 3, savedAt: 1000 }]);
+    expect(h.controller.listPlaylists).toHaveBeenCalled();
+  });
+
+  it("POST /playlists saves the named playlist and echoes the new list", async () => {
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/playlists`,
+      payload: { name: "road trip" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(h.controller.savePlaylist).toHaveBeenCalledWith("road trip");
+    expect(res.json()).toMatchObject({ ok: true });
+    expect(Array.isArray(res.json().playlists)).toBe(true);
+  });
+
+  it("POST /playlists trims the name and rejects a blank one with 400", async () => {
+    const r1 = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/playlists`,
+      payload: { name: "  spaced  " },
+    });
+    expect(r1.statusCode).toBe(200);
+    expect(h.controller.savePlaylist).toHaveBeenCalledWith("spaced");
+
+    const r2 = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/playlists`,
+      payload: { name: "   " },
+    });
+    expect(r2.statusCode).toBe(400);
+  });
+
+  it("POST /playlists surfaces an empty-queue save error as 400", async () => {
+    h.controller.savePlaylist = vi.fn(async () => {
+      throw new Error("cannot save an empty playlist");
+    });
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/playlists`,
+      payload: { name: "nothing" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("cannot save an empty playlist");
+  });
+
+  it("POST /playlists/:name/load connects to the given channel, then enqueues + reports the count", async () => {
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/playlists/road%20trip/load`,
+      payload: { voiceChannelId: "C1" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, queued: 2 });
+    // The bot was connected to the requested channel BEFORE loading (else the tracks
+    // would queue into the void), mirroring play/pick's enqueue connection logic.
+    expect(h.controller.ensureConnected).toHaveBeenCalledWith("C1");
+    const [name, requester] = h.controller.loadPlaylist.mock.calls[0]!;
+    expect(name).toBe("road trip"); // URL-decoded
+    expect(requester).toMatchObject({ discordUserId: USER, source: "web" });
+  });
+
+  it("POST /playlists/:name/load 404s when the playlist doesn't exist (count 0)", async () => {
+    h.controller.connectedChannelId = "C1"; // already connected: skip the no_voice_channel guard
+    h.controller.loadPlaylist = vi.fn(async () => 0);
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/playlists/ghost/load`,
+      payload: { voiceChannelId: "C1" },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("POST /playlists/:name/load 400 no_voice_channel when no channel given and bot is disconnected", async () => {
+    // h.controller.connectedChannelId defaults to null, no voiceChannelId in payload.
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/playlists/road%20trip/load`,
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("no_voice_channel");
+    expect(h.controller.loadPlaylist).not.toHaveBeenCalled();
+  });
+
+  it("POST /playlists/:name/load works without a channel when the bot is already connected", async () => {
+    const { app, controller } = build(USER);
+    controller.connectedChannelId = "C1";
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/playlists/road%20trip/load`,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, queued: 2 });
+    expect(controller.loadPlaylist).toHaveBeenCalled();
+    expect(controller.ensureConnected).not.toHaveBeenCalled();
+    expect(controller.moveTo).not.toHaveBeenCalled();
+  });
+
+  it("POST /playlists/:name/load admin moveTo when connected to a different channel", async () => {
+    const { app, controller } = build(USER, { adminIds: new Set([USER]) });
+    controller.connectedChannelId = "C1";
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/playlists/road%20trip/load`,
+      payload: { voiceChannelId: "C2" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(controller.moveTo).toHaveBeenCalledWith("C2");
+    expect(controller.ensureConnected).not.toHaveBeenCalled();
+  });
+
+  it("POST /playlists/:name/load surfaces a failed voice connect as 400 voice_connect_failed", async () => {
+    const { app, controller } = build(USER);
+    controller.ensureConnected = vi.fn(async () => {
+      throw new Error("Unknown Channel");
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/playlists/road%20trip/load`,
+      payload: { voiceChannelId: "C1" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("voice_connect_failed");
+    expect(controller.loadPlaylist).not.toHaveBeenCalled();
+  });
+
+  it("DELETE /playlists/:name deletes and echoes the new list", async () => {
+    const res = await h.app.inject({
+      method: "DELETE",
+      url: `/api/guilds/${GUILD}/playlists/chill`,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(h.controller.deletePlaylist).toHaveBeenCalledWith("chill");
+    expect(res.json()).toMatchObject({ ok: true });
+  });
+
+  it("DELETE /playlists/:name 404s when the playlist doesn't exist", async () => {
+    h.controller.deletePlaylist = vi.fn(async () => false);
+    const res = await h.app.inject({
+      method: "DELETE",
+      url: `/api/guilds/${GUILD}/playlists/ghost`,
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("all playlist endpoints are auth-gated (401 when not logged in)", async () => {
+    const anon = build(null);
+    const get = await anon.app.inject({ method: "GET", url: `/api/guilds/${GUILD}/playlists` });
+    const post = await anon.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/playlists`,
+      payload: { name: "x" },
+    });
+    const load = await anon.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/playlists/x/load`,
+    });
+    const del = await anon.app.inject({
+      method: "DELETE",
+      url: `/api/guilds/${GUILD}/playlists/x`,
+    });
+    expect(get.statusCode).toBe(401);
+    expect(post.statusCode).toBe(401);
+    expect(load.statusCode).toBe(401);
+    expect(del.statusCode).toBe(401);
+    expect(anon.controller.savePlaylist).not.toHaveBeenCalled();
+    expect(anon.controller.loadPlaylist).not.toHaveBeenCalled();
+    expect(anon.controller.deletePlaylist).not.toHaveBeenCalled();
+  });
+
+  it("playlist endpoints are gated by control auth (403 for a non-member)", async () => {
+    const guild = {
+      members: {
+        fetch: vi.fn(async () => {
+          throw new Error("Unknown Member");
+        }),
+      },
+    };
+    const { app } = build(USER, { client: { guilds: { cache: new Map([[GUILD, guild]]) } } });
+    const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/playlists` });
+    expect(res.statusCode).toBe(403);
+  });
+});
+
+describe("REST lyrics", () => {
+  const current = {
+    id: "i1",
+    addedAt: 0,
+    positionMs: 0,
+    durationMs: 1000,
+    audio: null,
+    meta: meta("aaaaaaaaaaa", "Hello"),
+    requester: { discordUserId: USER, displayName: "dj", avatarUrl: "", source: "web" },
+  };
+
+  it("returns the current track's lyrics from the lyrics fetcher", async () => {
+    const lyrics = vi.fn(async () => ({ lyrics: "la la", source: "lyrics.ovh" }));
+    const { app, controller } = build(USER, { lyrics });
+    controller.snapshot.mockReturnValue({
+      current,
+      upcoming: [],
+      history: [],
+      idleTimeoutSec: 300,
+    });
+    const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/lyrics` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ lyrics: "la la", source: "lyrics.ovh" });
+    expect(lyrics).toHaveBeenCalledWith(current.meta);
+  });
+
+  it("returns { lyrics: null } with 200 when nothing is playing", async () => {
+    const lyrics = vi.fn();
+    const { app, controller } = build(USER, { lyrics });
+    controller.snapshot.mockReturnValue({
+      current: null,
+      upcoming: [],
+      history: [],
+      idleTimeoutSec: 300,
+    });
+    const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/lyrics` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().lyrics).toBeNull();
+    expect(lyrics).not.toHaveBeenCalled();
+  });
+
+  it("returns { lyrics: null } when the fetcher finds none", async () => {
+    const lyrics = vi.fn(async () => ({ lyrics: null, source: "lyrics.ovh" }));
+    const { app, controller } = build(USER, { lyrics });
+    controller.snapshot.mockReturnValue({
+      current,
+      upcoming: [],
+      history: [],
+      idleTimeoutSec: 300,
+    });
+    const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/lyrics` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().lyrics).toBeNull();
+  });
+
+  it("requires control (403 for non-member)", async () => {
+    const guild = {
+      members: {
+        fetch: vi.fn(async () => {
+          throw new Error("Unknown Member");
+        }),
+      },
+    };
+    const { app } = build(USER, { client: { guilds: { cache: new Map([[GUILD, guild]]) } } });
+    const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/lyrics` });
     expect(res.statusCode).toBe(403);
   });
 });

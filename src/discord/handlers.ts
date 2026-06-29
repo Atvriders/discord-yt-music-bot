@@ -19,6 +19,7 @@ export interface HandlerContext {
     | "stop"
     | "remove"
     | "snapshot"
+    | "setVolume"
   >;
   youtube: {
     resolve(videoId: string): Promise<TrackMeta>;
@@ -40,7 +41,9 @@ const HELP = [
   "`?play <youtube-url | search terms>` — queue a link, or search and pick",
   "`?skip` `?pause` `?resume` `?stop` — playback control",
   "`?queue` `?np` — show the queue / now playing",
+  "`?history` — show recently played tracks",
   "`?remove <n>` — remove queue item n",
+  "`?volume <0-200>` — set playback volume (100 = normal)",
 ].join("\n");
 
 function msg(content: string): HandlerResult {
@@ -65,10 +68,16 @@ export async function handleCommand(cmd: Command, ctx: HandlerContext): Promise<
       return msg("⏹️ Stopped and cleared the queue.");
     case "remove":
       return handleRemove(cmd.index, ctx);
+    case "volume": {
+      const settings = ctx.controller.setVolume(cmd.percent);
+      return msg(`🔊 Volume set to **${settings.volume}%**.`);
+    }
     case "queue":
       return msg(formatQueue(ctx));
     case "np":
       return msg(formatNowPlaying(ctx));
+    case "history":
+      return msg(formatHistory(ctx));
     case "help":
     case "none": // filtered upstream; defensive fallthrough to help
       return msg(HELP);
@@ -161,5 +170,16 @@ function formatQueue(ctx: HandlerContext): string {
       .forEach((it, i) => lines.push(`${i + 1}. ${it.meta.title} (${it.requester.displayName})`));
     if (upcoming.length > 10) lines.push(`…and ${upcoming.length - 10} more`);
   }
+  return lines.join("\n");
+}
+
+function formatHistory(ctx: HandlerContext): string {
+  // history is oldest-first (pushed as each track ends); show the last ~10, most-recent
+  // first, so "1." is the track that just finished.
+  const history = ctx.controller.snapshot().history ?? [];
+  if (history.length === 0) return "No history yet.";
+  const recent = history.slice(-10).reverse();
+  const lines = ["**Recently played:**"];
+  recent.forEach((it, i) => lines.push(`${i + 1}. ${it.meta.title} (${it.requester.displayName})`));
   return lines.join("\n");
 }

@@ -1,4 +1,19 @@
 import type { AudioOptions } from "../orchestrator/index.js";
+import type { FxPreset } from "../orchestrator/settings.js";
+
+/**
+ * The ffmpeg `-af` fragment for each FX preset (see settings.ts FxPreset). "none" maps
+ * to no fragment. nightcore/vaporwave resample-then-retime to shift pitch+speed; the
+ * others are single in-place filters.
+ */
+const FX_FILTERS: Record<Exclude<FxPreset, "none">, string> = {
+  bassboost: "bass=g=15",
+  nightcore: "aresample=48000,asetrate=48000*1.25",
+  vaporwave: "asetrate=48000*0.8,aresample=48000",
+  eightd: "apulsator=hz=0.09",
+  treble: "treble=g=10",
+  karaoke: "stereotools=mlev=0.015",
+};
 
 /**
  * Build the ffmpeg `-af` filter chain for a track given its audio options.
@@ -44,6 +59,10 @@ export function buildAudioFilter(
       parts.push(`afade=t=out:st=${start}:d=${xf}`);
     }
   }
+
+  // FX preset appended LAST so it colors the already-normalized/faded signal.
+  const fx = audio.fx;
+  if (fx && fx !== "none") parts.push(FX_FILTERS[fx]);
 
   return parts.length > 0 ? parts.join(",") : null;
 }

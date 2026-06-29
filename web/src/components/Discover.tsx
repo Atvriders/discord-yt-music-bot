@@ -50,7 +50,9 @@ function PresetRow({
 }) {
   return (
     <div>
-      <p className="eyebrow px-1 pb-2">{eyebrow}</p>
+      <p className="eyebrow px-1 pb-2.5">{eyebrow}</p>
+      {/* The preset bank — a row of tactile console keys. The engaged preset
+          lights up as the red transport key (.pill-primary). */}
       <div className="flex flex-wrap gap-2">
         {presets.map((p) => {
           const active = activeQuery === p.query;
@@ -62,6 +64,7 @@ function PresetRow({
               aria-pressed={active}
               onClick={() => onPick(p)}
               className={active ? "pill pill-primary" : "pill"}
+              style={{ padding: "0.45rem 0.95rem", fontSize: "0.85rem" }}
             >
               {p.label}
             </button>
@@ -107,23 +110,41 @@ export function Discover({
   const disabled = !!busy || loading;
 
   return (
-    <section className="card reveal p-5 sm:p-6" style={{ animationDelay: "150ms" }}>
-      <div className="flex items-baseline justify-between">
-        <p className="eyebrow">Discover</p>
+    <section className="card p-5 sm:p-6">
+      {/* Header strip: engraved silkscreen label + the Browse/Hide toggle key. */}
+      <div className="flex items-baseline justify-between gap-4">
+        <div className="flex flex-col gap-1">
+          <p className="eyebrow">Discover</p>
+          <h2
+            className="font-display"
+            style={{ fontSize: "1.35rem", lineHeight: 1.05, color: "var(--color-ink)" }}
+          >
+            Preset bank
+          </h2>
+        </div>
         <button
           type="button"
           aria-expanded={open}
           onClick={() => setOpen((o) => !o)}
           className="pill pill-ghost"
-          style={{ padding: "0.3rem 0.7rem", fontSize: "0.8rem" }}
+          style={{ padding: "0.32rem 0.85rem", fontSize: "0.8rem", flex: "0 0 auto" }}
         >
           {open ? "Hide" : "Browse"}
         </button>
       </div>
 
       {open && (
-        <div className="mt-4 flex flex-col gap-5">
-          <p className="text-xs" style={{ color: "var(--color-ink-faint)" }}>
+        <div className="mt-5 flex flex-col gap-5">
+          {/* Honesty caption — faint cream ink, set off by a thin red signal rule. */}
+          <p
+            className="text-xs"
+            style={{
+              color: "var(--color-ink-faint)",
+              lineHeight: 1.5,
+              paddingLeft: "0.8rem",
+              borderLeft: "2px solid rgba(255, 0, 0, 0.35)",
+            }}
+          >
             Preset searches by genre and mood — pick one to search YouTube, then queue the exact track. Not a
             recommendation engine.
           </p>
@@ -131,13 +152,17 @@ export function Discover({
           <PresetRow eyebrow="By mood" presets={MOOD_PRESETS} activeQuery={activeQuery} busy={disabled} onPick={run} />
 
           {loading && (
-            <p className="text-sm" style={{ color: "var(--color-ink-faint)" }}>
+            <p
+              className="text-sm font-mono"
+              style={{ color: "var(--color-ink-faint)", display: "flex", alignItems: "center" }}
+            >
+              <span className="spinner" aria-hidden="true" />
               Searching…
             </p>
           )}
 
           {!loading && candidates && candidates.length === 0 && (
-            <p className="text-sm" style={{ color: "var(--color-ink-faint)" }}>
+            <p className="text-sm font-mono" style={{ color: "var(--color-ink-faint)" }}>
               No tracks found for that preset.
             </p>
           )}

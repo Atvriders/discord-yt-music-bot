@@ -1,4 +1,11 @@
-import type { GuildSettings, Me, Snapshot, TrackMeta, VoiceChannel } from "../types.js";
+import type {
+  GuildSettings,
+  Me,
+  PlaylistSummary,
+  Snapshot,
+  TrackMeta,
+  VoiceChannel,
+} from "../types.js";
 
 export class ApiError extends Error {
   constructor(public readonly status: number, message: string) { super(message); this.name = "ApiError"; }
@@ -52,8 +59,29 @@ export const api = {
   seek: (g: string, positionMs: number) => post<{ ok: boolean }>(`/api/guilds/${g}/seek`, { positionMs }),
   remove: (g: string, itemId: string) => post<{ ok: boolean }>(`/api/guilds/${g}/queue/remove`, { itemId }),
   reorder: (g: string, itemId: string, toIndex: number) => post<{ ok: boolean }>(`/api/guilds/${g}/queue/reorder`, { itemId, toIndex }),
+  shuffle: (g: string) => post<{ ok: boolean }>(`/api/guilds/${g}/shuffle`),
+  jump: (g: string, itemId: string) => post<{ ok: boolean }>(`/api/guilds/${g}/jump`, { itemId }),
+  // Best-effort lyrics for the current track. `lyrics` is null when none are found
+  // (plain text match, NOT time-synced).
+  lyrics: (g: string) => req<{ lyrics: string | null; source: string }>(`/api/guilds/${g}/lyrics`),
   getSettings: (g: string) => req<{ settings: GuildSettings }>(`/api/guilds/${g}/settings`),
   setSettings: (g: string, patch: Partial<GuildSettings>) =>
     post<{ settings: GuildSettings }>(`/api/guilds/${g}/settings`, patch),
+  // Saved playlists (per-guild). The playlist name is path-encoded so spaces/specials survive.
+  listPlaylists: (g: string) => req<{ playlists: PlaylistSummary[] }>(`/api/guilds/${g}/playlists`),
+  savePlaylist: (g: string, name: string) =>
+    post<{ ok: boolean; playlists: PlaylistSummary[] }>(`/api/guilds/${g}/playlists`, { name }),
+  // Loading connects the bot to voice first (like play/pick), so the saved tracks
+  // actually start playing instead of queueing into the void when it's disconnected.
+  loadPlaylist: (g: string, name: string, voiceChannelId?: string) =>
+    post<EnqueueResult & { ok: boolean; queued: number }>(
+      `/api/guilds/${g}/playlists/${encodeURIComponent(name)}/load`,
+      { voiceChannelId },
+    ),
+  deletePlaylist: (g: string, name: string) =>
+    req<{ ok: boolean; playlists: PlaylistSummary[] }>(
+      `/api/guilds/${g}/playlists/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    ),
   logout: () => post<void>("/auth/logout"),
 };

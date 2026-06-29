@@ -319,6 +319,57 @@ describe("Settings (audio options)", () => {
     expect(synthetic).toBeTruthy();
   });
 
+  function volumeSlider(): HTMLInputElement {
+    return screen.getByLabelText(/^volume$/i) as HTMLInputElement;
+  }
+  function fxSelect(): HTMLSelectElement {
+    return screen.getByLabelText(/fx preset/i) as HTMLSelectElement;
+  }
+
+  it("renders a 0-200 volume slider defaulting to 100% when the prop is omitted", () => {
+    render(<Settings idleTimeoutSec={300} onChange={() => {}} onAudioChange={() => {}} />);
+    const s = volumeSlider();
+    expect(s.getAttribute("type")).toBe("range");
+    expect(s.getAttribute("min")).toBe("0");
+    expect(s.getAttribute("max")).toBe("200");
+    expect(s.value).toBe("100");
+  });
+
+  it("reflects the current volume and posts a patch when it changes", () => {
+    const onAudioChange = vi.fn();
+    render(
+      <Settings idleTimeoutSec={300} volume={150} onChange={() => {}} onAudioChange={onAudioChange} />,
+    );
+    expect(volumeSlider().value).toBe("150");
+    fireEvent.change(volumeSlider(), { target: { value: "60" } });
+    expect(onAudioChange).toHaveBeenCalledWith({ volume: 60 });
+  });
+
+  it("offers every FX preset and defaults to none", () => {
+    render(<Settings idleTimeoutSec={300} onChange={() => {}} onAudioChange={() => {}} />);
+    expect(fxSelect().value).toBe("none");
+    const values = Array.from(fxSelect().options).map((o) => o.value);
+    expect(values).toEqual([
+      "none",
+      "bassboost",
+      "nightcore",
+      "vaporwave",
+      "eightd",
+      "treble",
+      "karaoke",
+    ]);
+  });
+
+  it("reflects the current fx and posts a patch when it changes", () => {
+    const onAudioChange = vi.fn();
+    render(
+      <Settings idleTimeoutSec={300} fx="nightcore" onChange={() => {}} onAudioChange={onAudioChange} />,
+    );
+    expect(fxSelect().value).toBe("nightcore");
+    fireEvent.change(fxSelect(), { target: { value: "bassboost" } });
+    expect(onAudioChange).toHaveBeenCalledWith({ fx: "bassboost" });
+  });
+
   it("disables every control when the user cannot control the guild", () => {
     render(
       <Settings
@@ -333,6 +384,8 @@ describe("Settings (audio options)", () => {
     expect((screen.getByLabelText(/normalize loudness/i) as HTMLInputElement).disabled).toBe(true);
     expect((screen.getByLabelText(/^autoplay$/i) as HTMLInputElement).disabled).toBe(true);
     expect((screen.getByLabelText(/max track length/i) as HTMLSelectElement).disabled).toBe(true);
+    expect((screen.getByLabelText(/^volume$/i) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByLabelText(/fx preset/i) as HTMLSelectElement).disabled).toBe(true);
   });
 
   it("disables the conditionally-rendered crossfade slider and autoplay source when disabled", () => {

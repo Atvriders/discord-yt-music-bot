@@ -45,6 +45,25 @@
  */
 export type RepeatMode = "off" | "one" | "all";
 export type AutoplaySource = "radio" | "artist";
+/**
+ * Audio FX preset applied as an extra ffmpeg `-af` chain on top of the existing
+ * loudnorm / crossfade processing. "none" = no preset (the default). Each preset maps
+ * to a fixed ffmpeg filter in voice/filter.ts:
+ *   bassboost  — bass=g=15            (boost low frequencies)
+ *   nightcore  — speed up + raise pitch (aresample/asetrate at 1.25×)
+ *   vaporwave  — slow down + lower pitch (asetrate at 0.8×)
+ *   eightd     — apulsator (rotating "8D" pan)
+ *   treble     — treble=g=10          (boost high frequencies)
+ *   karaoke    — stereotools center-channel cut (vocal reduction)
+ */
+export type FxPreset =
+  | "none"
+  | "bassboost"
+  | "nightcore"
+  | "vaporwave"
+  | "eightd"
+  | "treble"
+  | "karaoke";
 
 export interface GuildSettings {
   idleTimeoutSec: number;
@@ -53,6 +72,15 @@ export interface GuildSettings {
   repeat: RepeatMode;
   autoplay: boolean;
   autoplaySource: AutoplaySource;
+  /**
+   * Playback volume as a percentage, 0–200 (100 = unchanged / 100%). Applied via
+   * @discordjs/voice INLINE volume (resource.volume.setVolume(volume/100)), which can
+   * be changed live without re-creating the stream. NOTE: inline volume forces the PCM
+   * (transcode) path — the Opus passthrough fast path is only kept while volume === 100.
+   */
+  volume: number;
+  /** Audio FX preset (see FxPreset). "none" = no preset. */
+  fx: FxPreset;
   /**
    * Reject tracks longer than this many seconds when enqueuing. 0 = NO LIMIT
    * (any length allowed). This is the AUTHORITATIVE, per-guild cap — the panel
@@ -69,6 +97,8 @@ export const DEFAULT_SETTINGS: GuildSettings = {
   repeat: "off",
   autoplay: false,
   autoplaySource: "radio",
+  volume: 100,
+  fx: "none",
   // 0 = no limit. The host (index.ts) overrides this seed from the configured
   // MAX_TRACK_DURATION_SEC; an unset config leaves it at 0 (unlimited).
   maxTrackDurationSec: 0,
@@ -78,8 +108,19 @@ export const IDLE_TIMEOUT_MAX_SEC = 3600;
 export const CROSSFADE_MAX_SEC = 12;
 /** Sane upper bound (6h) on the per-guild max-track-length setting. */
 export const MAX_TRACK_DURATION_CEILING_SEC = 21600;
+/** Volume is a percentage: 0 (mute) … 200 (2×). 100 = unchanged. */
+export const VOLUME_MAX = 200;
 const REPEAT_MODES: ReadonlySet<RepeatMode> = new Set<RepeatMode>(["off", "one", "all"]);
 const AUTOPLAY_SOURCES: ReadonlySet<AutoplaySource> = new Set<AutoplaySource>(["radio", "artist"]);
+const FX_PRESETS: ReadonlySet<FxPreset> = new Set<FxPreset>([
+  "none",
+  "bassboost",
+  "nightcore",
+  "vaporwave",
+  "eightd",
+  "treble",
+  "karaoke",
+]);
 
 function clampInt(value: unknown, min: number, max: number, fallback: number): number {
   const n = typeof value === "number" ? value : Number(value);
@@ -104,6 +145,8 @@ export function applySettingsPatch(
     typeof p.autoplaySource === "string" && AUTOPLAY_SOURCES.has(p.autoplaySource as AutoplaySource)
       ? (p.autoplaySource as AutoplaySource)
       : base.autoplaySource;
+  const fx =
+    typeof p.fx === "string" && FX_PRESETS.has(p.fx as FxPreset) ? (p.fx as FxPreset) : base.fx;
   return {
     idleTimeoutSec:
       p.idleTimeoutSec == null
@@ -118,6 +161,8 @@ export function applySettingsPatch(
     repeat,
     autoplay: typeof p.autoplay === "boolean" ? p.autoplay : base.autoplay,
     autoplaySource,
+    volume: p.volume == null ? base.volume : clampInt(p.volume, 0, VOLUME_MAX, base.volume),
+    fx,
     maxTrackDurationSec:
       p.maxTrackDurationSec == null
         ? base.maxTrackDurationSec

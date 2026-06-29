@@ -95,6 +95,25 @@ export class GuildQueue extends EventEmitter {
   }
 
   /**
+   * Shuffle the UPCOMING list in place with an unbiased Fisher-Yates pass, leaving the
+   * current track and history untouched. `rng` defaults to Math.random; an injected RNG
+   * makes the permutation deterministic for tests. Always emits "changed" (even for a
+   * 0/1-item queue where the order can't change) so the panel re-renders consistently.
+   */
+  shuffle(rng: () => number = Math.random): Promise<void> {
+    return this.mutex.runExclusive(() => {
+      const u = this._upcoming;
+      for (let i = u.length - 1; i > 0; i--) {
+        const j = Math.floor(rng() * (i + 1));
+        const tmp = u[i]!;
+        u[i] = u[j]!;
+        u[j] = tmp;
+      }
+      this.emitChange();
+    });
+  }
+
+  /**
    * Repeat-all support: move played history (and the current track, if any) back to
    * the end of the upcoming list so the set replays in its original order. History is
    * cleared. No-op when there is nothing to requeue. Returns the number requeued.
