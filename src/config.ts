@@ -4,12 +4,23 @@ export type { MediaConfig, BotConfig, WebConfig } from "./types/config-types.js"
 
 type Env = Record<string, string | undefined>;
 
-function intEnv(env: Env, key: string, fallback: number): number {
+function intEnv(
+  env: Env,
+  key: string,
+  fallback: number,
+  opts?: { min?: number; max?: number },
+): number {
   const raw = env[key];
   if (raw === undefined || raw === "") return fallback;
   const n = Number(raw);
   if (!Number.isFinite(n) || !Number.isInteger(n)) {
     throw new Error(`Invalid ${key}: expected an integer, got "${raw}"`);
+  }
+  if (opts?.min !== undefined && n < opts.min) {
+    throw new Error(`Invalid ${key}: expected >= ${opts.min}, got "${raw}"`);
+  }
+  if (opts?.max !== undefined && n > opts.max) {
+    throw new Error(`Invalid ${key}: expected <= ${opts.max}, got "${raw}"`);
   }
   return n;
 }
@@ -23,16 +34,22 @@ export function loadMediaConfig(env: Env = process.env): MediaConfig {
   const maxDur = strEnv(env, "MAX_TRACK_DURATION_SEC");
   return {
     cacheDir: strEnv(env, "CACHE_DIR") ?? "/data/cache",
-    cacheMaxBytes: intEnv(env, "CACHE_MAX_MB", 2048) * 1024 * 1024,
-    historyMaxItems: intEnv(env, "HISTORY_MAX_ITEMS", 100),
-    searchResultCount: intEnv(env, "SEARCH_RESULT_COUNT", 5),
-    maxTrackDurationSec: maxDur === null ? null : intEnv(env, "MAX_TRACK_DURATION_SEC", 0),
+    cacheMaxBytes: intEnv(env, "CACHE_MAX_MB", 2048, { min: 1 }) * 1024 * 1024,
+    historyMaxItems: intEnv(env, "HISTORY_MAX_ITEMS", 100, { min: 1 }),
+    searchResultCount: intEnv(env, "SEARCH_RESULT_COUNT", 5, { min: 1 }),
+    // 0 (or negative) means "no ceiling", matching the null-handling convention used
+    // throughout the codebase. A bare 0 would otherwise reject EVERY positive-duration
+    // track in the youtube guard, silently breaking all playback.
+    maxTrackDurationSec:
+      maxDur === null ? null : intEnv(env, "MAX_TRACK_DURATION_SEC", 0, { min: 0 }) || null,
+    // Seeds the INITIAL per-guild "normalize loudness" toggle (the panel overrides per guild).
+    normalizeLoudness: strEnv(env, "NORMALIZE_LOUDNESS") === "true",
     ytProxy: strEnv(env, "YT_PROXY"),
     ytCookiesFile: strEnv(env, "YT_COOKIES"),
     poTokenProviderUrl: strEnv(env, "PO_TOKEN_PROVIDER_URL"),
     sponsorblockRemove: strEnv(env, "SPONSORBLOCK_REMOVE"),
     playerClients: strEnv(env, "YT_PLAYER_CLIENTS") ?? "android_vr,web_embedded,tv",
-    ytdlpTimeoutMs: intEnv(env, "YTDLP_TIMEOUT_MS", 60_000),
+    ytdlpTimeoutMs: intEnv(env, "YTDLP_TIMEOUT_MS", 60_000, { min: 1 }),
   };
 }
 
@@ -44,9 +61,10 @@ export function loadBotConfig(env: Env = process.env): BotConfig {
   return {
     discordToken: token,
     commandPrefix: strEnv(env, "COMMAND_PREFIX") ?? "?",
-    idleTimeoutMs: intEnv(env, "IDLE_TIMEOUT_SEC", 300) * 1000,
-    prefetchDepth: intEnv(env, "PREFETCH_DEPTH", 1),
-    maxConcurrentDownloads: intEnv(env, "MAX_TRANSCODE_JOBS", 2),
+    idleTimeoutMs: intEnv(env, "IDLE_TIMEOUT_SEC", 300, { min: 1 }) * 1000,
+    prefetchDepth: intEnv(env, "PREFETCH_DEPTH", 1, { min: 0 }),
+    // Must be >= 1: a Semaphore(0) deadlocks (no download ever acquires a slot).
+    maxConcurrentDownloads: intEnv(env, "MAX_TRANSCODE_JOBS", 2, { min: 1 }),
     adminUserIds: (strEnv(env, "ADMIN_USER_IDS") ?? "")
       .split(",")
       .map((s) => s.trim())
@@ -74,9 +92,12 @@ export function loadWebConfig(env: Env = process.env): WebConfig {
     publicBaseUrl,
     redirectUri: strEnv(env, "OAUTH_REDIRECT_URI") ?? `${publicBaseUrl}/auth/callback`,
     sessionSecret,
-    port: intEnv(env, "PORT", 8080),
+    port: intEnv(env, "PORT", 8080, { min: 1, max: 65535 }),
     host: strEnv(env, "HOST") ?? "0.0.0.0",
-    trustProxy: (strEnv(env, "TRUST_PROXY") ?? "true") !== "false",
+    // Opt-in: only trust X-Forwarded-For when explicitly enabled behind a trusted reverse
+    // proxy. Defaulting to true let unauthenticated clients spoof XFF and mint unlimited
+    // rate-limit buckets (the keyGenerator falls back to req.ip).
+    trustProxy: strEnv(env, "TRUST_PROXY") === "true",
     allowedWsOrigins: (strEnv(env, "ALLOWED_WS_ORIGINS") ?? publicBaseUrl)
       .split(",")
       .map((s) => s.trim())

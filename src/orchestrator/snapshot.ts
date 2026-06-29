@@ -68,6 +68,19 @@ export async function restoreSnapshot(
   log: Pick<Logger, "info" | "error">,
 ): Promise<void> {
   for (const g of file.guilds) {
+    // readSnapshot only checks version + guilds-is-array; individual entries come straight
+    // from disk and a partial/corrupt write could leave voiceChannelId or items malformed.
+    // Skip such entries (rather than calling restore(undefined, …) → fetch(undefined)).
+    if (
+      typeof g.guildId !== "string" ||
+      !g.guildId ||
+      typeof g.voiceChannelId !== "string" ||
+      !g.voiceChannelId ||
+      !Array.isArray(g.items)
+    ) {
+      log.error({ guildId: g.guildId }, "skipping malformed snapshot entry");
+      continue;
+    }
     try {
       const controller = hub.get(g.guildId);
       if (g.settings) controller.updateSettings?.(g.settings);

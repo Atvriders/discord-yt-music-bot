@@ -28,7 +28,10 @@ services:
       # Server configuration
       PORT: "8080"
       HOST: "0.0.0.0"
-      TRUST_PROXY: "true"
+      # Set "true" ONLY when behind a trusted reverse proxy that sets X-Forwarded-For.
+      # With direct exposure (as in this example), leaving it "false" prevents clients
+      # from spoofing XFF to bypass the per-IP rate limiter.
+      TRUST_PROXY: "false"
 
       # Logging
       LOG_LEVEL: "info"
@@ -50,7 +53,9 @@ services:
       # Download configuration
       PREFETCH_DEPTH: "3"
       MAX_TRANSCODE_JOBS: "4"
-      MAX_TRACK_DURATION_SEC: "3600"
+      # Seeds the INITIAL per-guild "Max track length" (the panel overrides it per guild).
+      # 14400 = 4h so long content (e.g. concerts) plays out-of-box; "" / 0 = no limit.
+      MAX_TRACK_DURATION_SEC: "14400"
 
       # Audio processing
       SPONSORBLOCK_REMOVE: "sponsor,intro,outro,selfpromo"
@@ -59,9 +64,9 @@ services:
       # YouTube configuration
       YT_PROXY: "" # optional residential/SOCKS proxy if your IP gets blocked by YouTube
       YT_COOKIES: "" # optional path to a mounted cookies.txt (helps on flagged/datacenter IPs)
-      # Zero-PO-token clients — reliable on most hosts. Do NOT use "web,mweb" unless you run the
-      # bgutil PO-token sidecar (`--profile pot`) AND install its yt-dlp plugin in the image,
-      # or playback silently fails to extract audio.
+      # Zero-PO-token clients — reliable on most hosts. Only use "web,mweb" if you also run the
+      # bgutil PO-token sidecar (`--profile pot`) and set PO_TOKEN_PROVIDER_URL below; otherwise
+      # those clients silently fail to extract audio. (The bgutil yt-dlp plugin ships in the image.)
       YT_PLAYER_CLIENTS: "android_vr,web_embedded,tv"
       PO_TOKEN_PROVIDER_URL: "" # only set (e.g. http://bgutil-pot:4416) when running `--profile pot`
       # MUST match PUBLIC_BASE_URL exactly, or the live-updates WebSocket is rejected (no live panel)

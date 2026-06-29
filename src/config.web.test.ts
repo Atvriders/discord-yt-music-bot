@@ -31,7 +31,24 @@ describe("loadWebConfig", () => {
     expect(c.secureCookies).toBe(true);
   });
   it("throws when a required var is missing", () => {
-    expect(() => loadWebConfig({})).toThrow();
+    expect(() => loadWebConfig({})).toThrow(/DISCORD_CLIENT_ID/);
+    const { DISCORD_CLIENT_SECRET: _s, ...noSecret } = base;
+    expect(() => loadWebConfig(noSecret)).toThrow(/DISCORD_CLIENT_SECRET/);
+    const { PUBLIC_BASE_URL: _u, ...noUrl } = base;
+    expect(() => loadWebConfig(noUrl)).toThrow(/PUBLIC_BASE_URL/);
     expect(() => loadWebConfig({ ...base, SESSION_SECRET: "short" })).toThrow(/SESSION_SECRET/);
+  });
+
+  it("defaults trustProxy to false (opt-in) and honors TRUST_PROXY=true", () => {
+    // Defaulting to true would let unauthenticated clients spoof X-Forwarded-For and
+    // bypass the rate limiter; it must be explicitly opted in.
+    expect(loadWebConfig(base).trustProxy).toBe(false);
+    expect(loadWebConfig({ ...base, TRUST_PROXY: "true" }).trustProxy).toBe(true);
+    expect(loadWebConfig({ ...base, TRUST_PROXY: "false" }).trustProxy).toBe(false);
+  });
+
+  it("rejects an out-of-range PORT", () => {
+    expect(() => loadWebConfig({ ...base, PORT: "70000" })).toThrow(/PORT/);
+    expect(() => loadWebConfig({ ...base, PORT: "0" })).toThrow(/PORT/);
   });
 });

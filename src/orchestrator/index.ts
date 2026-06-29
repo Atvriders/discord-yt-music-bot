@@ -4,13 +4,31 @@ import { Mutex } from "../util/mutex.js";
 import type { Semaphore } from "../util/semaphore.js";
 import type { VoiceSession } from "../voice/session.js";
 import type { AudioInfo, QueueItem, Requester, TrackMeta } from "../types/index.js";
-import { YtError } from "../youtube/errors.js";
+import { YtError, YtErrorKind } from "../youtube/errors.js";
 import { DEFAULT_SETTINGS, applySettingsPatch, type GuildSettings } from "./settings.js";
 
 interface DownloadResult {
   path: string;
   audio: AudioInfo | null;
 }
+
+/**
+ * Synthetic requester attributed to tracks queued by the autoplay (YouTube radio)
+ * feature, so the panel/history can tell them apart from real user requests.
+ */
+const AUTOPLAY_REQUESTER: Requester = {
+  discordUserId: "autoplay",
+  displayName: "Autoplay",
+  avatarUrl: "",
+  source: "autoplay",
+};
+
+/**
+ * Hard cap on how many tracks autoplay may chain back-to-back before giving up and
+ * idling. A safety net against a pathological radio feed that keeps returning ids we
+ * have already played (which would otherwise spin without ever queueing a new track).
+ */
+export const AUTOPLAY_MAX_CHAIN = 50;
 
 /** Audio post-processing options handed to the resource factory for a single track. */
 export interface AudioOptions {
@@ -28,7 +46,13 @@ export interface MakeResourceOpts {
 }
 
 export interface ControllerDeps {
-  youtube: { download(videoId: string, outDir: string): Promise<DownloadResult> };
+  youtube: {
+    download(videoId: string, outDir: string): Promise<DownloadResult>;
+    /** YouTube Mix/radio for a seed video (autoplaySource "radio"). Best-effort. */
+    related(videoId: string): Promise<TrackMeta[]>;
+    /** More songs by the seed track's artist/channel (autoplaySource "artist"). Best-effort. */
+    artistTracks(meta: TrackMeta): Promise<TrackMeta[]>;
+  };
   cache: {
     get(id: string): string | null;
     getAudio(id: string): AudioInfo | null;
@@ -55,6 +79,8 @@ export interface ControllerDeps {
   /** Seed for the per-guild settings (crossfade/normalize/repeat + idle). idleTimeoutSec is overridden by idleTimeoutMs. */
   settings?: GuildSettings;
   onTrackError?: (info: { videoId: string; title: string; reason: string }) => void;
+  /** Observability hook for AudioPlayer stream errors (logging only; recovery is via trackEnd). */
+  onSessionError?: (err: unknown) => void;
   /** Called after any settings mutation so the host can persist (debounced) the change. */
   onSettingsChange?: (settings: GuildSettings) => void;
 }
@@ -77,6 +103,12 @@ export interface ControllerSnapshot {
   normalizeLoudness: boolean;
   /** Repeat mode: off | one | all. */
   repeat: GuildSettings["repeat"];
+  /** Autoplay: keep playing tracks when the queue empties. */
+  autoplay: boolean;
+  /** Autoplay source: "radio" (YouTube related/Mix) or "artist" (search by artist). */
+  autoplaySource: GuildSettings["autoplaySource"];
+  /** Per-guild max track length (seconds) accepted on enqueue; 0 = no limit. */
+  maxTrackDurationSec: number;
 }
 
 export class GuildController extends EventEmitter {
@@ -85,6 +117,20 @@ export class GuildController extends EventEmitter {
   private readonly lock = new Mutex();
   private readonly pinned = new Set<string>();
   private readonly now: () => number;
+
+  // ── Autoplay state ───────────────────────────────────────────────────────────────
+  // `lastPlayedMeta` is the full meta of the last-played track; it seeds the next
+  // autoplay pull — by videoId for the "radio" source and by `channel`/artist for the
+  // "artist" source. `autoplaySeen` tracks every videoId played or auto-queued this
+  // session so we never re-enqueue a track autoplay already chained (prevents immediate
+  // repeats / tight loops). `autoplayChain` counts how many tracks autoplay has queued
+  // in a row without a real user enqueue, capped by AUTOPLAY_MAX_CHAIN. A user enqueue /
+  // stop / leave resets these.
+  private lastPlayedMeta: TrackMeta | null = null;
+  private readonly autoplaySeen = new Set<string>();
+  private autoplayChain = 0;
+  // Guard against re-entrant autoplay attempts while one is already resolving.
+  private autoplayInFlight = false;
 
   // Playback-position tracking for the current track. `startedAt` is the epoch
   // ms the track began; `pausedAccumMs` is the total paused time so far; while
@@ -211,6 +257,9 @@ export class GuildController extends EventEmitter {
       crossfadeSec: this._settings.crossfadeSec,
       normalizeLoudness: this._settings.normalizeLoudness,
       repeat: this._settings.repeat,
+      autoplay: this._settings.autoplay,
+      autoplaySource: this._settings.autoplaySource,
+      maxTrackDurationSec: this._settings.maxTrackDurationSec,
     };
   }
 
@@ -226,11 +275,18 @@ export class GuildController extends EventEmitter {
     session.on("trackEnd", () => {
       if (this.session === session) void this.playNext();
     });
-    session.on("error", () => {
-      if (this.session === session) void this.playNext();
+    // A stream error always also drives the player Playing->Idle, which fires `trackEnd`
+    // (see VoiceSession.onStateChange). Advancing here too would double-advance and skip a
+    // track on every error. So we ONLY log/observe the error and let the single trackEnd
+    // path advance exactly once.
+    session.on("error", (err: unknown) => {
+      if (this.session === session) this.deps.onSessionError?.(err);
     });
+    // Idle teardown must run under the same Mutex as the playback paths, or it can destroy
+    // the session mid-download (while playNextLocked yields on ensureDownloaded), causing
+    // play() on a dead session and a leaked pin. Serialize via leaveInternal under the lock.
     session.on("idle", () => {
-      if (this.session === session) void this.leave();
+      if (this.session === session) void this.lock.runExclusive(() => this.leaveInternal());
     });
     this.session = session;
   }
@@ -256,6 +312,26 @@ export class GuildController extends EventEmitter {
   }
 
   async enqueue(meta: TrackMeta, requester: Requester): Promise<QueueItem> {
+    // Per-guild max-track-length guard — the AUTHORITATIVE cap (panel-controlled),
+    // superseding the global config. 0 = no limit; a null/unknown duration is always
+    // allowed. Autoplay's best-effort feed (synthetic requester) bypasses this; it
+    // enqueues via queue.add directly and should never be killed by the cap.
+    const limit = this._settings.maxTrackDurationSec;
+    if (
+      requester.source !== "autoplay" &&
+      limit > 0 &&
+      meta.durationSec !== null &&
+      meta.durationSec > limit
+    ) {
+      const hours = +(limit / 3600).toFixed(2);
+      throw new YtError(
+        YtErrorKind.TooLong,
+        `Too long — max ${hours}h (track is ${meta.durationSec}s, over the ${limit}s limit)`,
+      );
+    }
+    // A real user enqueue resets the autoplay chain budget: autoplay only kicks in once
+    // the user-supplied queue has genuinely run dry, and should get a fresh cap then.
+    if (requester.source !== "autoplay") this.autoplayChain = 0;
     const item = await this.queue.add(meta, requester);
     await this.maybeStart();
     return item;
@@ -328,6 +404,15 @@ export class GuildController extends EventEmitter {
   }
   async stop(): Promise<void> {
     await this.queue.clear();
+    // An explicit stop ends the autoplay chain — it must not silently refill the queue.
+    this.lastPlayedMeta = null;
+    this.autoplaySeen.clear();
+    this.autoplayChain = 0;
+    // Reset position/pause tracking (mirrors leaveInternal) so a pause()→stop() sequence
+    // doesn't leave isPaused stuck true and emit { paused: true } over an empty queue.
+    this.startedAt = null;
+    this.pausedAt = null;
+    this.pausedAccumMs = 0;
     this.session?.stop();
     // Stay in the voice channel after Stop; the normal idle timeout disconnects later.
     this.session?.startIdleTimer();
@@ -353,11 +438,20 @@ export class GuildController extends EventEmitter {
     if (!session) return false;
     try {
       const path = await this.ensureDownloaded(item.meta.videoId);
+      // Defense-in-depth: ensureDownloaded yields, so a teardown (leaveInternal) could have
+      // replaced/destroyed the session while we awaited. Never play onto a stale session or
+      // pin against a cleared `pinned` set.
+      if (this.session !== session) return false;
       item.audio = this.deps.cache.getAudio(item.meta.videoId);
       this.deps.cache.pin(item.meta.videoId);
       this.pinned.add(item.meta.videoId);
       session.play(await this.deps.makeResource(path, item, { audio: this.audioOptions() }));
       this.markTrackStarted();
+      // Remember what just started so autoplay can seed its next pull from it (by id for
+      // radio, by artist/channel for artist), and record the id so autoplay never
+      // re-queues a track we've already played.
+      this.lastPlayedMeta = item.meta;
+      this.autoplaySeen.add(item.meta.videoId);
       // Re-broadcast now that the new track has actually started: the "changed"
       // fired from queue.advance() ran BEFORE markTrackStarted(), so the panel's
       // now-playing snapshot for this track still carried the PREVIOUS track's
@@ -393,7 +487,64 @@ export class GuildController extends EventEmitter {
       if (await this.playItemLocked(item)) return;
       item = await this.queue.advance();
     }
+    // Nothing left in the queue. If autoplay is on, try to keep the music going with
+    // YouTube's radio for the last track before falling back to idling.
+    if (await this.tryAutoplayLocked()) return;
     session.startIdleTimer();
+  }
+
+  /**
+   * Autoplay: when the queue is empty and `settings.autoplay` is on, fetch candidate
+   * tracks for the last-played track and play the first NEW one (not already played/seen
+   * this session). The SOURCE of the candidates depends on `settings.autoplaySource`:
+   *   "radio"  → youtube.related(lastId)        — YouTube's Mix/radio for the last video.
+   *   "artist" → youtube.artistTracks(lastMeta) — a search for the last track's artist.
+   * Only the candidate fetch branches; the seen-id de-dup, the AUTOPLAY_MAX_CHAIN cap,
+   * and the best-effort idle fallback are shared across both sources.
+   *
+   * HONESTY: neither source is a precise genre classifier or session-wide taste
+   * matching — "radio" is YouTube's related feed, "artist" is a name-based search, both
+   * keyed on the single last track.
+   *
+   * Best-effort: any failure (the source fetch throws, returns nothing new, or download
+   * fails) resolves to `false`, letting the caller idle exactly as it does today.
+   */
+  private async tryAutoplayLocked(): Promise<boolean> {
+    if (!this._settings.autoplay) return false;
+    const seed = this.lastPlayedMeta;
+    if (seed === null) return false;
+    if (this.autoplayInFlight) return false;
+    if (this.autoplayChain >= AUTOPLAY_MAX_CHAIN) return false;
+
+    this.autoplayInFlight = true;
+    try {
+      let candidates: TrackMeta[];
+      try {
+        // Branch the SOURCE only; everything below is shared.
+        candidates =
+          this._settings.autoplaySource === "artist"
+            ? await this.deps.youtube.artistTracks(seed)
+            : await this.deps.youtube.related(seed.videoId);
+      } catch {
+        return false; // source lookup failed — fall back to idle
+      }
+      const next = candidates.find(
+        (c) => c.videoId && !c.isLive && !this.autoplaySeen.has(c.videoId),
+      );
+      if (!next) return false;
+
+      // Mark seen up-front so a play failure doesn't re-pick the same id on retry.
+      this.autoplaySeen.add(next.videoId);
+      this.autoplayChain += 1;
+      await this.queue.add(next, AUTOPLAY_REQUESTER);
+      // advance() promotes the freshly-added upcoming item to current, then play it.
+      const promoted = await this.queue.advance();
+      if (promoted && (await this.playItemLocked(promoted))) return true;
+      // Download/play failed: leave the (now-seen) id behind and let the caller idle.
+      return false;
+    } finally {
+      this.autoplayInFlight = false;
+    }
   }
 
   private async ensureDownloaded(videoId: string): Promise<string> {
@@ -413,6 +564,14 @@ export class GuildController extends EventEmitter {
         this.deps.youtube.download(videoId, this.deps.cacheDir),
       );
       this.deps.cache.register(videoId, path, audio);
+      // prefetch runs outside the lock and yields at the download await; a leaveInternal()
+      // may have torn the session down (clearing `pinned`) while we waited. If so, don't
+      // write into the now-orphaned pinned Set — drop the pin so the entry stays
+      // LRU-evictable instead of being pinned forever.
+      if (!this.session) {
+        this.deps.cache.unpin(videoId);
+        return;
+      }
       this.deps.cache.pin(videoId);
       this.pinned.add(videoId);
     } catch {
@@ -420,7 +579,10 @@ export class GuildController extends EventEmitter {
     }
   }
 
-  private async leave(): Promise<void> {
+  // NOT locked: callers must hold the Mutex (the idle handler wraps this in
+  // lock.runExclusive). This serializes teardown with playNextLocked/playItemLocked so
+  // the session can't be destroyed while a download is in flight.
+  private leaveInternal(): void {
     this.session?.destroy();
     this.session = null;
     this.startedAt = null;
@@ -428,5 +590,9 @@ export class GuildController extends EventEmitter {
     this.pausedAccumMs = 0;
     for (const id of this.pinned) this.deps.cache.unpin(id);
     this.pinned.clear();
+    // Forget the autoplay chain so a future session starts fresh.
+    this.lastPlayedMeta = null;
+    this.autoplaySeen.clear();
+    this.autoplayChain = 0;
   }
 }

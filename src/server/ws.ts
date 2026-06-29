@@ -33,8 +33,11 @@ export class GuildBroadcaster {
     this.wired.add(guildId);
     // The controller re-emits "changed" for every relevant change: queue
     // mutations (add/remove/reorder/advance) AND playback state (pause/resume/stop).
+    // Include guildId so every pushed state frame is self-describing and consistent with
+    // the subscribe-response below — a single socket may subscribe to multiple guilds, so
+    // the client needs a discriminator to know which guild an update belongs to.
     controller.on("changed", () =>
-      this.broadcast(guildId, { type: "state", state: controller.snapshot() }),
+      this.broadcast(guildId, { type: "state", guildId, state: controller.snapshot() }),
     );
   }
 }
@@ -66,6 +69,11 @@ export function registerWebsocket(app: FastifyInstance, deps: WsDeps): void {
     }
     const send: Send = (p) => socket.send(JSON.stringify(p));
     const subscribed = new Set<string>();
+    // Guards the subscribe-after-close race: the async authz check below yields, so the
+    // socket can close (running the cleanup loop while `subscribed` is still empty) before
+    // canControl resolves. Without this flag the late subscribe would register an orphaned
+    // `send` in the broadcaster that nothing ever removes.
+    let closed = false;
 
     socket.on("message", (raw) => {
       void (async () => {
@@ -81,6 +89,7 @@ export function registerWebsocket(app: FastifyInstance, deps: WsDeps): void {
             send({ type: "error", guildId: gid, reason: "forbidden" });
             return;
           }
+          if (closed) return;
           const ctrl = deps.hub.get(gid);
           deps.broadcaster.attach(gid, ctrl);
           deps.broadcaster.subscribe(gid, send);
@@ -97,7 +106,9 @@ export function registerWebsocket(app: FastifyInstance, deps: WsDeps): void {
     const iv = setInterval(() => {
       void (async () => {
         for (const gid of subscribed) {
+          if (closed) return;
           if (!(await canControl(deps.client, userId, gid, deps.adminIds))) {
+            if (closed) return;
             deps.broadcaster.unsubscribe(gid, send);
             subscribed.delete(gid);
             send({ type: "revoked", guildId: gid });
@@ -107,6 +118,7 @@ export function registerWebsocket(app: FastifyInstance, deps: WsDeps): void {
     }, deps.revalidateMs ?? 30_000);
 
     socket.on("close", () => {
+      closed = true;
       clearInterval(iv);
       for (const gid of subscribed) deps.broadcaster.unsubscribe(gid, send);
     });

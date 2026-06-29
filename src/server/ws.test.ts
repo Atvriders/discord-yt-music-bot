@@ -1,6 +1,13 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
-import { GuildBroadcaster, isAllowedOrigin } from "./ws.js";
+import Fastify, { type FastifyInstance } from "fastify";
+import websocket from "@fastify/websocket";
+import WebSocket from "ws";
+import { GuildBroadcaster, isAllowedOrigin, registerWebsocket, type WsDeps } from "./ws.js";
+
+const USER = "123456789012345678";
+const GUILD = "234567890123456789";
+const ORIGIN = "https://m";
 
 describe("isAllowedOrigin", () => {
   it("matches the allowlist exactly", () => {
@@ -22,6 +29,16 @@ describe("GuildBroadcaster", () => {
     expect(a).toHaveBeenCalledWith({ type: "state", state: 1 });
     expect(c).not.toHaveBeenCalled();
   });
+  it("fans out to every subscriber of a guild (Set-based, not last-writer-wins)", () => {
+    const b = new GuildBroadcaster();
+    const a = vi.fn(),
+      b2 = vi.fn();
+    b.subscribe("G1", a);
+    b.subscribe("G1", b2);
+    b.broadcast("G1", { type: "state", state: 1 });
+    expect(a).toHaveBeenCalledWith({ type: "state", state: 1 });
+    expect(b2).toHaveBeenCalledWith({ type: "state", state: 1 });
+  });
   it("stops sending after unsubscribe", () => {
     const b = new GuildBroadcaster();
     const a = vi.fn();
@@ -30,7 +47,7 @@ describe("GuildBroadcaster", () => {
     b.broadcast("G1", { type: "state", state: 1 });
     expect(a).not.toHaveBeenCalled();
   });
-  it("attach wires controller 'changed' to a state broadcast (once per guild)", () => {
+  it("attach wires controller 'changed' to a self-describing state broadcast (once per guild)", () => {
     const b = new GuildBroadcaster();
     const controller = Object.assign(new EventEmitter(), {
       snapshot: () => ({ current: null, upcoming: [], history: [], paused: false }),
@@ -41,6 +58,144 @@ describe("GuildBroadcaster", () => {
     b.subscribe("G1", sub);
     controller.emit("changed");
     expect(sub).toHaveBeenCalledTimes(1);
-    expect(sub).toHaveBeenCalledWith(expect.objectContaining({ type: "state" }));
+    // Pushed frames must carry guildId so a multi-guild socket can route them.
+    expect(sub).toHaveBeenCalledWith(expect.objectContaining({ type: "state", guildId: "G1" }));
+  });
+});
+
+describe("registerWebsocket (integration)", () => {
+  let app: FastifyInstance | null = null;
+
+  afterEach(async () => {
+    if (app) await app.close();
+    app = null;
+  });
+
+  // Boot a real listening Fastify with @fastify/websocket + registerWebsocket. `userId` is
+  // injected as the session (mimicking @fastify/session) and `allow` toggles canControl by
+  // making the guild member fetch resolve (allowed) or reject (forbidden).
+  async function boot(opts: {
+    userId?: string | null;
+    allow?: { value: boolean };
+    revalidateMs?: number;
+    broadcaster?: GuildBroadcaster;
+  }): Promise<{ url: string; deps: WsDeps; allow: { value: boolean } }> {
+    const allow = opts.allow ?? { value: true };
+    const guild = {
+      members: {
+        fetch: vi.fn(async (id: string) => {
+          if (!allow.value) throw new Error("Unknown Member");
+          return { id };
+        }),
+      },
+    };
+    const client = { guilds: { cache: new Map([[GUILD, guild]]) } } as never;
+    const deps: WsDeps = {
+      broadcaster: opts.broadcaster ?? new GuildBroadcaster(),
+      hub: {
+        get: () => ({
+          on: () => undefined,
+          snapshot: () => ({ current: null, upcoming: [], history: [], paused: false }),
+        }),
+      },
+      client,
+      adminIds: new Set<string>(),
+      allowedOrigins: [ORIGIN],
+      revalidateMs: opts.revalidateMs,
+    };
+    app = Fastify();
+    await app.register(websocket);
+    // Stand in for @fastify/session: attach the session before registerWebsocket's hooks.
+    const userId = opts.userId === undefined ? USER : opts.userId;
+    app.addHook("onRequest", async (req) => {
+      (req as { session: unknown }).session = userId ? { userId } : {};
+    });
+    registerWebsocket(app, deps);
+    await app.listen({ port: 0, host: "127.0.0.1" });
+    const addr = app.server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    return { url: `ws://127.0.0.1:${port}/ws`, deps, allow };
+  }
+
+  function nextMessage(ws: WebSocket): Promise<unknown> {
+    return new Promise((res) => ws.once("message", (d) => res(JSON.parse(d.toString()))));
+  }
+  function closed(ws: WebSocket): Promise<number> {
+    return new Promise((res) => ws.once("close", (code) => res(code)));
+  }
+
+  it("rejects a disallowed Origin with HTTP 403 bad_origin", async () => {
+    const { url } = await boot({});
+    const ws = new WebSocket(url, { headers: { origin: "https://evil.com" } });
+    const result = await new Promise<{ statusCode: number | undefined; body: string }>((res) => {
+      ws.once("unexpected-response", (_req, response) => {
+        let body = "";
+        response.on("data", (c) => (body += c));
+        response.on("end", () => res({ statusCode: response.statusCode, body }));
+      });
+    });
+    expect(result.statusCode).toBe(403);
+    expect(result.body).toContain("bad_origin");
+  });
+
+  it("closes an unauthenticated socket with code 1008", async () => {
+    const { url } = await boot({ userId: null });
+    const ws = new WebSocket(url, { headers: { origin: ORIGIN } });
+    const code = await closed(ws);
+    expect(code).toBe(1008);
+  });
+
+  it("a subscribe without permission yields a forbidden error and no broadcaster.subscribe", async () => {
+    const broadcaster = new GuildBroadcaster();
+    const subSpy = vi.spyOn(broadcaster, "subscribe");
+    const { url } = await boot({ allow: { value: false }, broadcaster });
+    const ws = new WebSocket(url, { headers: { origin: ORIGIN } });
+    await new Promise((r) => ws.once("open", r));
+    ws.send(JSON.stringify({ subscribe: GUILD }));
+    const msg = await nextMessage(ws);
+    expect(msg).toMatchObject({ type: "error", guildId: GUILD, reason: "forbidden" });
+    expect(subSpy).not.toHaveBeenCalled();
+    ws.close();
+  });
+
+  it("a permitted subscribe returns an immediate state snapshot and registers the send", async () => {
+    const broadcaster = new GuildBroadcaster();
+    const subSpy = vi.spyOn(broadcaster, "subscribe");
+    const { url } = await boot({ broadcaster });
+    const ws = new WebSocket(url, { headers: { origin: ORIGIN } });
+    await new Promise((r) => ws.once("open", r));
+    ws.send(JSON.stringify({ subscribe: GUILD }));
+    const msg = await nextMessage(ws);
+    expect(msg).toMatchObject({ type: "state", guildId: GUILD });
+    expect(subSpy).toHaveBeenCalledWith(GUILD, expect.any(Function));
+    ws.close();
+  });
+
+  it("the revalidation interval emits {type:'revoked'} when canControl flips to false", async () => {
+    const allow = { value: true };
+    const { url } = await boot({ allow, revalidateMs: 20 });
+    const ws = new WebSocket(url, { headers: { origin: ORIGIN } });
+    await new Promise((r) => ws.once("open", r));
+    ws.send(JSON.stringify({ subscribe: GUILD }));
+    await nextMessage(ws); // the initial state snapshot
+    allow.value = false; // membership revoked
+    const revoked = await nextMessage(ws);
+    expect(revoked).toMatchObject({ type: "revoked", guildId: GUILD });
+    ws.close();
+  });
+
+  it("the close handler unsubscribes all guilds", async () => {
+    const broadcaster = new GuildBroadcaster();
+    const unsubSpy = vi.spyOn(broadcaster, "unsubscribe");
+    const { url } = await boot({ broadcaster });
+    const ws = new WebSocket(url, { headers: { origin: ORIGIN } });
+    await new Promise((r) => ws.once("open", r));
+    ws.send(JSON.stringify({ subscribe: GUILD }));
+    await nextMessage(ws);
+    ws.close();
+    await closed(ws);
+    // Give the server-side close handler a tick to run.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(unsubSpy).toHaveBeenCalledWith(GUILD, expect.any(Function));
   });
 });

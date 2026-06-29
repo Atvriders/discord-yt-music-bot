@@ -17,7 +17,9 @@ const cfg = {
 function deps() {
   return {
     cfg,
-    hub: { get: vi.fn(() => ({ snapshot: () => ({}), queue: { on: vi.fn() } })) },
+    // A controller stub with the top-level members both server interfaces touch:
+    // ControllerLike needs `on`/`snapshot`; the old nested `queue.on` matched neither.
+    hub: { get: vi.fn(() => ({ on: vi.fn(), snapshot: vi.fn(() => ({})) })) },
     youtube: { resolve: vi.fn(), search: vi.fn() },
     client: { guilds: { cache: new Map() } },
     adminIds: new Set<string>(),

@@ -3,8 +3,12 @@ import type { AudioInfo } from "../types.js";
 export function fmtTime(totalSec: number | null): string {
   if (totalSec === null || !Number.isFinite(totalSec)) return "—:—";
   const s = Math.max(0, Math.floor(totalSec));
-  const m = Math.floor(s / 60);
-  return `${m}:${String(s % 60).padStart(2, "0")}`;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = String(s % 60).padStart(2, "0");
+  // Emit an hours segment for tracks ≥ 1h (real YouTube durations are routinely 60+
+  // minutes) so a 1h track reads "1:00:00", not "60:00".
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
 }
 
 /** "opus · 160 kbps · 48 kHz" — drops missing parts; returns null when nothing useful. */

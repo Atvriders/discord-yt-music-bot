@@ -36,4 +36,22 @@ describe("loadMediaConfig", () => {
   it("throws on a float CACHE_MAX_MB", () => {
     expect(() => loadMediaConfig({ CACHE_MAX_MB: "1.5" })).toThrow(/CACHE_MAX_MB/);
   });
+
+  it("reads NORMALIZE_LOUDNESS as a boolean seed (default false)", () => {
+    expect(loadMediaConfig({}).normalizeLoudness).toBe(false);
+    expect(loadMediaConfig({ NORMALIZE_LOUDNESS: "true" }).normalizeLoudness).toBe(true);
+    expect(loadMediaConfig({ NORMALIZE_LOUDNESS: "false" }).normalizeLoudness).toBe(false);
+  });
+
+  it("normalizes MAX_TRACK_DURATION_SEC=0 to null (no ceiling, not a 0s ceiling)", () => {
+    // A literal 0 must mean "no limit", matching the null convention — otherwise the
+    // youtube guard would reject every positive-duration track and break all playback.
+    expect(loadMediaConfig({ MAX_TRACK_DURATION_SEC: "0" }).maxTrackDurationSec).toBeNull();
+  });
+
+  it("rejects a negative MAX_TRACK_DURATION_SEC", () => {
+    expect(() => loadMediaConfig({ MAX_TRACK_DURATION_SEC: "-1" })).toThrow(
+      /MAX_TRACK_DURATION_SEC/,
+    );
+  });
 });

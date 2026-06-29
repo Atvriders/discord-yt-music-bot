@@ -35,13 +35,15 @@ function fakeController(channelId: string | null, current: unknown, upcoming: un
 }
 
 describe("snapshot", () => {
-  it("collects connected guilds with current+upcoming, skips disconnected", () => {
+  it("collects connected guilds with current+upcoming, skips disconnected and empty-queue", () => {
     const hub = {
-      guildIds: () => ["G1", "G2"],
+      guildIds: () => ["G1", "G2", "G3"],
       get: (g: string) =>
         g === "G1"
           ? fakeController("C1", item("aaaaaaaaaaa"), [item("bbbbbbbbbbb")])
-          : fakeController(null, null, []),
+          : g === "G2"
+            ? fakeController(null, null, []) // disconnected → skipped (no channelId)
+            : fakeController("C3", null, []), // connected but empty queue → skipped (no items)
     };
     const file = collectSnapshot(hub as never, 123);
     expect(file.guilds).toHaveLength(1);
@@ -50,6 +52,8 @@ describe("snapshot", () => {
       "aaaaaaaaaaa",
       "bbbbbbbbbbb",
     ]);
+    // C3 is connected yet skipped because its queue is empty (pins the items.length===0 guard).
+    expect(file.guilds.some((g) => g.voiceChannelId === "C3")).toBe(false);
   });
 
   it("persists and restores per-guild settings", async () => {
@@ -121,5 +125,28 @@ describe("snapshot", () => {
       "C1",
       expect.arrayContaining([expect.objectContaining({ id: "i-aaaaaaaaaaa" })]),
     );
+  });
+
+  it("skips malformed snapshot entries instead of calling restore with a bad channelId", async () => {
+    const c = fakeController("C1", null, []);
+    const hub = { get: () => c };
+    const error = vi.fn();
+    await restoreSnapshot(
+      {
+        version: 1,
+        savedAt: 1,
+        guilds: [
+          { guildId: "G1", voiceChannelId: null, items: [item("aaaaaaaaaaa")] },
+          { guildId: "G2", voiceChannelId: "C2", items: "nope" },
+          { guildId: "G3", voiceChannelId: "C3", items: [item("bbbbbbbbbbb")] },
+        ],
+      } as never,
+      hub as never,
+      { info: vi.fn(), error } as never,
+    );
+    // Only the well-formed G3 entry should reach restore; the two malformed ones are skipped.
+    expect(c.restore).toHaveBeenCalledTimes(1);
+    expect(c.restore).toHaveBeenCalledWith("C3", expect.any(Array));
+    expect(error).toHaveBeenCalledTimes(2);
   });
 });

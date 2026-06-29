@@ -23,4 +23,10 @@ describe("Semaphore", () => {
     await expect(sem.run(() => Promise.reject(new Error("boom")))).rejects.toThrow("boom");
     await expect(sem.run(() => Promise.resolve(7))).resolves.toBe(7);
   });
+
+  it("throws on a non-positive max instead of deadlocking", () => {
+    expect(() => new Semaphore(0)).toThrow(/>= 1/);
+    expect(() => new Semaphore(-1)).toThrow(/>= 1/);
+    expect(() => new Semaphore(1.5)).toThrow(/integer/);
+  });
 });

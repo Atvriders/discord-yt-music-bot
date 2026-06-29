@@ -16,6 +16,9 @@ import { VoiceSession } from "./session.js";
 import type { QueueItem } from "../types/index.js";
 import type { AudioOptions } from "../orchestrator/index.js";
 import { buildAudioFilter } from "./filter.js";
+import { createLogger } from "../util/logger.js";
+
+const log = createLogger().child({ mod: "voice/connect" });
 
 export interface ResourceOpts {
   /** Start offset in ms; when > 0 the audio is produced by ffmpeg `-ss` (transcode, not Opus passthrough). */
@@ -70,7 +73,12 @@ export async function createPassthroughResource(
   const seekMs = opts.seekMs ?? 0;
   const item = metadata as Partial<QueueItem> | undefined;
   const filter = opts.audio
-    ? buildAudioFilter(opts.audio, item?.meta?.durationSec ?? null, item?.meta?.isLive ?? false)
+    ? buildAudioFilter(
+        opts.audio,
+        item?.meta?.durationSec ?? null,
+        item?.meta?.isLive ?? false,
+        seekMs,
+      )
     : null;
   if (seekMs > 0 || filter) {
     return createTranscodedResource(filePath, metadata, seekMs, filter);
@@ -96,8 +104,23 @@ function createTranscodedResource(
   args.push("-i", filePath, "-vn");
   if (filter) args.push("-af", filter);
   args.push("-c:a", "libopus", "-b:a", "128k", "-f", "ogg", "pipe:1");
-  const ff = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "ignore"] });
-  ff.on("error", () => ff.stdout.destroy());
+  // Pipe (not ignore) stderr so transcode failures (bad filter, missing codec, corrupt
+  // file, OOM) leave a trace instead of silently ending the stream → trackEnd. `-loglevel
+  // error` already keeps the volume low, so buffering it is cheap.
+  const ff = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
+  let errBuf = "";
+  ff.stderr?.on("data", (c: Buffer) => {
+    errBuf += c.toString();
+  });
+  ff.on("error", (err) => {
+    log.error({ err, filter, filePath }, "ffmpeg spawn failed");
+    ff.stdout.destroy();
+  });
+  ff.on("close", (code) => {
+    if (code && code !== 0) {
+      log.error({ code, filter, filePath, stderr: errBuf.slice(-2000) }, "ffmpeg transcode failed");
+    }
+  });
   const resource = createAudioResource(ff.stdout, {
     inputType: StreamType.OggOpus,
     inlineVolume: false,

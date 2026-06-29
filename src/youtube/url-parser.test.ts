@@ -14,6 +14,7 @@ describe("parseInput — video URLs", () => {
     `https://www.youtube.com/shorts/${ID}`,
     `https://www.youtube.com/embed/${ID}`,
     `https://www.youtube.com/live/${ID}`,
+    `https://www.youtube.com/v/${ID}`, // legacy /v/ embed path (PATH_PREFIXES "v")
     `https://www.youtube.com/watch?v=${ID}&list=PLxxxxxxxx`, // playlist param ignored
   ])("extracts the video id from %s", (url) => {
     expect(parseInput(url)).toEqual({ kind: "video", videoId: ID });
@@ -43,5 +44,19 @@ describe("parseInput — queries", () => {
   });
   it("trims surrounding whitespace on a query", () => {
     expect(parseInput("  lofi beats  ")).toEqual({ kind: "query", query: "lofi beats" });
+  });
+
+  // Protocol-less "word.tld/path" strings are legitimate search terms, not URLs. The
+  // heuristic must not misroute them to the reject branch.
+  it.each(["fly.me/to/the/moon", "boards.of.canada/roygbiv", "death.grips/get.got"])(
+    "treats scheme-less dotted text %s as a search query, not a rejected non-YouTube URL",
+    (q) => {
+      expect(parseInput(q)).toEqual({ kind: "query", query: q });
+    },
+  );
+
+  it("still rejects an explicit-scheme non-YouTube URL", () => {
+    // A real http(s):// URL pointing at a non-YouTube host must keep rejecting.
+    expect(parseInput("https://vimeo.com/12345").kind).toBe("reject");
   });
 });

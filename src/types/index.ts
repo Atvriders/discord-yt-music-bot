@@ -16,7 +16,7 @@ export interface AudioInfo {
   sampleRateHz: number;
 }
 
-export type RequestSource = "discord" | "web";
+export type RequestSource = "discord" | "web" | "autoplay";
 
 export interface Requester {
   discordUserId: string;

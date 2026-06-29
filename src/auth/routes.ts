@@ -39,14 +39,31 @@ export function registerAuthRoutes(app: FastifyInstance, cfg: WebConfig): void {
         return reply.code(400).send({ error: "invalid_state" });
       }
       let user;
+      let token;
       try {
-        const token = await exchangeCode(cfg, code);
-        user = await fetchIdentity(token.access_token);
-        await revokeToken(cfg, token.access_token); // we don't keep Discord tokens
+        token = await exchangeCode(cfg, code);
       } catch {
         return reply.code(502).send({ error: "oauth_failed" });
       }
+      try {
+        user = await fetchIdentity(token.access_token);
+      } catch {
+        return reply.code(502).send({ error: "oauth_failed" });
+      } finally {
+        // We never keep Discord tokens. Revoke in `finally` so even a fetchIdentity
+        // failure (or any later throw) still invalidates the freshly-minted token —
+        // revokeToken swallows its own errors, so this is always safe.
+        await revokeToken(cfg, token.access_token);
+      }
+      // Rotate the session id to prevent fixation, and explicitly destroy the consumed
+      // pre-login session record (which still holds oauthState). regenerate() replaces
+      // req.session in place but does NOT remove the old store entry, so capture its id
+      // first and destroy it.
+      const oldId = req.session.sessionId;
       await req.session.regenerate();
+      if (oldId && oldId !== req.session.sessionId) {
+        await new Promise<void>((res) => req.sessionStore.destroy(oldId, () => res()));
+      }
       req.session.userId = user.id;
       req.session.user = user;
       return reply.redirect("/");

@@ -2,19 +2,27 @@ export interface TrackMeta {
   videoId: string; title: string; channel: string;
   durationSec: number | null; isLive: boolean; thumbnailUrl: string | null;
 }
+// Mirrors the backend RequestSource (src/types/index.ts): autoplay-enqueued tracks
+// arrive over the WS with source "autoplay", so the union must include it.
+export type RequestSource = "discord" | "web" | "autoplay";
 export interface Requester {
-  discordUserId: string; displayName: string; avatarUrl: string; source: "discord" | "web";
+  discordUserId: string; displayName: string; avatarUrl: string; source: RequestSource;
 }
 export interface AudioInfo { codec: string; bitrateKbps: number; sampleRateHz: number; }
 export interface QueueItem { id: string; meta: TrackMeta; requester: Requester; addedAt: number; audio: AudioInfo | null; }
 // The now-playing item carries elapsed-position info for the (display-only) progress bar.
 export type CurrentItem = QueueItem & { positionMs: number; durationMs: number };
 export type RepeatMode = "off" | "one" | "all";
+export type AutoplaySource = "radio" | "artist";
 export interface GuildSettings {
   idleTimeoutSec: number;
   crossfadeSec: number;
   normalizeLoudness: boolean;
   repeat: RepeatMode;
+  autoplay: boolean;
+  autoplaySource: AutoplaySource;
+  /** Per-guild max track length (seconds) accepted on enqueue; 0 = no limit. */
+  maxTrackDurationSec: number;
 }
 export interface Snapshot extends GuildSettings { current: CurrentItem | null; upcoming: QueueItem[]; history: QueueItem[]; paused: boolean; }
 export interface Me { user: { id: string; username: string; avatarUrl: string }; guilds: { id: string; name: string }[]; }

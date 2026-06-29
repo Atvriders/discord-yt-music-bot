@@ -93,12 +93,18 @@ describe("GuildQueue", () => {
 
   it("clear() empties current and upcoming but keeps history", async () => {
     const q = newQueue();
+    // Two advances so a track actually lands in history (clear() does NOT archive the
+    // current track, so a single advance would leave history empty and the assertion vacuous).
     await q.add(meta("aaaaaaaaaaa"), requester);
-    await q.advance();
     await q.add(meta("bbbbbbbbbbb"), requester);
+    await q.advance(); // current = A
+    await q.advance(); // current = B, history = [A]
+    await q.add(meta("ccccccccccc"), requester); // upcoming = [C]
     await q.clear();
     expect(q.current).toBeNull();
     expect(q.snapshot().upcoming).toEqual([]);
+    // History must survive clear(); a regression that wiped _history would fail here.
+    expect(q.snapshot().history.map((i) => i.meta.videoId)).toEqual(["aaaaaaaaaaa"]);
   });
 
   it("requeueHistory cycles played history + current back to the end of upcoming", async () => {

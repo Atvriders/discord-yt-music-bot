@@ -1,12 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
 import { startupCanary } from "./canary.js";
 
-const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never;
+const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
 describe("startupCanary", () => {
   it("returns true when a known video resolves", async () => {
     const youtube = { resolve: vi.fn(async () => ({ title: "ok" })) };
-    expect(await startupCanary(youtube as never, log)).toBe(true);
+    expect(await startupCanary(youtube as never, log as never)).toBe(true);
     expect(youtube.resolve).toHaveBeenCalled();
   });
   it("returns false and logs when resolution fails", async () => {
@@ -15,6 +15,11 @@ describe("startupCanary", () => {
         throw new Error("blocked");
       }),
     };
-    expect(await startupCanary(youtube as never, log)).toBe(false);
+    expect(await startupCanary(youtube as never, log as never)).toBe(false);
+    // The diagnostic log line is the canary's primary value on failure — assert it fires.
+    expect(log.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      expect.stringContaining("canary FAILED"),
+    );
   });
 });

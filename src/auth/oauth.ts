@@ -14,8 +14,19 @@ export function generateState(): string {
 }
 
 export function verifyState(received: string, expected: string | undefined): boolean {
-  if (!received || !expected || received.length !== expected.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(received), Buffer.from(expected));
+  // Guard on UTF-8 BYTE length, not JS string length: a crafted multibyte `received`
+  // (e.g. 43 '€' chars = 43 JS chars but 129 bytes) would pass a string-length check yet
+  // make timingSafeEqual throw RangeError on mismatched buffer byte lengths — which would
+  // propagate as an unhandled 500 instead of a normal "invalid_state" 400.
+  if (!received || !expected || Buffer.byteLength(received) !== Buffer.byteLength(expected)) {
+    return false;
+  }
+  try {
+    return crypto.timingSafeEqual(Buffer.from(received), Buffer.from(expected));
+  } catch {
+    // Defense-in-depth: never let an unexpected comparison error escape as a 500.
+    return false;
+  }
 }
 
 export function buildAuthorizeUrl(

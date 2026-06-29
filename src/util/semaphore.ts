@@ -2,7 +2,14 @@ export class Semaphore {
   private active = 0;
   private readonly waiters: Array<() => void> = [];
 
-  constructor(private readonly max: number) {}
+  constructor(private readonly max: number) {
+    // max < 1 would make `active < max` permanently false in acquire(): every caller
+    // queues forever and no slot is ever released — a silent deadlock. Fail loudly at
+    // construction (startup) instead.
+    if (!Number.isInteger(max) || max < 1) {
+      throw new Error(`Semaphore max must be an integer >= 1, got ${max}`);
+    }
+  }
 
   async run<T>(fn: () => Promise<T> | T): Promise<T> {
     await this.acquire();

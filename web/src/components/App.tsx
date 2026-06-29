@@ -49,6 +49,9 @@ export function App() {
   const [guildId, setGuildId] = useState<string | null>(null);
   const [paused, setPaused] = useState(false);
   const [channels, setChannels] = useState<VoiceChannel[]>([]);
+  // Distinguishes "this guild legitimately has no voice channels" from "the fetch
+  // failed" so the picker can show a recoverable error rather than vanishing silently.
+  const [channelsLoadFailed, setChannelsLoadFailed] = useState(false);
   const [voiceChannelId, setVoiceChannelId] = useState<string | null>(null);
   // True once the user manually picks a channel for this guild, so later channel
   // refreshes don't clobber their choice with the auto-detected current channel.
@@ -69,6 +72,12 @@ export function App() {
   const dismissBanner = useCallback(() => {
     if (autoDismissRef.current) clearTimeout(autoDismissRef.current);
     setBanner(null);
+  }, []);
+
+  // Clear any pending auto-dismiss timer on unmount so it can't fire setBanner() on a
+  // dead component (and avoids act()/strict-mode warnings in tests).
+  useEffect(() => () => {
+    if (autoDismissRef.current) clearTimeout(autoDismissRef.current);
   }, []);
 
   // Sync play-time errors from the WS stream.
@@ -96,9 +105,9 @@ export function App() {
   // Reset manual-pick tracking when the active guild changes.
   useEffect(() => { manualChannelRef.current = false; }, [guildId]);
 
-  useEffect(() => {
-    if (!guildId) { setChannels([]); setVoiceChannelId(null); return; }
-    api.voiceChannels(guildId).then((r) => {
+  const loadChannels = useCallback((g: string) => {
+    setChannelsLoadFailed(false);
+    api.voiceChannels(g).then((r) => {
       setChannels(r.channels);
       // ITEM 2: auto-select the voice channel the user is currently in, unless
       // they've already picked one manually (manual choice must win).
@@ -109,8 +118,19 @@ export function App() {
       ) {
         setVoiceChannelId(r.currentChannelId);
       }
-    }).catch(() => setChannels([]));
-  }, [guildId]);
+    }).catch(() => {
+      // Surface the failure (was silently swallowed) and flag it so the picker shows a
+      // recoverable "couldn't load — retry" state instead of rendering nothing.
+      setChannels([]);
+      setChannelsLoadFailed(true);
+      showBanner({ kind: "error", text: "Couldn't load voice channels" });
+    });
+  }, [showBanner]);
+
+  useEffect(() => {
+    if (!guildId) { setChannels([]); setVoiceChannelId(null); setChannelsLoadFailed(false); return; }
+    loadChannels(guildId);
+  }, [guildId, loadChannels]);
 
   useEffect(() => {
     api.me().then((m) => {
@@ -148,11 +168,15 @@ export function App() {
     }
   }, [guildId, showBanner]);
 
-  const onSeek = useCallback((positionMs: number) => {
-    if (!guildId) return;
-    api.seek(guildId, positionMs).catch((err: unknown) => {
+  // Returns a promise that REJECTS on failure so the ProgressBar can release its
+  // optimistic hold (otherwise the bar stays pinned at the never-applied target with
+  // a "seeking…" indicator forever, since a failed seek emits no confirming snapshot).
+  const onSeek = useCallback((positionMs: number): Promise<void> => {
+    if (!guildId) return Promise.resolve();
+    return api.seek(guildId, positionMs).then(() => undefined).catch((err: unknown) => {
       const msg = err instanceof ApiError ? err.message : "Couldn't seek";
       showBanner({ kind: "error", text: msg });
+      throw err;
     });
   }, [guildId, showBanner]);
 
@@ -162,12 +186,19 @@ export function App() {
   const onPatchSettings = useCallback(async (patch: Partial<GuildSettings>) => {
     if (!guildId) return;
     try {
-      await api.setSettings(guildId, patch);
+      const { settings } = await api.setSettings(guildId, patch);
+      // When the WS isn't live it won't deliver the "changed" frame, so the controlled
+      // inputs would visually snap back to the stale snapshot value (looking like the
+      // save failed). Merge the authoritative persisted settings into the snapshot so
+      // the change is reflected immediately, mirroring the remove/reorder refresh.
+      if (settings && live.status !== "live" && live.snapshot) {
+        live.refresh({ ...live.snapshot, ...settings });
+      }
     } catch (err) {
       const reason = err instanceof ApiError ? err.message : "Something went wrong";
       showBanner({ kind: "error", text: `Couldn't update setting — ${reason}` });
     }
-  }, [guildId, showBanner]);
+  }, [guildId, showBanner, live]);
   const onSetIdleTimeout = useCallback(
     (idleTimeoutSec: number) => onPatchSettings({ idleTimeoutSec }),
     [onPatchSettings],
@@ -188,45 +219,6 @@ export function App() {
     }
   }, [showBanner]);
 
-  const onPlay = useCallback(async (input: string): Promise<{ candidates: TrackMeta[] | null; queuedTitle?: string }> => {
-    if (!guildId) return { candidates: null };
-    if (noVoiceTarget) {
-      showBanner({ kind: "error", text: "Pick a voice channel first" });
-      return { candidates: null };
-    }
-    // ITEM 5: show instant feedback — the resolve (yt-dlp) takes several seconds.
-    const label = input.length > 60 ? input.slice(0, 57) + "…" : input;
-    showBanner({ kind: "success", text: `Resolving ${label}…` });
-    try {
-      const r = await api.play(guildId, input, voiceChannelId ?? undefined);
-      if (r.queued) {
-        announceQueued(r);
-      } else {
-        // A search returned candidates — drop the pending banner.
-        dismissBanner();
-      }
-      return { candidates: r.candidates ?? null };
-    } catch (err) {
-      const msg = err instanceof ApiError ? err.message : "Something went wrong";
-      showBanner({ kind: "error", text: msg });
-      return { candidates: null };
-    }
-  }, [guildId, voiceChannelId, noVoiceTarget, showBanner, dismissBanner, announceQueued]);
-
-  const onPick = useCallback((videoId: string) => {
-    if (!guildId) return;
-    if (noVoiceTarget) {
-      showBanner({ kind: "error", text: "Pick a voice channel first" });
-      return;
-    }
-    api.pick(guildId, videoId, voiceChannelId ?? undefined)
-      .then((r) => announceQueued(r))
-      .catch((err: unknown) => {
-        const msg = err instanceof ApiError ? err.message : "Something went wrong";
-        showBanner({ kind: "error", text: msg });
-      });
-  }, [guildId, voiceChannelId, noVoiceTarget, showBanner, announceQueued]);
-
   // Refetch the snapshot after a queue mutation when the WS isn't live to deliver
   // the update itself (otherwise the queue would look stale until the next event).
   const refreshIfNotLive = useCallback(async () => {
@@ -236,6 +228,109 @@ export function App() {
       live.refresh(snap);
     } catch { /* a refetch failure is non-fatal; the mutation already succeeded */ }
   }, [guildId, live]);
+
+  // Generation token: bumps on every guild switch. An in-flight resolve/pick that
+  // started under an older generation must not write its result into the new guild.
+  const genRef = useRef(0);
+  useEffect(() => { genRef.current += 1; }, [guildId]);
+
+  const onPlay = useCallback(async (input: string): Promise<{ candidates: TrackMeta[] | null; queuedTitle?: string }> => {
+    if (!guildId) return { candidates: null };
+    if (noVoiceTarget) {
+      showBanner({ kind: "error", text: "Pick a voice channel first" });
+      return { candidates: null };
+    }
+    // ITEM 5: show instant feedback — the resolve (yt-dlp) takes several seconds.
+    const label = input.length > 60 ? input.slice(0, 57) + "…" : input;
+    showBanner({ kind: "success", text: `Resolving ${label}…` });
+    // Capture the generation so a guild switch mid-resolve invalidates stale results
+    // rather than handing the old guild's candidates/queue to the new one.
+    const gen = genRef.current;
+    try {
+      const r = await api.play(guildId, input, voiceChannelId ?? undefined);
+      if (genRef.current !== gen) return { candidates: null }; // guild changed: drop stale result
+      if (r.queued) {
+        announceQueued(r);
+        await refreshIfNotLive();
+      } else {
+        // A search returned candidates — drop the pending banner.
+        dismissBanner();
+      }
+      return { candidates: r.candidates ?? null };
+    } catch (err) {
+      if (genRef.current !== gen) return { candidates: null };
+      const msg = err instanceof ApiError ? err.message : "Something went wrong";
+      showBanner({ kind: "error", text: msg });
+      return { candidates: null };
+    }
+  }, [guildId, voiceChannelId, noVoiceTarget, showBanner, dismissBanner, announceQueued, refreshIfNotLive]);
+
+  // Queue a single video and report the outcome (instead of mutating banner state
+  // internally). The bulk path below aggregates these into one summary banner so
+  // queuing N tracks no longer stomps N-1 results onto a single banner.
+  const pickOne = useCallback(
+    async (videoId: string): Promise<{ ok: boolean; title?: string; reason?: string }> => {
+      if (!guildId) return { ok: false, reason: "No server selected" };
+      if (noVoiceTarget) return { ok: false, reason: "Pick a voice channel first" };
+      const gen = genRef.current;
+      try {
+        const r = await api.pick(guildId, videoId, voiceChannelId ?? undefined);
+        // The guild changed while this pick was in flight — drop the stale result so
+        // we never report (or refresh) into a now-different guild.
+        if (genRef.current !== gen) return { ok: false, reason: "stale" };
+        return { ok: true, title: r.queued?.title };
+      } catch (err) {
+        const reason = err instanceof ApiError ? err.message : "Something went wrong";
+        return { ok: false, reason };
+      }
+    },
+    [guildId, voiceChannelId, noVoiceTarget],
+  );
+
+  // Queue every selected candidate IN ORDER, serializing the picks so the server's
+  // insertion order matches the candidate display order, then surface ONE aggregated
+  // banner summarizing the batch (partial failures stay visible). Returns whether at
+  // least one track was queued so the Picker can decide whether to close.
+  const onQueueAll = useCallback(
+    async (videoIds: string[]): Promise<boolean> => {
+      if (videoIds.length === 0) return false;
+      if (noVoiceTarget) {
+        showBanner({ kind: "error", text: "Pick a voice channel first" });
+        return false;
+      }
+      const results: { ok: boolean; title?: string; reason?: string }[] = [];
+      for (const id of videoIds) results.push(await pickOne(id)); // sequential => ordered
+      const ok = results.filter((r) => r.ok);
+      const failed = results.filter((r) => !r.ok && r.reason !== "stale");
+      if (ok.length === 0 && failed.length === 0) return false; // all stale (guild switched)
+      if (failed.length === 0) {
+        showBanner({
+          kind: "success",
+          text:
+            ok.length === 1 && ok[0]!.title
+              ? `Queued: ${ok[0]!.title}`
+              : `Queued ${ok.length} track${ok.length === 1 ? "" : "s"}`,
+        });
+      } else if (ok.length === 0) {
+        const reason = failed[0]!.reason ?? "failed";
+        showBanner({
+          kind: "error",
+          text:
+            failed.length === 1
+              ? `Couldn't queue — ${reason}`
+              : `Couldn't queue any of the ${failed.length} selected tracks — ${reason}`,
+        });
+      } else {
+        showBanner({
+          kind: "error",
+          text: `Queued ${ok.length} of ${ok.length + failed.length} (${failed.length} failed: ${failed[0]!.reason ?? "failed"})`,
+        });
+      }
+      if (ok.length > 0) await refreshIfNotLive();
+      return ok.length > 0;
+    },
+    [noVoiceTarget, pickOne, showBanner, refreshIfNotLive],
+  );
 
   const onRemove = useCallback(async (itemId: string) => {
     if (!guildId) return;
@@ -284,12 +379,21 @@ export function App() {
             <div className="flex items-center justify-between flex-wrap gap-3">
               <div className="flex items-center gap-4 flex-wrap">
                 <Controls onAction={control} paused={paused} disabled={!snap?.current} />
-                <VoiceChannelPicker channels={channels} value={voiceChannelId} onChange={(id) => { manualChannelRef.current = true; setVoiceChannelId(id); }} />
+                <VoiceChannelPicker
+                  channels={channels}
+                  value={voiceChannelId}
+                  loadFailed={channelsLoadFailed}
+                  onRetry={() => guildId && loadChannels(guildId)}
+                  onChange={(id) => { manualChannelRef.current = true; setVoiceChannelId(id); }}
+                />
                 <Settings
                   idleTimeoutSec={snap?.idleTimeoutSec}
                   crossfadeSec={snap?.crossfadeSec}
                   normalizeLoudness={snap?.normalizeLoudness}
                   repeat={snap?.repeat}
+                  autoplay={snap?.autoplay}
+                  autoplaySource={snap?.autoplaySource}
+                  maxTrackDurationSec={snap?.maxTrackDurationSec}
                   disabled={live.status === "forbidden"}
                   onChange={onSetIdleTimeout}
                   onAudioChange={onPatchSettings}
@@ -300,8 +404,8 @@ export function App() {
               </span>
             </div>
             {banner && <StatusBanner msg={banner} onDismiss={dismissBanner} />}
-            <AddBar onPlay={onPlay} onPick={onPick} busy={noVoiceTarget} />
-            <Discover onSearch={onPlay} onPick={onPick} busy={noVoiceTarget} />
+            <AddBar onPlay={onPlay} onQueueAll={onQueueAll} busy={noVoiceTarget} />
+            <Discover onSearch={onPlay} onQueueAll={onQueueAll} busy={noVoiceTarget} />
             <Queue items={snap?.upcoming ?? []} onRemove={onRemove} onReorder={onReorder} />
           </>
         )}

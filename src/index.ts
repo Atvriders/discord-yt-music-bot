@@ -3,6 +3,7 @@ import { YouTubeService } from "./youtube/index.js";
 import { AudioCache } from "./cache/index.js";
 import { Semaphore } from "./util/semaphore.js";
 import { GuildController } from "./orchestrator/index.js";
+import { DEFAULT_SETTINGS } from "./orchestrator/settings.js";
 import { GuildHub } from "./orchestrator/hub.js";
 import { createBot } from "./discord/bot.js";
 import { createVoiceSession, createPassthroughResource } from "./voice/connect.js";
@@ -64,8 +65,19 @@ async function main(): Promise<void> {
       prefetchDepth: bot.prefetchDepth,
       // Initial default; the panel can override this per guild at runtime.
       idleTimeoutMs: bot.idleTimeoutMs,
+      // Seed the per-guild max-track-length from the configured ceiling (null = no
+      // limit -> 0); the panel can raise/lower or disable it per guild at runtime.
+      settings: {
+        ...DEFAULT_SETTINGS,
+        maxTrackDurationSec: media.maxTrackDurationSec ?? 0,
+        normalizeLoudness: media.normalizeLoudness,
+      },
       downloads,
-      onTrackError: (info) => broadcaster.broadcast(guildId, { type: "trackError", ...info }),
+      onTrackError: (info) =>
+        broadcaster.broadcast(guildId, { type: "trackError", guildId, ...info }),
+      // AudioPlayer stream errors are logged for observability; queue recovery happens via
+      // the Playing->Idle trackEnd path, so we deliberately do NOT advance from here.
+      onSessionError: (err) => log.error({ err, guildId }, "audio player error"),
       // Persist settings changes (debounced) so they survive a restart.
       onSettingsChange: () => scheduleSnapshot(),
     });
@@ -81,6 +93,8 @@ async function main(): Promise<void> {
     searchLimit: media.searchResultCount,
     adminUserIds: new Set(bot.adminUserIds),
     log,
+    // Drives the "Panel:" line in the bot's About Me; built from the real configured URL.
+    baseUrl: web.publicBaseUrl,
   });
 
   client.on("error", (err) => log.error({ err }, "[client error]"));

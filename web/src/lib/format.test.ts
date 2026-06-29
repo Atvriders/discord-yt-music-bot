@@ -8,6 +8,13 @@ describe("fmtTime", () => {
   it("returns —:— for null", () => {
     expect(fmtTime(null)).toBe("—:—");
   });
+  it("formats durations over an hour with an hours segment (h:mm:ss)", () => {
+    expect(fmtTime(3600)).toBe("1:00:00");
+    expect(fmtTime(3661)).toBe("1:01:01");
+    expect(fmtTime(5400)).toBe("1:30:00");
+    // No spurious hours segment just under an hour.
+    expect(fmtTime(3599)).toBe("59:59");
+  });
 });
 
 describe("fmtAudio", () => {

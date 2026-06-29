@@ -4,6 +4,7 @@ export interface MediaConfig {
   historyMaxItems: number;
   searchResultCount: number;
   maxTrackDurationSec: number | null;
+  normalizeLoudness: boolean;
   ytProxy: string | null;
   ytCookiesFile: string | null;
   poTokenProviderUrl: string | null;

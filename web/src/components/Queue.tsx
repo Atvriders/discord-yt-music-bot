@@ -1,5 +1,6 @@
 import type { QueueItem } from "../types.js";
 import { fmtTime } from "../lib/format.js";
+import { Thumb } from "./Thumb.js";
 
 export function Queue({ items, onRemove, onReorder }: {
   items: QueueItem[]; onRemove: (itemId: string) => void; onReorder: (itemId: string, toIndex: number) => void;
@@ -20,7 +21,9 @@ export function Queue({ items, onRemove, onReorder }: {
               onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.03)")}
               onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
               <span className="font-mono text-xs w-6 text-right" style={{ color: "var(--color-ink-faint)" }}>{i + 1}</span>
-              <img src={it.meta.thumbnailUrl ?? ""} alt="" width={40} height={40} className="rounded-md object-cover" style={{ width: 40, height: 40 }} />
+              {/* Thumb renders a placeholder (no broken <img src="">) when the url is null,
+                  avoiding a spurious same-origin GET for every thumbnail-less queue item. */}
+              <Thumb url={it.meta.thumbnailUrl} size={40} />
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium" title={it.meta.title}>{it.meta.title}</p>
                 <p className="truncate text-xs" style={{ color: "var(--color-ink-faint)" }}>

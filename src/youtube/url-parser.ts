@@ -11,17 +11,27 @@ export function parseInput(raw: string): ParsedInput {
   const input = raw.trim();
   if (!input) return { kind: "reject", reason: "empty input" };
 
-  const looksLikeUrl = /^https?:\/\//i.test(input) || /^[\w-]+(\.[\w-]+)+\//.test(input);
+  const hasScheme = /^https?:\/\//i.test(input);
+  const looksLikeUrl = hasScheme || /^[\w-]+(\.[\w-]+)+\//.test(input);
   if (!looksLikeUrl) return { kind: "query", query: input };
 
   let url: URL;
   try {
-    url = new URL(/^https?:\/\//i.test(input) ? input : `https://${input}`);
+    url = new URL(hasScheme ? input : `https://${input}`);
   } catch {
     return { kind: "query", query: input };
   }
 
   const host = url.hostname.toLowerCase();
+
+  // The protocol-less heuristic also fires on legitimate `word.tld/path` search queries
+  // (e.g. "fly.me/to/the/moon", "death.grips/get.got"). When there is no explicit scheme
+  // and the inferred host is not a recognized YouTube host, treat the input as a search
+  // query rather than rejecting it. Inputs that carry an explicit http(s):// scheme but
+  // point at a non-YouTube host still fall through to the reject branch below.
+  if (!hasScheme && host !== "youtu.be" && !YT_HOSTS.has(host)) {
+    return { kind: "query", query: input };
+  }
 
   if (host === "youtu.be") {
     const id = url.pathname.split("/").filter(Boolean)[0] ?? "";

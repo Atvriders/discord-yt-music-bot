@@ -55,38 +55,39 @@ All configuration lives in the `environment:` block of `docker-compose.yml` — 
 
 ### Bot
 
-| Variable                 | Required | Default                      | Description                                                                                                                               |
-| ------------------------ | -------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `DISCORD_TOKEN`          | yes      | —                            | Bot token from the Developer Portal                                                                                                       |
-| `COMMAND_PREFIX`         | no       | `?`                          | Command prefix (e.g. `?play`, `?skip`)                                                                                                    |
-| `CACHE_DIR`              | no       | `/data/cache`                | Directory for downloaded audio + the session snapshot                                                                                     |
-| `CACHE_MAX_MB`           | no       | `2048`                       | Max cache size (MB); least-recently-used files are evicted above this                                                                     |
-| `IDLE_TIMEOUT_SEC`       | no       | `300`                        | **Initial default** seconds of silence before the bot leaves the voice channel — the web panel can override this **per guild at runtime** |
-| `PREFETCH_DEPTH`         | no       | `1`                          | Upcoming tracks to pre-download (higher = smoother, more memory)                                                                          |
-| `MAX_TRANSCODE_JOBS`     | no       | `2`                          | Max concurrent yt-dlp downloads (higher = more CPU/memory)                                                                                |
-| `MAX_TRACK_DURATION_SEC` | no       | —                            | Reject tracks longer than this; unset = no limit                                                                                          |
-| `SEARCH_RESULT_COUNT`    | no       | `5`                          | Number of search results in the picker (max 5)                                                                                            |
-| `ADMIN_USER_IDS`         | no       | —                            | Comma-separated Discord user IDs with admin privileges (control any channel)                                                              |
-| `LOG_LEVEL`              | no       | `info`                       | pino log level (`debug`, `info`, `warn`, `error`)                                                                                         |
-| `YT_PLAYER_CLIENTS`      | no       | `android_vr,web_embedded,tv` | yt-dlp player clients to try (see note below)                                                                                             |
-| `YT_PROXY`               | no       | —                            | Residential/SOCKS proxy for yt-dlp, if your IP is blocked by YouTube                                                                      |
-| `YT_COOKIES`             | no       | —                            | Path to a mounted Netscape `cookies.txt` (helps on flagged IPs)                                                                           |
-| `PO_TOKEN_PROVIDER_URL`  | no       | —                            | PO-token provider URL; only set when running the `pot` sidecar                                                                            |
-| `SPONSORBLOCK_REMOVE`    | no       | —                            | SponsorBlock categories to skip (e.g. `sponsor,intro,outro,selfpromo`)                                                                    |
+| Variable                 | Required | Default                             | Description                                                                                                                                                                                                                                                           |
+| ------------------------ | -------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DISCORD_TOKEN`          | yes      | —                                   | Bot token from the Developer Portal                                                                                                                                                                                                                                   |
+| `COMMAND_PREFIX`         | no       | `?`                                 | Command prefix (e.g. `?play`, `?skip`)                                                                                                                                                                                                                                |
+| `CACHE_DIR`              | no       | `/data/cache`                       | Directory for downloaded audio + the session snapshot                                                                                                                                                                                                                 |
+| `CACHE_MAX_MB`           | no       | `2048`                              | Max cache size (MB); least-recently-used files are evicted above this                                                                                                                                                                                                 |
+| `IDLE_TIMEOUT_SEC`       | no       | `300`                               | **Initial default** seconds of silence before the bot leaves the voice channel — the web panel can override this **per guild at runtime**                                                                                                                             |
+| `PREFETCH_DEPTH`         | no       | `1`                                 | Upcoming tracks to pre-download (higher = smoother, more memory)                                                                                                                                                                                                      |
+| `MAX_TRANSCODE_JOBS`     | no       | `2`                                 | Max concurrent yt-dlp downloads (higher = more CPU/memory)                                                                                                                                                                                                            |
+| `MAX_TRACK_DURATION_SEC` | no       | `14400` (compose; unset = no limit) | **Initial default** for the per-guild "Max track length" — the web panel overrides this **per guild at runtime**. Compose ships `14400` (4h) so long content (concerts) plays out-of-box; `0` / empty = no limit. Also used as an absolute sanity ceiling at resolve. |
+| `SEARCH_RESULT_COUNT`    | no       | `5`                                 | Number of search results in the picker (max 5)                                                                                                                                                                                                                        |
+| `ADMIN_USER_IDS`         | no       | —                                   | Comma-separated Discord user IDs with admin privileges (control any channel)                                                                                                                                                                                          |
+| `LOG_LEVEL`              | no       | `info`                              | pino log level (`debug`, `info`, `warn`, `error`)                                                                                                                                                                                                                     |
+| `YT_PLAYER_CLIENTS`      | no       | `android_vr,web_embedded,tv`        | yt-dlp player clients to try (see note below)                                                                                                                                                                                                                         |
+| `YT_PROXY`               | no       | —                                   | Residential/SOCKS proxy for yt-dlp, if your IP is blocked by YouTube                                                                                                                                                                                                  |
+| `YT_COOKIES`             | no       | —                                   | Path to a mounted Netscape `cookies.txt` (helps on flagged IPs)                                                                                                                                                                                                       |
+| `PO_TOKEN_PROVIDER_URL`  | no       | —                                   | PO-token provider URL; only set when running the `pot` sidecar                                                                                                                                                                                                        |
+| `SPONSORBLOCK_REMOVE`    | no       | —                                   | SponsorBlock categories to skip (e.g. `sponsor,intro,outro,selfpromo`)                                                                                                                                                                                                |
+| `NORMALIZE_LOUDNESS`     | no       | `false`                             | **Initial default** for the per-guild "normalize loudness" (EBU R128) toggle — the web panel overrides this per guild at runtime                                                                                                                                      |
 
 ### Web panel (also required for the panel)
 
-| Variable                | Required | Default                           | Description                                                               |
-| ----------------------- | -------- | --------------------------------- | ------------------------------------------------------------------------- |
-| `DISCORD_CLIENT_ID`     | yes      | —                                 | OAuth2 application Client ID                                              |
-| `DISCORD_CLIENT_SECRET` | yes      | —                                 | OAuth2 application Client Secret                                          |
-| `PUBLIC_BASE_URL`       | yes      | —                                 | Public HTTPS origin (e.g. `https://music.example.com`); no trailing slash |
-| `OAUTH_REDIRECT_URI`    | no       | `<PUBLIC_BASE_URL>/auth/callback` | Must exactly match a Discord OAuth2 redirect URI                          |
-| `SESSION_SECRET`        | yes      | —                                 | Random string ≥ 32 chars used to sign session cookies (NOT your token)    |
-| `PORT`                  | no       | `8080`                            | Port the HTTP server listens on                                           |
-| `HOST`                  | no       | `0.0.0.0`                         | Interface to bind                                                         |
-| `TRUST_PROXY`           | no       | `true`                            | Set `false` only if **not** behind a reverse proxy                        |
-| `ALLOWED_WS_ORIGINS`    | no       | `<PUBLIC_BASE_URL>`               | Comma-separated origins allowed to open the live WebSocket                |
+| Variable                | Required | Default                           | Description                                                                                                                                 |
+| ----------------------- | -------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DISCORD_CLIENT_ID`     | yes      | —                                 | OAuth2 application Client ID                                                                                                                |
+| `DISCORD_CLIENT_SECRET` | yes      | —                                 | OAuth2 application Client Secret                                                                                                            |
+| `PUBLIC_BASE_URL`       | yes      | —                                 | Public HTTPS origin (e.g. `https://music.example.com`); no trailing slash                                                                   |
+| `OAUTH_REDIRECT_URI`    | no       | `<PUBLIC_BASE_URL>/auth/callback` | Must exactly match a Discord OAuth2 redirect URI                                                                                            |
+| `SESSION_SECRET`        | yes      | —                                 | Random string ≥ 32 chars used to sign session cookies (NOT your token)                                                                      |
+| `PORT`                  | no       | `8080`                            | Port the HTTP server listens on                                                                                                             |
+| `HOST`                  | no       | `0.0.0.0`                         | Interface to bind                                                                                                                           |
+| `TRUST_PROXY`           | no       | `false`                           | Set `true` **only** behind a trusted reverse proxy that sets `X-Forwarded-For`; otherwise clients can spoof XFF and bypass the rate limiter |
+| `ALLOWED_WS_ORIGINS`    | no       | `<PUBLIC_BASE_URL>`               | Comma-separated origins allowed to open the live WebSocket                                                                                  |
 
 > Generate `SESSION_SECRET` with `openssl rand -base64 32`. Never reuse your bot token for it.
 
@@ -180,7 +181,9 @@ location / {
 }
 ```
 
-Keep `TRUST_PROXY=true` so rate limiting reads the real client IP from `X-Forwarded-For`.
+Behind this proxy, set `TRUST_PROXY=true` so rate limiting reads the real client IP from
+`X-Forwarded-For`. It defaults to `false` (off) and must be enabled **only** when a trusted
+proxy like this one sets the header — otherwise clients could spoof it to dodge the limiter.
 
 ### OAuth2 redirect URI
 

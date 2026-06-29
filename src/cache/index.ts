@@ -41,10 +41,18 @@ export class AudioCache {
   }
 
   register(videoId: string, filePath: string, audio: AudioInfo | null = null): void {
-    const { size } = statSyncSafe(filePath);
+    const stat = statSyncSafe(filePath);
+    // Refuse to register a file that does not exist on disk: inserting a size-0 ghost
+    // entry would make has() report true and get() hand out a path the player can't read.
+    if (stat === null) return;
+    const { size } = stat;
     const oldEntry = this.entries.get(videoId);
+    // When re-registering an existing videoId, the old entry's bytes are about to be
+    // freed (overwritten below), so they must NOT count against the eviction threshold —
+    // otherwise innocent entries get evicted to make room that the overwrite already frees.
+    const oldSize = oldEntry?.sizeBytes ?? 0;
     // Evict to make room for the new entry
-    while (this.totalBytes() + size > this.maxBytes) {
+    while (this.totalBytes() - oldSize + size > this.maxBytes) {
       let victim: CacheEntry | null = null;
       for (const e of this.entries.values()) {
         if (e.pinned) continue;
@@ -88,11 +96,13 @@ export class AudioCache {
 }
 
 // statSync via the promise API is awkward in register() (sync needed before evict bookkeeping);
-// use a tiny sync helper so register stays synchronous for callers.
-function statSyncSafe(filePath: string): { size: number } {
+// use a tiny sync helper so register stays synchronous for callers. Returns null when the
+// file is missing/unstattable so the caller can skip the registration entirely rather than
+// inserting a misleading size-0 ghost entry.
+function statSyncSafe(filePath: string): { size: number } | null {
   try {
     return { size: statSync(filePath).size };
   } catch {
-    return { size: 0 };
+    return null;
   }
 }

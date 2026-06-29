@@ -5,6 +5,7 @@ import { avatarUrl, type DiscordUser } from "../auth/oauth.js";
 import { YtError } from "../youtube/errors.js";
 import type { Requester, TrackMeta } from "../types/index.js";
 import type { GuildSettings } from "../orchestrator/settings.js";
+import type { ControllerSnapshot } from "../orchestrator/index.js";
 
 interface Controller {
   ensureConnected(channelId: string): Promise<void>;
@@ -18,11 +19,10 @@ interface Controller {
   seek(positionMs: number): Promise<boolean>;
   remove(itemId: string): Promise<boolean>;
   reorder(itemId: string, toIndex: number): Promise<boolean>;
-  snapshot(): {
-    current: { meta?: { durationSec?: number | null } } | null;
-    upcoming: { id: string }[];
-    history: unknown;
-  };
+  // Use the real orchestrator snapshot type so the declared REST surface matches what
+  // GET /state actually returns (paused, repeat, autoplay, idleTimeoutSec, …) and so TS
+  // flags future field divergence instead of silently narrowing.
+  snapshot(): ControllerSnapshot;
   readonly settings: GuildSettings;
   updateSettings(patch: Partial<Record<keyof GuildSettings, unknown>>): GuildSettings;
 }
@@ -137,23 +137,31 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
     }
     const controller = deps.hub.get(params.id);
     let moveSuppressed: { requested: string; actual: string | null } | undefined;
-    if (body.voiceChannelId) {
-      const connected = controller.connectedChannelId;
-      if (connected && connected !== body.voiceChannelId) {
-        if (isAdmin(req, deps)) {
-          await controller.moveTo(body.voiceChannelId);
+    // voiceChannelId is user-controlled and unvalidated: an unknown/non-voice/invalid id
+    // makes moveTo/ensureConnected reject (Discord fetch error, the "not a voice channel"
+    // guard, or a 30s entersState timeout). Catch it and return a 4xx instead of letting it
+    // become a generic unhandled 500 that leaks the raw error message.
+    try {
+      if (body.voiceChannelId) {
+        const connected = controller.connectedChannelId;
+        if (connected && connected !== body.voiceChannelId) {
+          if (isAdmin(req, deps)) {
+            await controller.moveTo(body.voiceChannelId);
+          } else {
+            // Non-admin can't move the bot: keep it where it is, but flag the request
+            // so the panel can tell the user only an admin can move it.
+            moveSuppressed = { requested: body.voiceChannelId, actual: connected };
+          }
         } else {
-          // Non-admin can't move the bot: keep it where it is, but flag the request
-          // so the panel can tell the user only an admin can move it.
-          moveSuppressed = { requested: body.voiceChannelId, actual: connected };
+          await controller.ensureConnected(body.voiceChannelId);
         }
-      } else {
-        await controller.ensureConnected(body.voiceChannelId);
+      } else if (controller.connectedChannelId === null) {
+        // No target channel and the bot isn't in voice — the track would queue into
+        // the void and never play. Reject so the panel can prompt for a channel.
+        return reply.code(400).send({ error: "no_voice_channel" });
       }
-    } else if (controller.connectedChannelId === null) {
-      // No target channel and the bot isn't in voice — the track would queue into
-      // the void and never play. Reject so the panel can prompt for a channel.
-      return reply.code(400).send({ error: "no_voice_channel" });
+    } catch {
+      return reply.code(400).send({ error: "voice_connect_failed" });
     }
     const requester: Requester = {
       discordUserId: user.id,
@@ -161,7 +169,17 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
       avatarUrl: avatarUrl(user),
       source: "web",
     };
-    const item = await controller.enqueue(meta, requester);
+    let item: { id: string };
+    try {
+      item = await controller.enqueue(meta, requester);
+    } catch (err) {
+      // The per-guild max-track-length guard (and any other enqueue rejection) surfaces
+      // here. Send the human message (e.g. "Too long — max 4h …") so the panel shows it.
+      if (err instanceof YtError) {
+        return reply.code(400).send({ error: err.message });
+      }
+      throw err;
+    }
     return {
       queued: { id: item.id, title: meta.title },
       ...(moveSuppressed ? { moveSuppressed } : {}),
@@ -220,9 +238,11 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
       if (!Number.isInteger(toIndex) || toIndex < 0) {
         return reply.code(400).send({ error: "toIndex must be a non-negative integer" });
       }
-      const ok = await deps.hub
-        .get(req.params.id)
-        .reorder((req.body?.itemId ?? "").toString(), toIndex);
+      // Mirror the /queue/remove handler: reject a missing/empty itemId with a 400 rather
+      // than passing "" through to reorder (which would findIndex -> -1 -> {ok:false}/200).
+      const itemId = (req.body?.itemId ?? "").toString();
+      if (!itemId) return reply.code(400).send({ error: "itemId is required" });
+      const ok = await deps.hub.get(req.params.id).reorder(itemId, toIndex);
       return { ok };
     },
   );

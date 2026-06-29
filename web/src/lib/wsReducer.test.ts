@@ -1,13 +1,33 @@
 import { describe, it, expect } from "vitest";
 import { applyWsMessage, initialWsState } from "./useGuildState.js";
+import type { Snapshot } from "../types.js";
 
-const snap = { current: null, upcoming: [], history: [] };
+// A fully-shaped Snapshot, annotated so the compiler flags any field added to or removed
+// from the type — keeping the fixture in sync and making the round-trip assertion mean
+// something for the new GuildSettings fields (crossfade/normalize/repeat/autoplay/...).
+const snap: Snapshot = {
+  current: null,
+  upcoming: [],
+  history: [],
+  paused: false,
+  idleTimeoutSec: 300,
+  crossfadeSec: 0,
+  normalizeLoudness: false,
+  repeat: "off",
+  autoplay: false,
+  autoplaySource: "radio",
+  maxTrackDurationSec: 0,
+};
 
 describe("applyWsMessage", () => {
   it("applies a state message and goes live", () => {
     const s = applyWsMessage(initialWsState, JSON.stringify({ type: "state", state: snap }));
     expect(s.status).toBe("live");
     expect(s.snapshot).toEqual(snap);
+    // The new GuildSettings fields survive the reducer's pass-through.
+    expect(s.snapshot?.repeat).toBe("off");
+    expect(s.snapshot?.autoplaySource).toBe("radio");
+    expect(s.receivedAt).toBeGreaterThan(0);
   });
   it("marks forbidden on an error message", () => {
     const s = applyWsMessage(initialWsState, JSON.stringify({ type: "error", reason: "forbidden" }));

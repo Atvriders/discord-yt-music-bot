@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { TrackMeta } from "../types.js";
-import { fmtTime } from "../lib/format.js";
+import { Picker } from "./Picker.js";
 
 // NOTE: This is a preset/search-based browser, NOT a recommendation engine.
 // Each preset maps to a plain YouTube search query (the same flow as the AddBar
@@ -74,13 +74,13 @@ function PresetRow({
 
 export function Discover({
   onSearch,
-  onPick,
+  onQueueAll,
   busy,
 }: {
   /** Runs a search via the existing play flow; returns search candidates (or null if it didn't search). */
   onSearch: (query: string) => Promise<{ candidates: TrackMeta[] | null }>;
-  /** Queues the chosen exact track. */
-  onPick: (videoId: string) => void;
+  /** Queues all selected candidates IN ORDER; resolves to whether ≥1 was queued. */
+  onQueueAll: (videoIds: string[]) => Promise<boolean>;
   busy?: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -95,6 +95,10 @@ export function Discover({
     try {
       const { candidates: c } = await onSearch(p.query);
       setCandidates(c);
+      // Clear the active-pill highlight on a no-result path (null candidates from a
+      // link-queue, or an empty search), so the preset doesn't stay aria-pressed with
+      // no picker shown — consistent with the post-queue reset in onQueued.
+      if (!c || c.length === 0) setActiveQuery(null);
     } finally {
       setLoading(false);
     }
@@ -139,39 +143,16 @@ export function Discover({
           )}
 
           {!loading && candidates && candidates.length > 0 && (
-            <ul className="flex flex-col gap-1">
-              <li className="eyebrow px-1 pb-1">Pick the exact track</li>
-              {candidates.map((c) => (
-                <li key={c.videoId}>
-                  <button
-                    onClick={() => {
-                      onPick(c.videoId);
-                      setCandidates(null);
-                      setActiveQuery(null);
-                    }}
-                    className="w-full flex items-center gap-3 rounded-xl px-3 py-2.5 text-left"
-                    style={{ transition: "background .15s" }}
-                    onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.08)")}
-                    onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-                  >
-                    <img
-                      src={c.thumbnailUrl ?? ""}
-                      alt=""
-                      width={44}
-                      height={44}
-                      className="rounded-md object-cover"
-                      style={{ width: 44, height: 44 }}
-                    />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm">{c.title}</span>
-                      <span className="block truncate text-xs" style={{ color: "var(--color-ink-faint)" }}>
-                        {c.channel} · <span className="font-mono">{fmtTime(c.durationSec)}</span>
-                      </span>
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
+            <Picker
+              candidates={candidates}
+              busy={busy}
+              // Queue every selected candidate IN ORDER via one batched, ordered request.
+              onQueueSelected={onQueueAll}
+              onQueued={() => {
+                setCandidates(null);
+                setActiveQuery(null);
+              }}
+            />
           )}
         </div>
       )}

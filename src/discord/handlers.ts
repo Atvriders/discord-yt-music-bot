@@ -80,7 +80,19 @@ async function handlePlay(input: string, ctx: HandlerContext): Promise<HandlerRe
   if (parsed.kind === "reject") return msg(`❌ ${parsed.reason}`);
 
   if (parsed.kind === "query") {
-    const results = await ctx.youtube.search(parsed.query, ctx.searchLimit);
+    let results: TrackMeta[];
+    try {
+      results = await ctx.youtube.search(parsed.query, ctx.searchLimit);
+    } catch (err) {
+      // search() throws a YtError on a non-zero yt-dlp exit and (now) a YtError(Unknown)
+      // on non-JSON stdout. Surface a friendly message rather than falling through to
+      // bot.ts's generic "Something went wrong".
+      return msg(
+        err instanceof YtError
+          ? `❌ Can't search right now (${err.kind}).`
+          : "❌ Search failed. Try again.",
+      );
+    }
     if (results.length === 0) return msg("No results.");
     const picker = buildPicker(results);
     return { type: "picker", content: picker.content, components: picker.components };
@@ -105,7 +117,14 @@ async function handlePlay(input: string, ctx: HandlerContext): Promise<HandlerRe
   if (!target.ok) return msg(`❌ ${target.reason}`);
   if (target.move) await ctx.controller.moveTo(target.channelId);
   else await ctx.controller.ensureConnected(target.channelId);
-  await ctx.controller.enqueue(meta, ctx.requester);
+  try {
+    await ctx.controller.enqueue(meta, ctx.requester);
+  } catch (err) {
+    // The per-guild max-track-length guard surfaces here — show the human message
+    // (e.g. "Too long — max 4h …") rather than an opaque failure.
+    if (err instanceof YtError) return msg(`❌ ${err.message}`);
+    throw err;
+  }
   return msg(`➕ Queued **${meta.title}**.`);
 }
 
@@ -113,7 +132,11 @@ async function handleRemove(index: number, ctx: HandlerContext): Promise<Handler
   const upcoming = ctx.controller.snapshot().upcoming;
   const item = upcoming[index - 1];
   if (!item) return msg(`No queue item #${index}.`);
-  await ctx.controller.remove(item.id);
+  // TOCTOU: the queue may have advanced between snapshot() and remove() (track finished
+  // or a skip landed). remove() returns false when the id is no longer upcoming — don't
+  // give a false "Removed" confirmation in that case.
+  const removed = await ctx.controller.remove(item.id);
+  if (!removed) return msg("Couldn't remove that item — it may have already played.");
   return msg(`🗑️ Removed **${item.meta.title}**.`);
 }
 

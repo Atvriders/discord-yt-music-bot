@@ -40,11 +40,18 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     global: true,
     max: 120,
     timeWindow: "1 minute",
-    keyGenerator: (req) => (req as { session?: { userId?: string } }).session?.userId ?? req.ip,
+    // Authenticated requests are keyed by session user. For unauthenticated requests we
+    // key on the raw socket address (not req.ip, which honors X-Forwarded-For when
+    // trustProxy is on) so a spoofed XFF cannot mint a fresh bucket per request.
+    keyGenerator: (req) => {
+      const userId = (req as { session?: { userId?: string } }).session?.userId;
+      if (userId) return userId;
+      return req.socket.remoteAddress ?? req.ip;
+    },
   });
   await app.register(websocket);
 
-  app.get("/healthz", async () => ({
+  app.get("/healthz", () => ({
     ok: true,
     gateway: deps.gatewayReady?.() ?? null,
     uptimeSec: Math.floor(process.uptime()),

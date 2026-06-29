@@ -364,8 +364,13 @@ describe("App", () => {
     }));
     render(<App />);
     const box = (await screen.findByLabelText(/add a track/i)) as HTMLInputElement;
-    // The add input is disabled (busy) when there is no voice target.
+    // Both the input AND the submit button are disabled (busy) when there is no voice
+    // target, so a real user could not type or submit.
     await waitFor(() => expect(box.disabled).toBe(true));
+    expect((screen.getByRole("button", { name: /Queue it/i }) as HTMLButtonElement).disabled).toBe(true);
+    // fireEvent bypasses the `disabled` attribute, so this also independently exercises
+    // the app-level onPlay `noVoiceTarget` guard: even if submission slips through, the
+    // backend is never hit and the prompt is shown.
     fireEvent.change(box, { target: { value: "https://youtu.be/abcdefghijk" } });
     fireEvent.submit(box.closest("form")!);
     await waitFor(() => expect(screen.getByText(/Pick a voice channel first/i)).toBeTruthy());
@@ -390,5 +395,52 @@ describe("App", () => {
     fireEvent.change(box, { target: { value: "https://youtu.be/abcdefghijk" } });
     fireEvent.submit(box.closest("form")!);
     await waitFor(() => expect(screen.getByText(/Queued: My Song — only an admin can move the bot/i)).toBeTruthy());
+  });
+
+  it("bulk-queue: surfaces ONE aggregated summary banner (not N racing banners) and queues IN ORDER", async () => {
+    const wsRef: { current: { deliver: (s: unknown) => void } | null } = { current: null };
+    vi.stubGlobal("WebSocket", makeFakeWS({
+      current: { ...qItem("aaa", "Now"), positionMs: 0, durationMs: 100000 },
+      upcoming: [], history: [], paused: false, idleTimeoutSec: 300,
+    }, wsRef) as unknown as typeof WebSocket);
+    const pickBodies: string[] = [];
+    vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
+      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "Booth" }] }) });
+      if (url.includes("/voice-channels")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [{ id: "C1", name: "General" }], currentChannelId: "C1" }) });
+      if (url.includes("/api/guilds/G1/play")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ candidates: [{ videoId: "v1", title: "One", channel: "c", durationSec: 100, isLive: false, thumbnailUrl: null }, { videoId: "v2", title: "Two", channel: "c", durationSec: 100, isLive: false, thumbnailUrl: null }] }) });
+      if (url.endsWith("/api/guilds/G1/pick")) { pickBodies.push(String(init?.body)); return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ queued: { id: "q", title: "t" } }) }); }
+      return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: [], history: [], paused: false }) });
+    }));
+    render(<App />);
+    const box = (await screen.findByLabelText(/add a track/i)) as HTMLInputElement;
+    await waitFor(() => expect(box.disabled).toBe(false));
+    fireEvent.change(box, { target: { value: "two songs" } });
+    fireEvent.submit(box.closest("form")!);
+    // Picker appears; select both then queue.
+    await screen.findByText(/pick the exact track/i);
+    fireEvent.click(screen.getByText("Two"));
+    fireEvent.click(screen.getByText("One"));
+    fireEvent.click(screen.getByRole("button", { name: /queue 2 selected/i }));
+    // ONE summary banner for the batch (not two separate "Queued: t" banners).
+    await waitFor(() => expect(screen.getByText(/Queued 2 tracks/i)).toBeTruthy());
+    // Picks were issued sequentially in candidate display order (v1 before v2).
+    expect(pickBodies.map((b) => JSON.parse(b).videoId)).toEqual(["v1", "v2"]);
+  });
+
+  it("voice channels: surfaces an error banner and a retry affordance when the fetch fails", async () => {
+    const wsRef: { current: { deliver: (s: unknown) => void } | null } = { current: null };
+    vi.stubGlobal("WebSocket", makeFakeWS({ current: null, upcoming: [], history: [], paused: false, idleTimeoutSec: 300 }, wsRef) as unknown as typeof WebSocket);
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "Booth" }] }) });
+      if (url.includes("/voice-channels")) return Promise.resolve({ ok: false, status: 500, headers: { get: () => null }, json: async () => ({ error: "boom" }) });
+      return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: [], history: [], paused: false }) });
+    }));
+    render(<App />);
+    await waitFor(() => expect(screen.getByText(/Couldn't load voice channels/i)).toBeTruthy());
+    // The picker still renders (does not vanish), with a recoverable placeholder + retry.
+    const select = (await screen.findByRole("combobox", { name: /^voice channel$/i })) as HTMLSelectElement;
+    expect(select).toBeTruthy();
+    screen.getByText(/couldn't load — retry/i);
+    screen.getByRole("button", { name: /retry loading voice channels/i });
   });
 });

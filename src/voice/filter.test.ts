@@ -25,9 +25,32 @@ describe("buildAudioFilter", () => {
     expect(unknown).toBe("afade=t=in:st=0:d=3");
   });
 
-  it("omits fade-out when the track is shorter than the crossfade", () => {
+  it("clamps the fade-in to the track length and omits fade-out for a sub-crossfade track", () => {
+    // A 5s fade-in on a 4s track would get cut off mid-ramp; clamp it to d=4.
     const f = buildAudioFilter({ crossfadeSec: 5, normalizeLoudness: false }, 4, false);
+    expect(f).toBe("afade=t=in:st=0:d=4");
+  });
+
+  it("keeps a full fade-in but omits fade-out when duration equals the crossfade", () => {
+    // duration === crossfade: fade-in spans the whole track (d=5); fade-out is omitted
+    // because the guard requires duration STRICTLY greater than the crossfade.
+    const f = buildAudioFilter({ crossfadeSec: 5, normalizeLoudness: false }, 5, false);
     expect(f).toBe("afade=t=in:st=0:d=5");
+  });
+
+  it("computes the fade-out start from the remaining duration after a seek", () => {
+    // 180s track, seek 170s → only 10s of output remains. Fade-out must start at
+    // (10-3)=7 (relative to the seeked output), not 177 which would never fire.
+    const f = buildAudioFilter({ crossfadeSec: 3, normalizeLoudness: false }, 180, false, 170_000);
+    expect(f).toContain("afade=t=in:st=0:d=3");
+    expect(f).toContain("afade=t=out:st=7:d=3");
+  });
+
+  it("omits fade-out when a seek leaves less than the crossfade remaining", () => {
+    // 180s track, seek 178s → 2s left, shorter than the 3s crossfade: fade-in clamps to
+    // the 2s remainder and the fade-out is dropped.
+    const f = buildAudioFilter({ crossfadeSec: 3, normalizeLoudness: false }, 180, false, 178_000);
+    expect(f).toBe("afade=t=in:st=0:d=2");
   });
 
   it("combines loudnorm and crossfade in one chain", () => {

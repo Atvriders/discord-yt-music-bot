@@ -20,7 +20,8 @@ describe("picker", () => {
     const row = components[0]!;
     const json = row.toJSON();
     expect(json.components).toHaveLength(2);
-    expect(json.components[0]!.custom_id).toBe("pick:aaaaaaaaaaa");
+    const first = json.components[0]!;
+    expect("custom_id" in first ? first.custom_id : undefined).toBe("pick:aaaaaaaaaaa");
   });
 
   it("caps at 5 buttons", () => {
@@ -33,5 +34,13 @@ describe("picker", () => {
   it("decodePick extracts the videoId, or null for foreign ids", () => {
     expect(decodePick("pick:aaaaaaaaaaa")).toBe("aaaaaaaaaaa");
     expect(decodePick("other:x")).toBeNull();
+  });
+
+  it("formats a fractional (float) duration as a clean m:ss, not a fractional string", () => {
+    // yt-dlp emits duration as a float (e.g. 183.145). The picker must render "3:03",
+    // never "3:3.145".
+    const { content } = buildPicker([{ ...r("aaaaaaaaaaa", "A"), durationSec: 183.145 }]);
+    expect(content).toContain("(3:03)");
+    expect(content).not.toMatch(/\d\.\d/);
   });
 });

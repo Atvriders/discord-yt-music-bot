@@ -49,7 +49,9 @@ describe("runYtDlp", () => {
 
     const p = runYtDlp(["-J"], 10);
     await expect(p).rejects.toMatchObject({ kind: YtErrorKind.Timeout });
-    expect(proc.kill).toHaveBeenCalled();
+    // Pin the signal: SIGKILL is unignorable. A regression to SIGTERM (or no argument)
+    // would be catchable by the child, defeating the timeout guard.
+    expect(proc.kill).toHaveBeenCalledWith("SIGKILL");
   });
 
   it("propagates a spawn error (e.g. ENOENT)", async () => {

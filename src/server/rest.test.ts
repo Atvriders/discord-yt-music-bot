@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import Fastify from "fastify";
 import { registerRest } from "./rest.js";
+import { YtError, YtErrorKind } from "../youtube/errors.js";
 
 const USER = "123456789012345678";
 const GUILD = "234567890123456789";
@@ -18,7 +19,7 @@ function build(sessionUserId: string | null, depOverrides: Record<string, unknow
     ensureConnected: vi.fn(async () => {}),
     moveTo: vi.fn(async () => {}),
     connectedChannelId: null as string | null,
-    enqueue: vi.fn(async () => ({ id: "i1" })),
+    enqueue: vi.fn(async (_meta: unknown, _requester: unknown) => ({ id: "i1" })),
     skip: vi.fn(),
     pause: vi.fn(),
     resume: vi.fn(),
@@ -69,7 +70,7 @@ function build(sessionUserId: string | null, depOverrides: Record<string, unknow
   };
   const app = Fastify();
   // emulate the session: a preHandler that sets request.session from a header
-  app.decorateRequest("session", null);
+  app.decorateRequest("session", null as never);
   app.addHook("onRequest", async (req) => {
     (req as { session: unknown }).session = sessionUserId ? { userId: sessionUserId } : {};
   });
@@ -201,6 +202,81 @@ describe("REST actions", () => {
     expect(res.statusCode).toBe(400);
     expect(h.deps.youtube.resolve).not.toHaveBeenCalled();
   });
+  it("pick resolves and enqueues a valid videoId (200)", async () => {
+    const { app, controller, deps } = build(USER);
+    controller.connectedChannelId = "C1"; // avoid the no_voice_channel 400
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/pick`,
+      payload: { videoId: "aaaaaaaaaaa" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(deps.youtube.resolve).toHaveBeenCalledWith("aaaaaaaaaaa");
+    const [enqueuedMeta] = controller.enqueue.mock.calls[0]!;
+    expect(enqueuedMeta).toMatchObject({ videoId: "aaaaaaaaaaa" });
+    expect(res.json().queued).toMatchObject({ id: "i1" });
+  });
+  it("enqueue rejecting with a YtError surfaces the message as a 400", async () => {
+    const { app, controller } = build(USER);
+    controller.connectedChannelId = "C1";
+    controller.enqueue = vi.fn(async () => {
+      throw new YtError(YtErrorKind.TooLong, "Too long — max 4h");
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/play`,
+      payload: { input: "https://youtu.be/aaaaaaaaaaa" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("Too long — max 4h");
+  });
+  it("resolve throwing a YtError returns 400 with the error kind", async () => {
+    const { app } = build(USER, {
+      youtube: {
+        resolve: vi.fn(async () => {
+          throw new YtError(YtErrorKind.Private, "private video");
+        }),
+        search: vi.fn(),
+      },
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/pick`,
+      payload: { videoId: "aaaaaaaaaaa", voiceChannelId: "C1" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("private");
+  });
+  it("resolve throwing a non-YtError returns 400 'resolve_failed'", async () => {
+    const { app } = build(USER, {
+      youtube: {
+        resolve: vi.fn(async () => {
+          throw new Error("boom");
+        }),
+        search: vi.fn(),
+      },
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/pick`,
+      payload: { videoId: "aaaaaaaaaaa", voiceChannelId: "C1" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("resolve_failed");
+  });
+  it("a failed voice connect returns 400 'voice_connect_failed' (not a 500)", async () => {
+    const { app, controller } = build(USER);
+    controller.ensureConnected = vi.fn(async () => {
+      throw new Error("Unknown Channel");
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/play`,
+      payload: { input: "https://youtu.be/aaaaaaaaaaa", voiceChannelId: "C1" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("voice_connect_failed");
+  });
   it("skip/pause/resume/stop call the controller", async () => {
     for (const action of ["skip", "pause", "resume", "stop"] as const) {
       const res = await h.app.inject({ method: "POST", url: `/api/guilds/${GUILD}/${action}` });
@@ -260,20 +336,130 @@ describe("REST actions", () => {
     expect(res.statusCode).toBe(409);
     expect(h.controller.seek).not.toHaveBeenCalled();
   });
-  it("queue/remove and reorder use the itemId", async () => {
-    await h.app.inject({
+  it("seek returns 200 with ok:false when the controller cannot seek", async () => {
+    h.controller.snapshot.mockReturnValue({
+      current: { meta: { durationSec: 120 } },
+      upcoming: [],
+      history: [],
+      idleTimeoutSec: 300,
+    });
+    h.controller.seek.mockResolvedValue(false);
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/seek`,
+      payload: { positionMs: 30000 },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().ok).toBe(false);
+  });
+  it("seek returns 400 'seek failed' when the controller throws", async () => {
+    h.controller.snapshot.mockReturnValue({
+      current: { meta: { durationSec: 120 } },
+      upcoming: [],
+      history: [],
+      idleTimeoutSec: 300,
+    });
+    h.controller.seek.mockRejectedValue(new Error("boom"));
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/seek`,
+      payload: { positionMs: 30000 },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("seek failed");
+  });
+  it("seek on a live stream (durationSec:null) skips the upper-bound check", async () => {
+    h.controller.snapshot.mockReturnValue({
+      current: { meta: { durationSec: null } },
+      upcoming: [],
+      history: [],
+      idleTimeoutSec: 300,
+    });
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/seek`,
+      payload: { positionMs: 999999999 },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().ok).toBe(true);
+    expect(h.controller.seek).toHaveBeenCalledWith(999999999);
+  });
+  it("queue/remove and reorder use the itemId (200)", async () => {
+    const r1 = await h.app.inject({
       method: "POST",
       url: `/api/guilds/${GUILD}/queue/remove`,
       payload: { itemId: "i9" },
     });
+    expect(r1.statusCode).toBe(200);
     expect(h.controller.remove).toHaveBeenCalledWith("i9");
-    await h.app.inject({
+    const r2 = await h.app.inject({
       method: "POST",
       url: `/api/guilds/${GUILD}/queue/reorder`,
       payload: { itemId: "i9", toIndex: 0 },
     });
+    expect(r2.statusCode).toBe(200);
     expect(h.controller.reorder).toHaveBeenCalledWith("i9", 0);
   });
+  it("queue/remove with an empty itemId returns 400 and does not call remove", async () => {
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/queue/remove`,
+      payload: { itemId: "" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(h.controller.remove).not.toHaveBeenCalled();
+  });
+  it("queue/reorder with a missing itemId returns 400 and does not call reorder", async () => {
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/queue/reorder`,
+      payload: { toIndex: 1 },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(h.controller.reorder).not.toHaveBeenCalled();
+  });
+  it("queue/reorder with a negative toIndex returns 400 and does not call reorder", async () => {
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/queue/reorder`,
+      payload: { itemId: "i9", toIndex: -1 },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(h.controller.reorder).not.toHaveBeenCalled();
+  });
+  it("queue/reorder with a fractional toIndex returns 400 and does not call reorder", async () => {
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/queue/reorder`,
+      payload: { itemId: "i9", toIndex: 1.5 },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(h.controller.reorder).not.toHaveBeenCalled();
+  });
+  it("GET /api/guilds/:id/state returns the full snapshot payload shape", async () => {
+    h.controller.snapshot.mockReturnValue({
+      current: null,
+      upcoming: [],
+      history: [],
+      paused: false,
+      idleTimeoutSec: 300,
+      crossfadeSec: 0,
+      normalizeLoudness: false,
+      repeat: "off",
+      autoplay: true,
+      autoplaySource: "radio",
+      maxTrackDurationSec: 0,
+    });
+    const res = await h.app.inject({ method: "GET", url: `/api/guilds/${GUILD}/state` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      paused: false,
+      repeat: "off",
+      autoplay: true,
+      idleTimeoutSec: 300,
+    });
+  });
+
   it("GET /api/guilds/:id/settings returns the controller's settings", async () => {
     const res = await h.app.inject({ method: "GET", url: `/api/guilds/${GUILD}/settings` });
     expect(res.statusCode).toBe(200);

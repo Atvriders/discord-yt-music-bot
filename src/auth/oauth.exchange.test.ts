@@ -30,8 +30,14 @@ describe("exchangeCode", () => {
     const [url, init] = fn.mock.calls[0]!;
     expect(url).toBe("https://discord.com/api/oauth2/token");
     expect((init as RequestInit).method).toBe("POST");
-    expect(String((init as RequestInit).body)).toContain("grant_type=authorization_code");
-    expect(String((init as RequestInit).body)).toContain("code=CODE");
+    const body = String((init as RequestInit).body);
+    expect(body).toContain("grant_type=authorization_code");
+    expect(body).toContain("code=CODE");
+    // Lock in the security-critical / required fields so a future change that drops them
+    // from the URLSearchParams body (breaking every real exchange) fails the test.
+    expect(body).toContain("client_id=cid");
+    expect(body).toContain("client_secret=sec");
+    expect(body).toContain("redirect_uri=https%3A%2F%2Fm%2Fcb");
   });
   it("throws when the token endpoint fails", async () => {
     mockFetch([{ ok: false, json: {} }]);
@@ -55,10 +61,12 @@ describe("exchangeCode", () => {
 });
 
 describe("fetchIdentity", () => {
-  it("returns the user on success and throws on failure", async () => {
+  it("returns the user on success", async () => {
     mockFetch([{ ok: true, json: { id: "1", username: "u", global_name: "U", avatar: null } }]);
     const me = await fetchIdentity("AT");
     expect(me.id).toBe("1");
+  });
+  it("throws when the identity endpoint fails", async () => {
     mockFetch([{ ok: false, json: {} }]);
     await expect(fetchIdentity("AT")).rejects.toThrow();
   });

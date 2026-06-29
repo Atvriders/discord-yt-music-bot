@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, act, cleanup } from "@testing-library/react";
+import { render, screen, act, cleanup, waitFor } from "@testing-library/react";
 import { NowPlaying } from "./NowPlaying.js";
 import type { CurrentItem } from "../types.js";
 
@@ -133,15 +133,130 @@ describe("NowPlaying scrubbing", () => {
     expect(onSeek).toHaveBeenCalledWith(200_000);
   });
 
-  it("shows the dragged position locally while scrubbing (before release)", () => {
+  it("tracks the dragged position via pointermove (distinct from the pointerdown position)", () => {
     stubRect(1000, 0);
     const onSeek = vi.fn();
     render(<NowPlaying item={item(0, 200_000)} paused={true} receivedAt={0} canSeek onSeek={onSeek} />);
     const slider = screen.getByRole("slider", { name: /seek/i });
-    // Drag to 50% (=100s -> 1:40) without releasing.
-    pointer(slider, "pointerdown", 500);
+    // pointerdown at 10% (=20s -> 0:20), then MOVE to 50% (=100s -> 1:40). The display
+    // must CHANGE to 1:40, so onPointerMove is load-bearing for this assertion.
+    pointer(slider, "pointerdown", 100);
+    expect(screen.getByText("0:20")).toBeTruthy();
     pointer(slider, "pointermove", 500);
     expect(screen.getByText("1:40")).toBeTruthy();
+    expect(screen.queryByText("0:20")).toBeNull();
     expect(onSeek).not.toHaveBeenCalled();
+  });
+
+  it("does NOT seek when the scrub is cancelled (pointercancel discards the gesture)", () => {
+    stubRect(1000, 0);
+    const onSeek = vi.fn();
+    render(<NowPlaying item={item(0, 200_000)} paused receivedAt={0} canSeek onSeek={onSeek} />);
+    const slider = screen.getByRole("slider", { name: /seek/i });
+    pointer(slider, "pointerdown", 500);
+    pointer(slider, "pointercancel", 500);
+    // A cancelled gesture commits no seek and shows no optimistic "seeking…" hold.
+    expect(onSeek).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("seeking-indicator")).toBeNull();
+  });
+
+  it("releases the optimistic hold when the seek fails (onSeek rejects)", async () => {
+    stubRect(1000, 0);
+    const onSeek = vi.fn().mockRejectedValue(new Error("nope"));
+    render(<NowPlaying item={item(10_000, 200_000)} paused receivedAt={100} canSeek onSeek={onSeek} />);
+    const slider = screen.getByRole("slider", { name: /seek/i });
+    pointer(slider, "pointerdown", 500);
+    pointer(slider, "pointerup", 500);
+    expect(onSeek).toHaveBeenCalledWith(100_000);
+    // The rejection drops the hold (no confirming snapshot would ever arrive), so the
+    // "seeking…" indicator clears and the bar falls back to the server position (0:10).
+    await waitFor(() => expect(screen.queryByTestId("seeking-indicator")).toBeNull());
+    expect(screen.getByText("0:10")).toBeTruthy();
+  });
+
+  it("clears a stale optimistic hold when the bar loses interactivity (canSeek -> false)", () => {
+    stubRect(1000, 0);
+    const onSeek = vi.fn();
+    const { rerender } = render(
+      <NowPlaying item={item(10_000, 200_000)} paused receivedAt={100} canSeek onSeek={onSeek} />,
+    );
+    const slider = screen.getByRole("slider", { name: /seek/i });
+    pointer(slider, "pointerdown", 500);
+    pointer(slider, "pointerup", 500);
+    expect(screen.getByTestId("seeking-indicator")).toBeTruthy();
+    // Socket drops to forbidden/closed: canSeek flips false. No confirming snapshot can
+    // arrive, so the hold must be released rather than freezing on the target.
+    rerender(<NowPlaying item={item(10_000, 200_000)} paused receivedAt={100} canSeek={false} onSeek={onSeek} />);
+    expect(screen.queryByTestId("seeking-indicator")).toBeNull();
+  });
+
+  it("issues exactly ONE seek on release, not one per pointer-move", () => {
+    stubRect(1000, 0);
+    const onSeek = vi.fn();
+    render(<NowPlaying item={item(0, 200_000)} paused={true} receivedAt={0} canSeek onSeek={onSeek} />);
+    const slider = screen.getByRole("slider", { name: /seek/i });
+    pointer(slider, "pointerdown", 100);
+    pointer(slider, "pointermove", 200);
+    pointer(slider, "pointermove", 300);
+    pointer(slider, "pointermove", 400);
+    pointer(slider, "pointermove", 500);
+    // Mid-drag: zero server calls.
+    expect(onSeek).not.toHaveBeenCalled();
+    pointer(slider, "pointerup", 500);
+    // Release: a single call with the final target.
+    expect(onSeek).toHaveBeenCalledTimes(1);
+    expect(onSeek).toHaveBeenCalledWith(100_000);
+  });
+
+  it("holds the optimistic position after release until the server confirms (no snap-back)", () => {
+    stubRect(1000, 0);
+    const onSeek = vi.fn();
+    // Track currently at 0:10; receivedAt is the snapshot id.
+    const { rerender } = render(
+      <NowPlaying item={item(10_000, 200_000)} paused={true} receivedAt={100} canSeek onSeek={onSeek} />,
+    );
+    const slider = screen.getByRole("slider", { name: /seek/i });
+    // Scrub to 50% (=100s -> 1:40) and release.
+    pointer(slider, "pointerdown", 500);
+    pointer(slider, "pointerup", 500);
+    expect(onSeek).toHaveBeenCalledWith(100_000);
+    // The new WS snapshot has NOT arrived yet: same receivedAt, still old positionMs.
+    // The bar must NOT snap back to 0:10 — it holds the seek target (1:40).
+    rerender(<NowPlaying item={item(10_000, 200_000)} paused={true} receivedAt={100} canSeek onSeek={onSeek} />);
+    expect(screen.getByText("1:40")).toBeTruthy();
+    expect(screen.queryByText("0:10")).toBeNull();
+    // A "seeking" affordance is shown while we wait for confirmation.
+    expect(screen.getByTestId("seeking-indicator")).toBeTruthy();
+  });
+
+  it("releases the optimistic hold once the confirming snapshot lands", () => {
+    stubRect(1000, 0);
+    const onSeek = vi.fn();
+    const { rerender } = render(
+      <NowPlaying item={item(10_000, 200_000)} paused={true} receivedAt={100} canSeek onSeek={onSeek} />,
+    );
+    const slider = screen.getByRole("slider", { name: /seek/i });
+    pointer(slider, "pointerdown", 500);
+    pointer(slider, "pointerup", 500);
+    // New snapshot arrives (new receivedAt) reflecting the seeked position (1:40).
+    rerender(<NowPlaying item={item(100_000, 200_000)} paused={true} receivedAt={200} canSeek onSeek={onSeek} />);
+    expect(screen.getByText("1:40")).toBeTruthy();
+    // Hold released: seeking affordance gone, bar follows the server again.
+    expect(screen.queryByTestId("seeking-indicator")).toBeNull();
+  });
+
+  it("follows the new server position after a confirmed seek, not the stale target", () => {
+    stubRect(1000, 0);
+    const onSeek = vi.fn();
+    const { rerender } = render(
+      <NowPlaying item={item(10_000, 200_000)} paused={true} receivedAt={100} canSeek onSeek={onSeek} />,
+    );
+    const slider = screen.getByRole("slider", { name: /seek/i });
+    pointer(slider, "pointerdown", 500);
+    pointer(slider, "pointerup", 500); // target 1:40
+    // Confirming snapshot, then a later snapshot the server moved on to (1:45).
+    rerender(<NowPlaying item={item(100_000, 200_000)} paused={true} receivedAt={200} canSeek onSeek={onSeek} />);
+    rerender(<NowPlaying item={item(105_000, 200_000)} paused={true} receivedAt={300} canSeek onSeek={onSeek} />);
+    expect(screen.getByText("1:45")).toBeTruthy();
   });
 });

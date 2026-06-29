@@ -12,8 +12,31 @@ ENV NODE_ENV=production PORT=8080 CACHE_DIR=/data/cache PATH="/usr/local/bin:${P
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ffmpeg python3 python3-pip ca-certificates curl unzip gosu \
     && rm -rf /var/lib/apt/lists/*
-RUN pip3 install --no-cache-dir --break-system-packages "yt-dlp[default]" && yt-dlp --version
-RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- --yes && deno --version
+# YTDLP_REFRESH is a cache-busting token (pass `--build-arg YTDLP_REFRESH=$(date +%Y%U)`
+# from CI so this layer's hash changes every week). Without it, BuildKit would serve the
+# pip layer from the GHA cache unchanged and yt-dlp would silently rot — YouTube rotates
+# its nsig solver regularly, so a stale yt-dlp breaks audio extraction. The weekly cron
+# additionally builds with `no-cache: true` to guarantee a fresh fetch.
+ARG YTDLP_REFRESH=unset
+ENV YTDLP_REFRESH=${YTDLP_REFRESH}
+# bgutil-ytdlp-pot-provider is the client-side plugin that talks to the optional
+# `bgutil-pot` sidecar (PO_TOKEN_PROVIDER_URL). yt-dlp[default] alone cannot use the
+# sidecar; the plugin is auto-discovered at runtime and only activates when the
+# `youtubepot-bgutilhttp:base_url=…` extractor-arg is supplied by the app.
+RUN pip3 install --no-cache-dir --break-system-packages "yt-dlp[default]" bgutil-ytdlp-pot-provider \
+    && yt-dlp --version
+# Pin Deno to a specific release and verify its SHA256 instead of piping a remote installer
+# into sh (curl|sh would run unverified, unpinned code as root and freeze any compromised
+# artifact into the GHA layer cache). Pinned-zip-plus-checksum is reproducible and integrity-checked.
+ARG DENO_VERSION=2.1.4
+ARG DENO_SHA256=54a81939cccb2af114c4d0a68a554cf4a04b1f08728e70f663f83781de19d785
+RUN curl -fsSL -o /tmp/deno.zip \
+      "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip" \
+    && echo "${DENO_SHA256}  /tmp/deno.zip" | sha256sum -c - \
+    && unzip -o /tmp/deno.zip -d /usr/local/bin \
+    && chmod 0755 /usr/local/bin/deno \
+    && rm -f /tmp/deno.zip \
+    && deno --version
 WORKDIR /app
 RUN useradd --create-home --uid 10001 app && mkdir -p "${CACHE_DIR}" && chown -R app:app "${CACHE_DIR}" /app
 COPY --from=build --chown=app:app /app/dist ./dist

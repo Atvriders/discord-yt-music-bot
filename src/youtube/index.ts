@@ -3,9 +3,38 @@ import { join } from "node:path";
 import type { MediaConfig } from "../config.js";
 import type { AudioInfo, TrackMeta } from "../types/index.js";
 import { runYtDlp } from "./ytdlp.js";
-import { YtError, YtErrorKind, classifyYtdlpError } from "./errors.js";
+import { YtError, YtErrorKind, classifyYtdlpError, isRetryableAcrossClients } from "./errors.js";
 
 type RunFn = typeof runYtDlp;
+
+/** Canonical YouTube video ids are exactly 11 url-safe-base64 chars. */
+const VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
+
+/**
+ * Player clients appended after the configured ones to form the fallback ladder. These
+ * are the clients that, in practice, most often recover when YouTube breaks the
+ * first-choice client (extraction/PO-token/age-gate). Order = most→least reliable for
+ * audio. Anything already in the configured list is skipped (deduped) by buildLadder.
+ */
+const FALLBACK_CLIENTS = ["android_vr", "web_embedded", "tv", "web_safari", "mweb"] as const;
+
+/**
+ * Build the ordered, de-duplicated list of player_client values to try: the operator's
+ * configured `YT_PLAYER_CLIENTS` first (each tried individually), then the standard
+ * fallbacks. A comma-separated config entry like "android_vr,web_embedded,tv" becomes
+ * three separate ladder rungs so a single broken client no longer dooms the request.
+ */
+export function buildClientLadder(configured: string): string[] {
+  const seen = new Set<string>();
+  const ladder: string[] = [];
+  for (const c of [...configured.split(","), ...FALLBACK_CLIENTS]) {
+    const client = c.trim();
+    if (!client || seen.has(client)) continue;
+    seen.add(client);
+    ladder.push(client);
+  }
+  return ladder;
+}
 
 export interface DownloadResult {
   path: string;
@@ -44,6 +73,12 @@ export function parseAudioInfo(stdout: string): AudioInfo | null {
   };
 }
 
+interface RawThumbnail {
+  url?: string;
+  height?: number;
+  width?: number;
+}
+
 interface RawInfo {
   id: string;
   title?: string;
@@ -53,6 +88,27 @@ interface RawInfo {
   is_live?: boolean;
   live_status?: string;
   thumbnail?: string;
+  /** --flat-playlist (ytsearch) entries expose an array of thumbnails, not a single `thumbnail`. */
+  thumbnails?: RawThumbnail[];
+}
+
+/**
+ * yt-dlp exposes the thumbnail differently per mode: `-J` on a single video sets a
+ * `thumbnail` string, while `--flat-playlist` search entries only carry a `thumbnails`
+ * array. Prefer the single field; otherwise pick the highest-resolution array entry.
+ */
+function pickThumbnail(j: RawInfo): string | null {
+  if (typeof j.thumbnail === "string" && j.thumbnail) return j.thumbnail;
+  const arr = j.thumbnails;
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  let best: RawThumbnail | null = null;
+  for (const t of arr) {
+    if (!t || typeof t.url !== "string" || !t.url) continue;
+    const area = (t.height ?? 0) * (t.width ?? 0);
+    const bestArea = best ? (best.height ?? 0) * (best.width ?? 0) : -1;
+    if (best === null || area > bestArea) best = t;
+  }
+  return best?.url ?? null;
 }
 
 function toMeta(j: RawInfo): TrackMeta {
@@ -62,9 +118,12 @@ function toMeta(j: RawInfo): TrackMeta {
     videoId: j.id,
     title: j.title ?? "Unknown title",
     channel: j.channel ?? j.uploader ?? "Unknown",
-    durationSec: typeof j.duration === "number" ? j.duration : null,
+    // yt-dlp emits duration as a float (e.g. 183.145). durationSec is typed/documented as
+    // whole seconds and other consumers (orchestrator durationMs, rest seek bounds, picker
+    // formatting) assume a clean integer — normalize at the source.
+    durationSec: typeof j.duration === "number" ? Math.floor(j.duration) : null,
     isLive,
-    thumbnailUrl: j.thumbnail ?? null,
+    thumbnailUrl: pickThumbnail(j),
   };
 }
 
@@ -74,23 +133,88 @@ export class YouTubeService {
     private readonly run: RunFn = runYtDlp,
   ) {}
 
-  private extractorArgs(): string[] {
-    const args = ["--extractor-args", `youtube:player_client=${this.cfg.playerClients}`];
+  /**
+   * Extractor args for a SINGLE player_client. `client` overrides the configured value
+   * so the fallback ladder can probe one client per attempt.
+   */
+  private extractorArgs(client: string): string[] {
+    const args = ["--extractor-args", `youtube:player_client=${client}`];
+    // When a bgutil PO-token provider sidecar is configured, point the auto-discovered
+    // bgutil HTTP plugin at it so yt-dlp can fetch a PO token for PO-token-gated clients
+    // (web/mweb). The plugin itself performs the fetch; we only supply its base_url.
+    if (this.cfg.poTokenProviderUrl) {
+      args.push(
+        "--extractor-args",
+        `youtubepot-bgutilhttp:base_url=${this.cfg.poTokenProviderUrl}`,
+      );
+    }
     if (this.cfg.ytProxy) args.push("--proxy", this.cfg.ytProxy);
     if (this.cfg.ytCookiesFile) args.push("--cookies", this.cfg.ytCookiesFile);
     return args;
   }
 
-  async resolve(videoId: string): Promise<TrackMeta> {
-    const url = `https://www.youtube.com/watch?v=${videoId}`;
-    const { stdout, stderr, code } = await this.run(
-      ["-J", "--no-playlist", "--no-warnings", "--no-progress", ...this.extractorArgs(), "--", url],
-      this.cfg.ytdlpTimeoutMs,
-    );
-    if (code !== 0) throw classifyYtdlpError(stderr, code);
+  /**
+   * Run `fn` against each player_client in the ladder until one succeeds. A *retryable*
+   * failure (extraction/PO-token/age-gate/transport) advances to the next client; a
+   * *terminal* failure (Private/Unavailable/MembersOnly/GeoBlocked/Live/TooLong) aborts
+   * the ladder immediately since no client swap can fix it. If every client fails, the
+   * LAST error is rethrown so the caller surfaces a concrete reason — never a silent skip.
+   */
+  private async withClientFallback<T>(fn: (client: string) => Promise<T>): Promise<T> {
+    const ladder = buildClientLadder(this.cfg.playerClients);
+    let lastErr: unknown;
+    for (const client of ladder) {
+      try {
+        return await fn(client);
+      } catch (err) {
+        lastErr = err;
+        if (!isRetryableAcrossClients(err)) throw err;
+      }
+    }
+    throw lastErr ?? new YtError(YtErrorKind.Unknown, "no player clients configured");
+  }
 
-    const meta = toMeta(JSON.parse(stdout) as RawInfo);
+  async resolve(videoId: string): Promise<TrackMeta> {
+    if (!VIDEO_ID_RE.test(videoId)) {
+      throw new YtError(
+        YtErrorKind.Unavailable,
+        `"${videoId}" is not a YouTube video id (likely a playlist, Mix, or channel result)`,
+      );
+    }
+    const url = `https://www.youtube.com/watch?v=${videoId}`;
+    const meta = await this.withClientFallback(async (client) => {
+      const { stdout, stderr, code } = await this.run(
+        [
+          "-J",
+          "--no-playlist",
+          "--no-warnings",
+          "--no-progress",
+          ...this.extractorArgs(client),
+          "--",
+          url,
+        ],
+        this.cfg.ytdlpTimeoutMs,
+      );
+      if (code !== 0) throw classifyYtdlpError(stderr, code);
+      // yt-dlp exited 0 but may emit non-JSON stdout (empty/truncated/a stray warning).
+      // A raw SyntaxError is not a YtError, so isRetryableAcrossClients would treat it as
+      // retryable and burn the whole ladder before surfacing "Unexpected end of JSON input".
+      // Convert it to a typed YtError(Unknown) so the failure is classified and legible.
+      let raw: RawInfo;
+      try {
+        raw = JSON.parse(stdout) as RawInfo;
+      } catch {
+        throw new YtError(YtErrorKind.Unknown, "yt-dlp returned non-JSON output");
+      }
+      return toMeta(raw);
+    });
     if (meta.isLive) throw new YtError(YtErrorKind.Live, "live streams are not supported");
+    // NOTE: the USER-FACING length limit is now the per-guild `maxTrackDurationSec`
+    // setting, enforced authoritatively in the orchestrator's enqueue path. The global
+    // MAX_TRACK_DURATION_SEC config is retained here ONLY as an absolute sanity ceiling
+    // (unset/null = no ceiling) so a pathological multi-hour stream can't slip past
+    // before a guild has even set its own limit. Set the compose default high enough
+    // (e.g. 14400 = 4h) that normal long content reaches the per-guild check.
     if (
       this.cfg.maxTrackDurationSec !== null &&
       meta.durationSec !== null &&
@@ -98,7 +222,7 @@ export class YouTubeService {
     ) {
       throw new YtError(
         YtErrorKind.TooLong,
-        `track is ${meta.durationSec}s, over the ${this.cfg.maxTrackDurationSec}s limit`,
+        `track is ${meta.durationSec}s, over the ${this.cfg.maxTrackDurationSec}s sanity ceiling`,
       );
     }
     return meta;
@@ -118,46 +242,164 @@ export class YouTubeService {
     );
     if (code !== 0) throw classifyYtdlpError(stderr, code);
 
-    const parsed = JSON.parse(stdout) as { entries?: RawInfo[] };
+    // Convert non-JSON stdout into a typed domain error rather than letting a raw
+    // SyntaxError escape to the Discord handler / REST route. Throwing (vs returning [])
+    // is deliberate: both callers special-case YtError for user-facing messaging, and an
+    // empty result would silently masquerade as "no results".
+    let parsed: { entries?: RawInfo[] };
+    try {
+      parsed = JSON.parse(stdout) as { entries?: RawInfo[] };
+    } catch {
+      throw new YtError(YtErrorKind.Unknown, "search: yt-dlp returned non-JSON output");
+    }
     return (parsed.entries ?? []).map(toMeta);
   }
 
+  /**
+   * Fetch YouTube's own Mix/radio ("autoplay") feed for a seed video and return the
+   * upcoming related tracks as TrackMeta. This powers the panel's "autoplay" setting.
+   *
+   * HONESTY: this is NOT a genre classifier — there is no audio analysis. We ask
+   * yt-dlp for the flat-playlist of the `RD<videoId>` Mix list (the same radio YouTube
+   * would auto-play after the seed) and map the entries. The seed video itself (and any
+   * duplicates) are filtered out so the caller gets only NEW tracks.
+   *
+   * Best-effort: a yt-dlp failure resolves to `[]` (the caller falls back to idle)
+   * rather than throwing, since autoplay should never break normal playback.
+   */
+  async related(videoId: string): Promise<TrackMeta[]> {
+    // Best-effort per the contract above: ANY failure — non-zero exit, unparseable
+    // output, OR a runner-level rejection (timeout YtError, ENOENT spawn error) —
+    // resolves to [] rather than throwing, mirroring artistTracks(). Autoplay must
+    // never break normal playback.
+    try {
+      const url = `https://www.youtube.com/watch?v=${videoId}&list=RD${videoId}`;
+      const [client] = buildClientLadder(this.cfg.playerClients);
+      const { stdout, code } = await this.run(
+        [
+          "-J",
+          "--flat-playlist",
+          "--no-warnings",
+          "--no-progress",
+          ...this.extractorArgs(client ?? this.cfg.playerClients),
+          "--",
+          url,
+        ],
+        this.cfg.ytdlpTimeoutMs,
+      );
+      if (code !== 0) return [];
+
+      const parsed = JSON.parse(stdout) as { entries?: RawInfo[] };
+      const seen = new Set<string>([videoId]);
+      const out: TrackMeta[] = [];
+      for (const entry of parsed.entries ?? []) {
+        if (!entry || typeof entry.id !== "string" || seen.has(entry.id)) continue;
+        seen.add(entry.id);
+        out.push(toMeta(entry));
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Autoplay SOURCE = "artist": find more songs by the last track's artist by running a
+   * plain YouTube search for the track's `channel` (artist/uploader) name and returning
+   * the result entries as TrackMeta. The seed track's own id is filtered out.
+   *
+   * HONESTY: this is NOT a verified discography or a genre classifier. It is only as
+   * accurate as the `channel` string and YouTube's search ranking — e.g. a topic
+   * channel name, a label, or a generic uploader will skew results. It keys off the
+   * single last track, not the session.
+   *
+   * Best-effort: any failure — a missing/unknown channel, a yt-dlp non-zero exit, the
+   * runner rejecting, or unparseable output — resolves to `[]` (the caller idles)
+   * rather than throwing, so autoplay never breaks normal playback.
+   */
+  async artistTracks(meta: TrackMeta): Promise<TrackMeta[]> {
+    const artist = (meta.channel ?? "").trim();
+    // Without a usable artist name there is nothing to search for. yt-dlp's `toMeta`
+    // uses "Unknown" as the channel fallback, which would search for the literal word.
+    if (!artist || artist === "Unknown") return [];
+
+    try {
+      const limit = Math.max(1, this.cfg.searchResultCount);
+      // Strip characters that could confuse the ytsearch query, then bias toward the
+      // artist's songs. (yt-dlp treats the text after `ytsearchN:` as a plain query.)
+      const query = `${artist.replace(/["\n\r]/g, " ")} songs`;
+      const { stdout, code } = await this.run(
+        [
+          "-J",
+          "--flat-playlist",
+          "--no-warnings",
+          "--no-progress",
+          "--",
+          `ytsearch${limit}:${query}`,
+        ],
+        this.cfg.ytdlpTimeoutMs,
+      );
+      if (code !== 0) return [];
+
+      const parsed = JSON.parse(stdout) as { entries?: RawInfo[] };
+      const seen = new Set<string>([meta.videoId]);
+      const out: TrackMeta[] = [];
+      for (const entry of parsed.entries ?? []) {
+        if (!entry || typeof entry.id !== "string" || seen.has(entry.id)) continue;
+        seen.add(entry.id);
+        out.push(toMeta(entry));
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
   async download(videoId: string, outDir: string): Promise<DownloadResult> {
-    const maxMb = Math.floor(this.cfg.cacheMaxBytes / (1024 * 1024));
-    const args = [
-      "-f",
-      "bestaudio[acodec=opus]/bestaudio/best",
-      "--no-playlist",
-      "--max-filesize",
-      `${Math.max(1, Math.min(maxMb, 500))}M`,
-      "--socket-timeout",
-      "30",
-      "--retries",
-      "3",
-      "--no-warnings",
-      "--no-progress",
-      "--print",
-      AUDIO_PRINT_TEMPLATE,
-      ...this.extractorArgs(),
-    ];
-    if (this.cfg.sponsorblockRemove) {
-      args.push(
-        "-x",
-        "--audio-format",
-        "opus",
-        "--sponsorblock-remove",
-        this.cfg.sponsorblockRemove,
+    if (!VIDEO_ID_RE.test(videoId)) {
+      throw new YtError(
+        YtErrorKind.Unavailable,
+        `"${videoId}" is not a YouTube video id (likely a playlist, Mix, or channel result)`,
       );
     }
-    args.push(
-      "-o",
-      join(outDir, "%(id)s.%(ext)s"),
-      "--",
-      `https://www.youtube.com/watch?v=${videoId}`,
-    );
+    const maxMb = Math.floor(this.cfg.cacheMaxBytes / (1024 * 1024));
+    const stdout = await this.withClientFallback(async (client) => {
+      const args = [
+        "-f",
+        "bestaudio[acodec=opus]/bestaudio/best",
+        "--no-playlist",
+        "--max-filesize",
+        `${Math.max(1, Math.min(maxMb, 500))}M`,
+        "--socket-timeout",
+        "30",
+        "--retries",
+        "3",
+        "--no-warnings",
+        "--no-progress",
+        "--print",
+        AUDIO_PRINT_TEMPLATE,
+        ...this.extractorArgs(client),
+      ];
+      if (this.cfg.sponsorblockRemove) {
+        args.push(
+          "-x",
+          "--audio-format",
+          "opus",
+          "--sponsorblock-remove",
+          this.cfg.sponsorblockRemove,
+        );
+      }
+      args.push(
+        "-o",
+        join(outDir, "%(id)s.%(ext)s"),
+        "--",
+        `https://www.youtube.com/watch?v=${videoId}`,
+      );
 
-    const { stdout, stderr, code } = await this.run(args, this.cfg.ytdlpTimeoutMs);
-    if (code !== 0) throw classifyYtdlpError(stderr, code);
+      const { stdout, stderr, code } = await this.run(args, this.cfg.ytdlpTimeoutMs);
+      if (code !== 0) throw classifyYtdlpError(stderr, code);
+      return stdout;
+    });
 
     const files = await readdir(outDir);
     const produced = files.find((f) => f.startsWith(`${videoId}.`));

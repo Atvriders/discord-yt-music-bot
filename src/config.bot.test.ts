@@ -26,4 +26,27 @@ describe("loadBotConfig", () => {
     const c2 = loadBotConfig({ DISCORD_TOKEN: "t", LOG_LEVEL: "warn" });
     expect(c2.logLevel).toBe("warn");
   });
+  it("throws on non-integer IDLE_TIMEOUT_SEC", () => {
+    expect(() => loadBotConfig({ DISCORD_TOKEN: "t", IDLE_TIMEOUT_SEC: "abc" })).toThrow(
+      /IDLE_TIMEOUT_SEC/,
+    );
+  });
+  it("throws on a float PREFETCH_DEPTH", () => {
+    expect(() => loadBotConfig({ DISCORD_TOKEN: "t", PREFETCH_DEPTH: "1.5" })).toThrow(
+      /PREFETCH_DEPTH/,
+    );
+  });
+  it("throws on non-integer MAX_TRANSCODE_JOBS", () => {
+    expect(() => loadBotConfig({ DISCORD_TOKEN: "t", MAX_TRANSCODE_JOBS: "x" })).toThrow(
+      /MAX_TRANSCODE_JOBS/,
+    );
+  });
+  it("throws on MAX_TRANSCODE_JOBS=0 (would deadlock the download Semaphore)", () => {
+    expect(() => loadBotConfig({ DISCORD_TOKEN: "t", MAX_TRANSCODE_JOBS: "0" })).toThrow(
+      /MAX_TRANSCODE_JOBS/,
+    );
+  });
+  it("accepts PREFETCH_DEPTH=0 (disables prefetch)", () => {
+    expect(loadBotConfig({ DISCORD_TOKEN: "t", PREFETCH_DEPTH: "0" }).prefetchDepth).toBe(0);
+  });
 });

@@ -36,8 +36,8 @@ export function NowPlaying({
   receivedAt?: number;
   /** Whether the viewer may scrub. When false the bar is read-only. */
   canSeek?: boolean;
-  /** Seek handler; receives the target position in ms. */
-  onSeek?: (positionMs: number) => void;
+  /** Seek handler; receives the target position in ms. May return a promise that rejects on failure. */
+  onSeek?: (positionMs: number) => void | Promise<void>;
 }) {
   const displayedMs = useDisplayedMs(item?.positionMs ?? 0, item?.durationMs ?? 0, paused, receivedAt);
 
@@ -73,6 +73,7 @@ export function NowPlaying({
           <ProgressBar
             durationMs={durationMs}
             displayedMs={displayedMs}
+            receivedAt={receivedAt}
             canSeek={canSeek}
             onSeek={onSeek}
           />
@@ -94,24 +95,53 @@ interface ProgressBarProps {
   durationMs: number;
   /** Server-extrapolated elapsed position in ms (what the bar renders when not dragging). */
   displayedMs: number;
+  /**
+   * Snapshot identity — bumps on every WS state broadcast. We treat a change here (after a
+   * seek was issued) as the server CONFIRMING the seek, which is when we release the
+   * optimistic hold (see below).
+   */
+  receivedAt: number;
   canSeek: boolean;
-  onSeek?: (positionMs: number) => void;
+  /** May return a promise; a rejection releases the optimistic hold (failed seek). */
+  onSeek?: (positionMs: number) => void | Promise<void>;
 }
 
 /**
  * Progress / scrub bar. Read-only by default (role="progressbar"); when `canSeek` and the
  * track has a known duration, the same bar becomes an interactive slider — click anywhere to
- * seek, or drag the handle to scrub. While dragging we show the drag target locally so the UI
- * feels responsive; the real position re-syncs from the server once the seek lands.
+ * seek, or drag the handle to scrub.
  *
- * Seeking triggers a brief audible gap server-side while ffmpeg re-opens the cached file at
- * the new offset.
+ * Responsiveness model (why the scrub no longer "lags"):
+ *  - While dragging we show the drag target locally (`dragMs`) — the bar moves with the pointer.
+ *  - We seek the server ONLY on release (one call), never per pointer-move, so we don't spam the
+ *    API / restart ffmpeg repeatedly mid-drag.
+ *  - On release we keep an OPTIMISTIC hold (`pendingMs`) at the target instead of snapping back to
+ *    the stale `displayedMs`. The hold persists until the next WS snapshot lands (`receivedAt`
+ *    changes) — i.e. the server has confirmed the seek — at which point the bar follows the server
+ *    again. Without this hold the bar would visibly jump back to the old position for the
+ *    network + ffmpeg-respawn round-trip, which is the lag the user reported.
+ *
+ * Seeking still triggers a brief audible gap server-side while ffmpeg re-opens the cached file at
+ * the new offset; we surface a small "seeking" affordance during the hold.
  */
-function ProgressBar({ durationMs, displayedMs, canSeek, onSeek }: ProgressBarProps) {
+function ProgressBar({ durationMs, displayedMs, receivedAt, canSeek, onSeek }: ProgressBarProps) {
   const interactive = canSeek && durationMs > 0;
   const trackRef = useRef<HTMLDivElement | null>(null);
   const draggingRef = useRef(false);
   const [dragMs, setDragMs] = useState<number | null>(null);
+  // Optimistic position held after release until the server confirms the seek.
+  const [pendingMs, setPendingMs] = useState<number | null>(null);
+  // The snapshot id in effect when the seek was issued; a later id means "confirmed".
+  const seekSnapshotRef = useRef<number | null>(null);
+
+  // Release the optimistic hold once a fresh snapshot lands (the server has applied the seek).
+  useEffect(() => {
+    if (pendingMs === null) return;
+    if (seekSnapshotRef.current !== null && receivedAt !== seekSnapshotRef.current) {
+      setPendingMs(null);
+      seekSnapshotRef.current = null;
+    }
+  }, [receivedAt, pendingMs]);
 
   const posFromClientX = useCallback(
     (clientX: number): number => {
@@ -129,6 +159,9 @@ function ProgressBar({ durationMs, displayedMs, canSeek, onSeek }: ProgressBarPr
       if (!interactive) return;
       e.preventDefault();
       draggingRef.current = true;
+      // Drop any prior optimistic hold — this new gesture supersedes it.
+      setPendingMs(null);
+      seekSnapshotRef.current = null;
       setDragMs(posFromClientX(e.clientX));
       (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
     },
@@ -149,12 +182,45 @@ function ProgressBar({ durationMs, displayedMs, canSeek, onSeek }: ProgressBarPr
       draggingRef.current = false;
       const target = Math.round(posFromClientX(e.clientX));
       setDragMs(null);
-      onSeek?.(target);
+      // Hold the target optimistically until the server confirms (next snapshot), so the bar
+      // doesn't snap back to the stale position during the seek round-trip.
+      setPendingMs(target);
+      seekSnapshotRef.current = receivedAt;
+      // If the seek fails, release the optimistic hold — a failed seek emits no confirming
+      // snapshot, so without this the bar would stay pinned at the target with the
+      // "seeking…" indicator pulsing forever.
+      Promise.resolve(onSeek?.(target)).catch(() => {
+        setPendingMs(null);
+        seekSnapshotRef.current = null;
+      });
     },
-    [posFromClientX, onSeek],
+    [posFromClientX, onSeek, receivedAt],
   );
 
-  const shownMs = dragMs ?? displayedMs;
+  // A cancelled pointer gesture (touch taken over by scroll, device disconnected) carries
+  // no meaningful release coordinate — DISCARD it rather than committing a spurious seek
+  // (often to position 0). Distinct from endDrag, which commits a genuine release.
+  const cancelDrag = useCallback(() => {
+    if (!draggingRef.current) return;
+    draggingRef.current = false;
+    setDragMs(null);
+    // No setPendingMs and no onSeek — the gesture is abandoned.
+  }, []);
+
+  // If the bar stops being interactive while an optimistic hold is active (the socket
+  // dropped to forbidden/closed and canSeek flipped false), the confirming snapshot can
+  // never arrive — clear the hold so the "seeking…" indicator doesn't freeze and the bar
+  // falls back to the server-extrapolated position.
+  useEffect(() => {
+    if (!interactive) {
+      setPendingMs(null);
+      setDragMs(null);
+      seekSnapshotRef.current = null;
+    }
+  }, [interactive]);
+
+  const seeking = pendingMs !== null;
+  const shownMs = dragMs ?? pendingMs ?? displayedMs;
   const pct = durationMs > 0 ? Math.max(0, Math.min(100, (shownMs / durationMs) * 100)) : 0;
   const elapsedLabel = fmtTime(shownMs / 1000);
   const durationLabel = durationMs > 0 ? fmtTime(durationMs / 1000) : "live feed";
@@ -178,7 +244,7 @@ function ProgressBar({ durationMs, displayedMs, canSeek, onSeek }: ProgressBarPr
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={endDrag}
-        onPointerCancel={endDrag}
+        onPointerCancel={cancelDrag}
       >
         <span data-testid="progress-fill" style={{ width: `${pct}%` }} />
         {interactive && (
@@ -194,14 +260,24 @@ function ProgressBar({ durationMs, displayedMs, canSeek, onSeek }: ProgressBarPr
               height: 12,
               borderRadius: "50%",
               background: "var(--color-ember-soft, #e0a052)",
-              boxShadow: "0 0 0 3px rgba(0,0,0,0.35)",
+              boxShadow: seeking
+                ? "0 0 0 3px rgba(0,0,0,0.35), 0 0 0 6px var(--color-ember-soft, #e0a052)"
+                : "0 0 0 3px rgba(0,0,0,0.35)",
               pointerEvents: "none",
             }}
           />
         )}
       </div>
       <div className="flex items-center justify-between mt-2 font-mono text-xs" style={{ color: "var(--color-ink-faint)" }}>
-        <span>{elapsedLabel}</span><span>{durationLabel}</span>
+        <span className="flex items-center gap-2">
+          {elapsedLabel}
+          {seeking && (
+            <span data-testid="seeking-indicator" className="animate-pulse" style={{ color: "var(--color-ember-soft, #e0a052)" }}>
+              seeking…
+            </span>
+          )}
+        </span>
+        <span>{durationLabel}</span>
       </div>
     </div>
   );

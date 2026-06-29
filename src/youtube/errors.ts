@@ -49,3 +49,32 @@ export function classifyYtdlpError(stderr: string, code: number | null): YtError
     `yt-dlp failed (exit ${code ?? "null"}): ${stderr.trim().slice(0, 500)}`,
   );
 }
+
+/**
+ * Kinds where the video is genuinely unplayable for *this account/region/policy* — no
+ * amount of swapping the yt-dlp player_client will change the outcome, so the fallback
+ * ladder must stop immediately and surface the real reason.
+ *
+ * Everything else (extraction breakage like PoTokenSabr, IP/rate blocks tied to a
+ * client, or a plain Unknown exit) is worth retrying on a different player_client,
+ * because those frequently succeed on android_vr / web_embedded / tv / mweb when the
+ * first-choice client is broken by a YouTube-side change.
+ */
+const TERMINAL_KINDS: ReadonlySet<YtErrorKind> = new Set([
+  YtErrorKind.Private,
+  YtErrorKind.Unavailable,
+  YtErrorKind.MembersOnly,
+  YtErrorKind.GeoBlocked,
+  YtErrorKind.Live,
+  YtErrorKind.TooLong,
+]);
+
+/**
+ * True when retrying the same request under a *different* yt-dlp player_client could
+ * plausibly succeed. AgeRestricted is intentionally retryable: several clients
+ * (web_embedded, tv, android_vr) routinely bypass age-gates the default client trips on.
+ */
+export function isRetryableAcrossClients(err: unknown): boolean {
+  if (!(err instanceof YtError)) return true; // unknown/transport error — give other clients a shot
+  return !TERMINAL_KINDS.has(err.kind);
+}

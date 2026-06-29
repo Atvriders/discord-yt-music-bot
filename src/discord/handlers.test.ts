@@ -30,15 +30,19 @@ function ctx(overrides: Partial<Parameters<typeof handleCommand>[1]> = {}) {
     remove: vi.fn(async () => true),
     snapshot: vi.fn(() => ({ current: null, upcoming: [], history: [] })),
   };
+  const youtube = { resolve: vi.fn(), search: vi.fn() };
+  const { controller: _c, youtube: _y, ...rest } = overrides;
   return {
-    controller: controller as never,
-    youtube: { resolve: vi.fn(), search: vi.fn() },
     requester,
-    requesterChannelId: "A",
-    botChannelId: null,
+    requesterChannelId: "A" as string | null,
+    botChannelId: null as string | null,
     isAdmin: false,
     searchLimit: 5,
-    ...overrides,
+    ...rest,
+    // Keep the literal mock types (so .mockResolvedValue / .mockReturnValue resolve)
+    // by excluding these from the Partial-widened spread above.
+    controller,
+    youtube,
   };
 }
 
@@ -105,6 +109,47 @@ describe("handleCommand — play", () => {
     expect(c.youtube.search).toHaveBeenCalledWith("daft punk", 5);
     expect(res.type).toBe("picker");
   });
+
+  it("surfaces a friendly message when search throws a YtError", async () => {
+    const c = ctx();
+    c.youtube.search.mockRejectedValue(new YtError(YtErrorKind.Unknown, "boom"));
+    const res = await handleCommand({ kind: "play", input: "daft punk" }, c as never);
+    expect(res).toEqual({
+      type: "message",
+      content: expect.stringContaining(YtErrorKind.Unknown),
+    });
+  });
+
+  it("surfaces a generic message when search throws a non-YtError", async () => {
+    const c = ctx();
+    c.youtube.search.mockRejectedValue(new SyntaxError("Unexpected end of JSON input"));
+    const res = await handleCommand({ kind: "play", input: "daft punk" }, c as never);
+    expect(res).toEqual({ type: "message", content: expect.stringContaining("Search failed") });
+  });
+
+  it("surfaces the YtError message when enqueue rejects (max-track-length guard)", async () => {
+    const c = ctx();
+    c.youtube.resolve.mockResolvedValue(meta("aaaaaaaaaaa", "Song"));
+    c.controller.enqueue = vi.fn(async () => {
+      throw new YtError(YtErrorKind.TooLong, "Too long — max 2h");
+    });
+    const res = await handleCommand(
+      { kind: "play", input: "https://youtu.be/aaaaaaaaaaa" },
+      c as never,
+    );
+    expect(res).toEqual({ type: "message", content: expect.stringContaining("Too long") });
+  });
+
+  it("re-throws a non-YtError raised by enqueue", async () => {
+    const c = ctx();
+    c.youtube.resolve.mockResolvedValue(meta("aaaaaaaaaaa", "Song"));
+    c.controller.enqueue = vi.fn(async () => {
+      throw new Error("kaboom");
+    });
+    await expect(
+      handleCommand({ kind: "play", input: "https://youtu.be/aaaaaaaaaaa" }, c as never),
+    ).rejects.toThrow(/kaboom/);
+  });
 });
 
 describe("handleCommand — controls", () => {
@@ -133,6 +178,21 @@ describe("handleCommand — controls", () => {
     const res = await handleCommand({ kind: "remove", index: 2 }, c as never);
     expect(c.controller.remove).toHaveBeenCalledWith("i2");
     expect(res).toEqual({ type: "message", content: expect.stringContaining("Track Two") });
+  });
+
+  it("does NOT claim removal when the item already left the queue (TOCTOU)", async () => {
+    const c = ctx();
+    c.controller.snapshot.mockReturnValue({
+      current: null,
+      upcoming: [{ id: "i1", meta: { title: "Track One" } }],
+      history: [],
+    } as never);
+    // The track advanced between snapshot() and remove() — remove() returns false.
+    c.controller.remove = vi.fn(async () => false);
+    const res = await handleCommand({ kind: "remove", index: 1 }, c as never);
+    expect(c.controller.remove).toHaveBeenCalledWith("i1");
+    expect(res).toEqual({ type: "message", content: expect.stringContaining("already played") });
+    if (res.type === "message") expect(res.content).not.toContain("Removed");
   });
 
   it("help lists commands", async () => {

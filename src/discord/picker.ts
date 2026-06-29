@@ -5,8 +5,11 @@ const MAX = 5;
 
 function fmtDuration(sec: number | null): string {
   if (sec === null) return "?:??";
-  const m = Math.floor(sec / 60);
-  const s = String(sec % 60).padStart(2, "0");
+  // yt-dlp's duration can be a float (e.g. 183.145). Truncate to whole seconds before
+  // computing the components so `sec % 60` never yields a fractional string like "3.145".
+  const total = Math.floor(sec);
+  const m = Math.floor(total / 60);
+  const s = String(total % 60).padStart(2, "0");
   return `${m}:${s}`;
 }
 

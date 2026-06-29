@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { EventEmitter } from "node:events";
-import { GuildController } from "./index.js";
+import { GuildController, AUTOPLAY_MAX_CHAIN } from "./index.js";
+import { DEFAULT_SETTINGS } from "./settings.js";
 import { Semaphore } from "../util/semaphore.js";
 import type { AudioInfo, Requester, TrackMeta } from "../types/index.js";
 
@@ -37,8 +38,11 @@ class FakeSession extends EventEmitter {
 function makeController(
   overrides: {
     downloadFn?: (id: string) => Promise<{ path: string; audio: AudioInfo | null }>;
+    relatedFn?: (id: string) => Promise<TrackMeta[]>;
+    artistTracksFn?: (meta: TrackMeta) => Promise<TrackMeta[]>;
     onTrackError?: ReturnType<typeof vi.fn>;
     now?: () => number;
+    settings?: Partial<import("./settings.js").GuildSettings>;
   } = {},
 ) {
   const session = new FakeSession();
@@ -48,12 +52,16 @@ function makeController(
     res: p,
     seekMs: opts?.seekMs ?? 0,
   }));
+  const related = vi.fn(overrides.relatedFn ?? (async () => [] as TrackMeta[]));
+  const artistTracks = vi.fn(overrides.artistTracksFn ?? (async () => [] as TrackMeta[]));
   const deps = {
     youtube: {
       download: vi.fn(
         overrides.downloadFn ??
           (async (id: string) => ({ path: `/cache/${id}.webm`, audio: AUDIO })),
       ),
+      related,
+      artistTracks,
     },
     cache: {
       get: (id: string) => cacheStore.get(id) ?? null,
@@ -74,9 +82,10 @@ function makeController(
     downloads: new Semaphore(2),
     now: overrides.now,
     onTrackError: overrides.onTrackError,
+    settings: { ...DEFAULT_SETTINGS, ...overrides.settings },
   };
   const ctrl = new GuildController("G1", deps as never);
-  return { ctrl, session, deps, makeResource };
+  return { ctrl, session, deps, makeResource, related, artistTracks };
 }
 
 describe("GuildController", () => {
@@ -136,6 +145,74 @@ describe("GuildController", () => {
     expect(session.destroy).toHaveBeenCalled();
   });
 
+  describe("per-guild max track length", () => {
+    const longMeta = (id: string, durationSec: number): TrackMeta => ({
+      ...meta(id),
+      durationSec,
+    });
+
+    it("rejects an over-long enqueue with a TooLong reason when a per-guild limit is set", async () => {
+      // 1h limit (3600s); a 3h (10800s) track must be rejected.
+      const { ctrl, session } = makeController({ settings: { maxTrackDurationSec: 3600 } });
+      await ctrl.ensureConnected("C1");
+      session.play.mockClear();
+      await expect(ctrl.enqueue(longMeta("aaaaaaaaaaa", 10800), requester)).rejects.toMatchObject({
+        kind: "too_long",
+      });
+      // Nothing was queued or played.
+      expect(session.play).not.toHaveBeenCalled();
+      expect(ctrl.snapshot().current).toBeNull();
+      expect(ctrl.snapshot().upcoming).toHaveLength(0);
+    });
+
+    it("includes the limit (in hours) in the rejection message", async () => {
+      const { ctrl } = makeController({ settings: { maxTrackDurationSec: 7200 } }); // 2h
+      await ctrl.ensureConnected("C1");
+      await expect(ctrl.enqueue(longMeta("aaaaaaaaaaa", 10800), requester)).rejects.toThrow(/2h/);
+    });
+
+    it("allows a long track when it is UNDER the per-guild limit (3h video, 4h limit)", async () => {
+      const { ctrl, session } = makeController({ settings: { maxTrackDurationSec: 14400 } }); // 4h
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(longMeta("aaaaaaaaaaa", 10800), requester); // 3h
+      await new Promise((r) => setTimeout(r, 0));
+      expect(session.play).toHaveBeenCalledTimes(1);
+      expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+    });
+
+    it("allows ANY length when the limit is 0 (no limit)", async () => {
+      const { ctrl, session } = makeController({ settings: { maxTrackDurationSec: 0 } });
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(longMeta("aaaaaaaaaaa", 36000), requester); // 10h
+      await new Promise((r) => setTimeout(r, 0));
+      expect(session.play).toHaveBeenCalledTimes(1);
+      expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+    });
+
+    it("allows a track with unknown duration (durationSec null) regardless of the limit", async () => {
+      const { ctrl, session } = makeController({ settings: { maxTrackDurationSec: 60 } });
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue({ ...meta("aaaaaaaaaaa"), durationSec: null }, requester);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(session.play).toHaveBeenCalledTimes(1);
+    });
+
+    it("does NOT reject autoplay tracks on the per-guild limit (best-effort feed only)", async () => {
+      // Autoplay (synthetic requester) should keep playing even if a related track is long;
+      // the cap is a user-facing enqueue guard, not an autoplay killer.
+      const { ctrl, session } = makeController({
+        settings: { maxTrackDurationSec: 3600, autoplay: true },
+        relatedFn: async () => [longMeta("bbbbbbbbbbb", 10800)],
+      });
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester); // short seed (100s)
+      await new Promise((r) => setTimeout(r, 0));
+      session.emit("trackEnd"); // queue empties -> autoplay pulls the long related track
+      await new Promise((r) => setTimeout(r, 0));
+      expect(ctrl.snapshot().current?.meta.videoId).toBe("bbbbbbbbbbb");
+    });
+  });
+
   it("C1: skips a track whose download fails and plays the next one", async () => {
     const badId = "bbbbbbbbbbb";
     const goodId = "ggggggggggg";
@@ -167,17 +244,26 @@ describe("GuildController", () => {
     expect(deps.createSession).toHaveBeenCalledTimes(1);
   });
 
-  it("session error event advances to the next track", async () => {
+  it("advances exactly once when a stream error fires both error and trackEnd", async () => {
+    // Real @discordjs/voice emits BOTH an `error` event AND a Playing->Idle stateChange
+    // (which surfaces as `trackEnd`) for a single stream error. Recovery must flow solely
+    // through trackEnd; advancing from the error handler too would skip a track every time.
     const { ctrl, session } = makeController();
     await ctrl.ensureConnected("C1");
     await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
     await ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
+    await ctrl.enqueue(meta("ccccccccccc"), requester);
     await new Promise((r) => setTimeout(r, 0));
     expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
 
-    session.emit("error", new Error("x"));
+    // Mirror the real ordering: error first, then the trackEnd from the Idle transition.
+    session.emit("error", new Error("stream blew up"));
+    session.emit("trackEnd");
     await new Promise((r) => setTimeout(r, 0));
+
+    // Exactly ONE advance: we land on B, not C (which a double-advance would skip to).
     expect(ctrl.snapshot().current?.meta.videoId).toBe("bbbbbbbbbbb");
+    expect(ctrl.snapshot().upcoming.map((i) => i.meta.videoId)).toEqual(["ccccccccccc"]);
   });
 });
 
@@ -324,6 +410,19 @@ describe("GuildController playback position + paused", () => {
     expect(session.startIdleTimer).toHaveBeenCalled();
   });
 
+  it("stop() after pause() clears the paused flag so the panel doesn't stick showing 'paused'", async () => {
+    const { ctrl } = makeClockController();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    ctrl.pause();
+    expect(ctrl.snapshot().paused).toBe(true);
+    await ctrl.stop();
+    // Without resetting pausedAt in stop(), isPaused would stay true over an empty queue.
+    expect(ctrl.snapshot().paused).toBe(false);
+    expect(ctrl.snapshot().current).toBeNull();
+  });
+
   describe("GuildController.seek", () => {
     it("re-creates the resource at the offset, re-anchors position, and broadcasts", async () => {
       const { ctrl, session, makeResource, advanceClock } = makeClockController();
@@ -415,9 +514,12 @@ describe("GuildController.moveTo", () => {
         unpin: vi.fn(),
       },
       cacheDir: "/cache",
-      createSession: vi.fn(async () => sessions[sessionIdx++] as never),
+      createSession: vi.fn(
+        async (_channelId: string, _idleTimeoutMs?: number) => sessions[sessionIdx++] as never,
+      ),
       makeResource: (p: string) => ({ res: p }),
       prefetchDepth: 1,
+      idleTimeoutMs: 300_000,
       downloads: new Semaphore(2),
     };
     const ctrl = new GuildController("G1", deps as never);
@@ -437,6 +539,8 @@ describe("GuildController.moveTo", () => {
     // New session created for C2.
     expect(deps.createSession).toHaveBeenCalledTimes(2);
     expect(deps.createSession.mock.calls.at(-1)?.[0]).toBe("C2");
+    // The controller's idle timeout (300s from idleTimeoutMs) propagates to the new session.
+    expect(deps.createSession.mock.calls.at(-1)?.[1]).toBe(300_000);
     // Current track replayed on new session (playItemLocked, not advance).
     expect(sessionC2.play).toHaveBeenCalledTimes(1);
     // Queue current is still the same track (no double-advance).
@@ -466,9 +570,10 @@ describe("GuildController.moveTo", () => {
         unpin: vi.fn(),
       },
       cacheDir: "/cache",
-      createSession: vi.fn(async () => sessionC2 as never),
+      createSession: vi.fn(async (_channelId: string) => sessionC2 as never),
       makeResource: (p: string) => ({ res: p }),
       prefetchDepth: 1,
+      idleTimeoutMs: 300_000,
       downloads: new Semaphore(2),
     };
     const ctrl = new GuildController("G1", deps as never);
@@ -645,5 +750,214 @@ describe("GuildController settings", () => {
     expect(snap.crossfadeSec).toBe(6);
     expect(snap.normalizeLoudness).toBe(true);
     expect(snap.repeat).toBe("all");
+  });
+
+  it("snapshot carries the autoplay setting", () => {
+    const { ctrl } = makeController();
+    expect(ctrl.snapshot().autoplay).toBe(false);
+    ctrl.updateSettings({ autoplay: true });
+    expect(ctrl.snapshot().autoplay).toBe(true);
+  });
+
+  describe("autoplay (YouTube radio)", () => {
+    it("auto-enqueues a related track when the queue empties and autoplay is ON", async () => {
+      const { ctrl, session, related } = makeController({
+        settings: { autoplay: true },
+        relatedFn: async () => [meta("rrrrrrrrrrr"), meta("sssssssssss")],
+      });
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+
+      session.emit("trackEnd"); // queue empties -> autoplay kicks in
+      await new Promise((r) => setTimeout(r, 0));
+
+      // related() was asked for the LAST played video id, and a related track now plays.
+      expect(related).toHaveBeenCalledWith("aaaaaaaaaaa");
+      expect(ctrl.snapshot().current?.meta.videoId).toBe("rrrrrrrrrrr");
+      // The synthetic requester marks this as an autoplay pick.
+      expect(ctrl.snapshot().current?.requester.source).toBe("autoplay");
+      expect(session.startIdleTimer).not.toHaveBeenCalled();
+    });
+
+    it("does NOT auto-enqueue when autoplay is OFF (idles as before)", async () => {
+      const { ctrl, session, related } = makeController({
+        settings: { autoplay: false },
+        relatedFn: async () => [meta("rrrrrrrrrrr")],
+      });
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+      await new Promise((r) => setTimeout(r, 0));
+
+      session.emit("trackEnd");
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(related).not.toHaveBeenCalled();
+      expect(ctrl.snapshot().current).toBeNull();
+      expect(session.startIdleTimer).toHaveBeenCalled();
+    });
+
+    it("idles when autoplay is ON but related() returns nothing", async () => {
+      const { ctrl, session, related } = makeController({
+        settings: { autoplay: true },
+        relatedFn: async () => [],
+      });
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+      await new Promise((r) => setTimeout(r, 0));
+
+      session.emit("trackEnd");
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(related).toHaveBeenCalledWith("aaaaaaaaaaa");
+      expect(ctrl.snapshot().current).toBeNull();
+      expect(session.startIdleTimer).toHaveBeenCalled();
+    });
+
+    it("idles when related() throws (best-effort, never breaks playback)", async () => {
+      const { ctrl, session } = makeController({
+        settings: { autoplay: true },
+        relatedFn: async () => {
+          throw new Error("yt-dlp blew up");
+        },
+      });
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+      await new Promise((r) => setTimeout(r, 0));
+
+      session.emit("trackEnd");
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(ctrl.snapshot().current).toBeNull();
+      expect(session.startIdleTimer).toHaveBeenCalled();
+    });
+
+    it("skips related ids already seen this session (no immediate repeat of the seed chain)", async () => {
+      // First radio pull returns the just-played track + a fresh one; the played id must
+      // be filtered so autoplay advances rather than replaying history.
+      const { ctrl, session } = makeController({
+        settings: { autoplay: true },
+        relatedFn: async () => [meta("aaaaaaaaaaa"), meta("rrrrrrrrrrr")],
+      });
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+      await new Promise((r) => setTimeout(r, 0));
+
+      session.emit("trackEnd");
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(ctrl.snapshot().current?.meta.videoId).toBe("rrrrrrrrrrr");
+    });
+
+    it("idles when related() returns only already-seen ids (no new candidate to play)", async () => {
+      // related() always returns ONLY ids that have already been played. After the seed
+      // track, the first radio pull yields nothing new, so autoplay stops (idle) after a
+      // SINGLE related() call — this is the seen-id de-dup path, not the chain cap.
+      const played = new Set<string>();
+      const { ctrl, session, related } = makeController({
+        settings: { autoplay: true },
+        relatedFn: async () => [...played].map((id) => meta(id)),
+      });
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+      await new Promise((r) => setTimeout(r, 0));
+      played.add("aaaaaaaaaaa");
+
+      session.emit("trackEnd");
+      await new Promise((r) => setTimeout(r, 0));
+
+      // Nothing new to play -> idle, and related was consulted exactly once.
+      expect(ctrl.snapshot().current).toBeNull();
+      expect(session.startIdleTimer).toHaveBeenCalled();
+      expect(related.mock.calls.length).toBe(1);
+    });
+
+    it("caps consecutive autoplay enqueues at AUTOPLAY_MAX_CHAIN even when fresh ids keep arriving", async () => {
+      // related() ALWAYS yields a brand-new, never-seen id, so the seen-id de-dup never
+      // stops the chain — only the AUTOPLAY_MAX_CHAIN guard can. Each trackEnd drives one
+      // autoplay enqueue+play; after exactly the cap is reached, the next trackEnd must
+      // idle instead of enqueuing, despite a fresh candidate still being available.
+      let n = 0;
+      const freshId = () => `auto${String(n++).padStart(7, "0")}`;
+      const { ctrl, session, related } = makeController({
+        settings: { autoplay: true },
+        relatedFn: async () => [meta(freshId())],
+      });
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+      await new Promise((r) => setTimeout(r, 0));
+
+      // Drive autoplay until it stops. The chain caps at AUTOPLAY_MAX_CHAIN enqueues; the
+      // (cap+1)-th trackEnd should find autoplayChain >= cap and idle.
+      for (let i = 0; i < AUTOPLAY_MAX_CHAIN + 5; i++) {
+        if (ctrl.snapshot().current === null) break;
+        session.emit("trackEnd");
+        await new Promise((r) => setTimeout(r, 0));
+      }
+
+      // Autoplay stopped at the cap: current is null and the idle timer started.
+      expect(ctrl.snapshot().current).toBeNull();
+      expect(session.startIdleTimer).toHaveBeenCalled();
+      // related() was consulted for each enqueue (AUTOPLAY_MAX_CHAIN) plus the final pull
+      // that hit the cap before enqueuing — bounded, never unbounded.
+      expect(related.mock.calls.length).toBe(AUTOPLAY_MAX_CHAIN);
+    });
+
+    it("uses related() (not artistTracks) when autoplaySource is 'radio'", async () => {
+      const { ctrl, session, related, artistTracks } = makeController({
+        settings: { autoplay: true, autoplaySource: "radio" },
+        relatedFn: async () => [meta("rrrrrrrrrrr")],
+        artistTracksFn: async () => [meta("zzzzzzzzzzz")],
+      });
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+      await new Promise((r) => setTimeout(r, 0));
+
+      session.emit("trackEnd");
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(related).toHaveBeenCalledWith("aaaaaaaaaaa");
+      expect(artistTracks).not.toHaveBeenCalled();
+      expect(ctrl.snapshot().current?.meta.videoId).toBe("rrrrrrrrrrr");
+    });
+
+    it("uses artistTracks() (not related) when autoplaySource is 'artist', seeded by the last track meta", async () => {
+      const { ctrl, session, related, artistTracks } = makeController({
+        settings: { autoplay: true, autoplaySource: "artist" },
+        relatedFn: async () => [meta("rrrrrrrrrrr")],
+        artistTracksFn: async () => [meta("zzzzzzzzzzz")],
+      });
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+      await new Promise((r) => setTimeout(r, 0));
+
+      session.emit("trackEnd");
+      await new Promise((r) => setTimeout(r, 0));
+
+      // artistTracks is seeded with the LAST played track's full meta, not just its id.
+      expect(artistTracks).toHaveBeenCalledWith(
+        expect.objectContaining({ videoId: "aaaaaaaaaaa" }),
+      );
+      expect(related).not.toHaveBeenCalled();
+      expect(ctrl.snapshot().current?.meta.videoId).toBe("zzzzzzzzzzz");
+      expect(ctrl.snapshot().current?.requester.source).toBe("autoplay");
+    });
+
+    it("artist source reuses the same seen-id de-dup + idle fallback", async () => {
+      // artistTracks echoes the already-played id + one fresh id; the played one is filtered.
+      const { ctrl, session } = makeController({
+        settings: { autoplay: true, autoplaySource: "artist" },
+        artistTracksFn: async () => [meta("aaaaaaaaaaa"), meta("zzzzzzzzzzz")],
+      });
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+      await new Promise((r) => setTimeout(r, 0));
+
+      session.emit("trackEnd");
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(ctrl.snapshot().current?.meta.videoId).toBe("zzzzzzzzzzz");
+    });
   });
 });

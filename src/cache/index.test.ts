@@ -47,6 +47,7 @@ describe("AudioCache", () => {
     cache.register("ccccccccccc", await makeFile("ccccccccccc.webm", 300)); // 900 > 650
     expect(cache.has("bbbbbbbbbbb")).toBe(false);
     expect(cache.has("aaaaaaaaaaa")).toBe(true);
+    expect(cache.has("ccccccccccc")).toBe(true);
   });
 
   it("never evicts a pinned entry, even if it is LRU", async () => {
@@ -59,7 +60,37 @@ describe("AudioCache", () => {
     expect(cache.has("bbbbbbbbbbb")).toBe(true);
     cache.unpin("aaaaaaaaaaa");
     cache.register("ccccccccccc", await makeFile("ccccccccccc.webm", 300));
+    // After unpinning 'a', registering 'c' (300) over a 600-byte cache (cap 500) must
+    // evict BOTH 'a' and 'b' (600+300=900 → evict LRU 'a' → 600>500 → evict 'b' → 300)
+    // before 'c' lands. Pin the full double-eviction cascade + successful insert.
     expect(cache.has("aaaaaaaaaaa")).toBe(false); // now evictable
+    expect(cache.has("bbbbbbbbbbb")).toBe(false);
+    expect(cache.has("ccccccccccc")).toBe(true);
+    expect(cache.totalBytes()).toBe(300);
+  });
+
+  it("does not over-evict innocent entries when re-registering an existing id", async () => {
+    // maxBytes 1000, entries {A:600, B:300} (total 900). Re-register A at 300: the old
+    // 600 bytes are freed by the overwrite, so the post-register footprint is
+    // 900-600+300=600 ≤ 1000 — B must survive (the stale-count bug would evict it).
+    const cache = new AudioCache(dir, 1000);
+    await cache.init();
+    cache.register("aaaaaaaaaaa", await makeFile("aaaaaaaaaaa.webm", 600));
+    cache.register("bbbbbbbbbbb", await makeFile("bbbbbbbbbbb.webm", 300));
+    cache.register("aaaaaaaaaaa", await makeFile("aaaaaaaaaaa2.webm", 300)); // overwrite A
+    expect(cache.has("bbbbbbbbbbb")).toBe(true); // innocent entry not evicted
+    expect(cache.has("aaaaaaaaaaa")).toBe(true);
+    expect(cache.totalBytes()).toBe(600);
+  });
+
+  it("does not register a ghost entry for a file that is missing on disk", async () => {
+    const cache = new AudioCache(dir, 1000);
+    await cache.init();
+    cache.register("aaaaaaaaaaa", join(dir, "does-not-exist.webm"));
+    // No size-0 ghost: has() must report false and get() must return null.
+    expect(cache.has("aaaaaaaaaaa")).toBe(false);
+    expect(cache.get("aaaaaaaaaaa")).toBeNull();
+    expect(cache.totalBytes()).toBe(0);
   });
 
   it("get() returns null for an unknown id", async () => {
