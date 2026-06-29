@@ -19,6 +19,7 @@ const snap: Snapshot = {
   maxTrackDurationSec: 0,
   volume: 100,
   fx: "none",
+  preparing: null,
 };
 
 describe("applyWsMessage", () => {

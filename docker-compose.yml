@@ -28,9 +28,10 @@ services:
       # Server configuration
       PORT: "8080"
       HOST: "0.0.0.0"
-      # Set "true" ONLY when behind a trusted reverse proxy that sets X-Forwarded-For.
-      # With direct exposure (as in this example), leaving it "false" prevents clients
-      # from spoofing XFF to bypass the per-IP rate limiter.
+      # Behind an HTTPS reverse proxy (Cloudflare tunnel, nginx, Traefik, …)? Set "true" —
+      # otherwise the bot sees plain HTTP, won't set the secure session cookie, and OAuth
+      # login fails with "invalid_state". Only leave "false" for DIRECT exposure (no proxy),
+      # where it stops clients spoofing X-Forwarded-For to bypass the per-IP rate limiter.
       TRUST_PROXY: "false"
 
       # Logging

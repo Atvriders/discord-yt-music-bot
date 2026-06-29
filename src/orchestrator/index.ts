@@ -18,6 +18,38 @@ interface DownloadResult {
   audio: AudioInfo | null;
 }
 
+/** Live download progress reported by youtube.download's onProgress (mirrors the youtube layer). */
+interface DownloadProgress {
+  percent: number;
+  downloadedBytes?: number;
+  totalBytes?: number;
+}
+
+/** Per-download options threaded to youtube.download (duration scales the timeout; onProgress streams). */
+interface DownloadOptions {
+  durationSec?: number | null;
+  onProgress?: (p: DownloadProgress) => void;
+}
+
+/**
+ * The track this guild is actively FETCHING (so the panel can show it's working, not
+ * stuck). `phase` walks resolving → downloading → processing; `percent` is the live
+ * download completion (0–100) during the downloading phase only. Null whenever nothing
+ * is being prepared (idle, or the track is already playing).
+ */
+export interface PreparingState {
+  videoId: string;
+  title: string;
+  phase: "resolving" | "downloading" | "processing";
+  /** Download completion 0–100; present during the downloading phase. */
+  percent?: number;
+}
+
+/** Broadcast at most this often per percent advance (throttle), in addition to the time gate. */
+const PREPARING_PERCENT_STEP = 5;
+/** Always broadcast a percent update at least this often (ms) even on sub-step advances. */
+const PREPARING_BROADCAST_MS = 1000;
+
 /**
  * Synthetic requester attributed to tracks queued by the autoplay (YouTube radio)
  * feature, so the panel/history can tell them apart from real user requests.
@@ -62,7 +94,7 @@ export interface MakeResourceOpts {
 
 export interface ControllerDeps {
   youtube: {
-    download(videoId: string, outDir: string): Promise<DownloadResult>;
+    download(videoId: string, outDir: string, opts?: DownloadOptions): Promise<DownloadResult>;
     /** YouTube Mix/radio for a seed video (autoplaySource "radio"). Best-effort. */
     related(videoId: string): Promise<TrackMeta[]>;
     /** More songs by the seed track's artist/channel (autoplaySource "artist"). Best-effort. */
@@ -145,6 +177,12 @@ export interface ControllerSnapshot {
   volume: number;
   /** Audio FX preset (none | bassboost | nightcore | vaporwave | eightd | treble | karaoke). */
   fx: GuildSettings["fx"];
+  /**
+   * The track currently being FETCHED for playback (resolving/downloading/processing),
+   * so the panel can show a live "⬇ Downloading … 45%" status instead of a frozen card.
+   * Null when nothing is being prepared.
+   */
+  preparing: PreparingState | null;
 }
 
 /**
@@ -193,6 +231,14 @@ export class GuildController extends EventEmitter {
   // Per-guild settings (idle timeout + crossfade/normalize/repeat), runtime-adjustable.
   // The idle timeout is the live source of truth; `idleTimeoutMs` derives from it.
   private _settings: GuildSettings;
+
+  // ── Preparing (live fetch) status ─────────────────────────────────────────────────
+  // The track currently being fetched for playback and its phase/percent, surfaced in the
+  // snapshot so the panel shows a live status. `lastPercentBroadcast`/`lastBroadcastAt`
+  // throttle the high-frequency download-progress "changed" emits so they don't spam the WS.
+  private preparing: PreparingState | null = null;
+  private lastPercentBroadcast = -Infinity;
+  private lastBroadcastAt = 0;
 
   constructor(
     readonly guildId: string,
@@ -327,6 +373,43 @@ export class GuildController extends EventEmitter {
     });
   }
 
+  // ── Preparing-status helpers ──────────────────────────────────────────────────────
+
+  /**
+   * Set the live "preparing" status to a new phase and broadcast it. A phase TRANSITION
+   * (or clearing to null) always emits; the per-percent downloading updates go through
+   * `updatePreparingPercent` instead, which throttles. Resets the throttle accumulators on
+   * every transition so the first percent of a new phase always lands.
+   */
+  private setPreparing(state: PreparingState | null): void {
+    this.preparing = state;
+    this.lastPercentBroadcast = state?.percent ?? -Infinity;
+    this.lastBroadcastAt = this.now();
+    this.emit("changed");
+  }
+
+  /**
+   * Update the live download percent, broadcasting only when it advances by at least
+   * PREPARING_PERCENT_STEP since the last broadcast OR PREPARING_BROADCAST_MS has elapsed
+   * (so a slow trickle still updates ~1×/s). This keeps a long download from spamming the
+   * WS with a "changed" on every yt-dlp progress line. A no-op once we've moved past the
+   * downloading phase (a late progress line must not resurrect a stale status).
+   */
+  private updatePreparingPercent(percent: number): void {
+    const p = this.preparing;
+    if (!p || p.phase !== "downloading") return;
+    p.percent = percent;
+    const now = this.now();
+    const advanced = percent - this.lastPercentBroadcast >= PREPARING_PERCENT_STEP;
+    const timeElapsed = now - this.lastBroadcastAt >= PREPARING_BROADCAST_MS;
+    // Always let 100% through so the bar visibly completes before processing.
+    if (advanced || timeElapsed || percent >= 100) {
+      this.lastPercentBroadcast = percent;
+      this.lastBroadcastAt = now;
+      this.emit("changed");
+    }
+  }
+
   /** Audio post-processing options derived from current settings. */
   private audioOptions(): AudioOptions {
     return {
@@ -404,6 +487,7 @@ export class GuildController extends EventEmitter {
       maxTrackDurationSec: this._settings.maxTrackDurationSec,
       volume: this._settings.volume,
       fx: this._settings.fx,
+      preparing: this.preparing ? { ...this.preparing } : null,
     };
   }
 
@@ -582,6 +666,9 @@ export class GuildController extends EventEmitter {
     this.pausedAt = null;
     this.pausedAccumMs = 0;
     this.currentResource = null;
+    // Drop any in-flight preparing status so the panel doesn't keep showing a fetch the
+    // user just stopped (the awaiting playItemLocked still no-ops on the session check).
+    this.preparing = null;
     this.session?.stop();
     // Stay in the voice channel after Stop; the normal idle timeout disconnects later.
     this.session?.startIdleTimer();
@@ -649,15 +736,36 @@ export class GuildController extends EventEmitter {
     const session = this.session;
     if (!session) return false;
     try {
-      const path = await this.ensureDownloaded(item.meta.videoId);
+      // Surface a live "preparing" status so the panel shows the track is actively being
+      // fetched (resolving → downloading → processing) rather than looking frozen. The
+      // downloading phase + percent is set inside ensureDownloaded (only on a cache miss).
+      this.setPreparing({ videoId: item.meta.videoId, title: item.meta.title, phase: "resolving" });
+      const path = await this.ensureDownloaded(item.meta.videoId, {
+        title: item.meta.title,
+        durationSec: item.meta.durationSec,
+      });
       // Defense-in-depth: ensureDownloaded yields, so a teardown (leaveInternal) could have
       // replaced/destroyed the session while we awaited. Never play onto a stale session or
       // pin against a cleared `pinned` set.
-      if (this.session !== session) return false;
+      if (this.session !== session) {
+        this.setPreparing(null);
+        return false;
+      }
       item.audio = this.deps.cache.getAudio(item.meta.videoId);
       this.deps.cache.pin(item.meta.videoId);
       this.pinned.add(item.meta.videoId);
+      // The file is on disk; building the ffmpeg/Opus resource is the final "processing"
+      // step (transcode/passthrough setup) before the first frame plays.
+      this.setPreparing({
+        videoId: item.meta.videoId,
+        title: item.meta.title,
+        phase: "processing",
+      });
       await this.playResource(session, path, item, { audio: this.audioOptions() });
+      // Track has started — clear the preparing status (broadcast happens below via the
+      // final emit("changed"), but null it BEFORE markTrackStarted so the snapshot the
+      // panel receives shows the now-playing card, not a lingering "processing").
+      this.preparing = null;
       this.markTrackStarted();
       // Remember what just started so autoplay can seed its next pull from it (by id for
       // radio, by artist/channel for artist), and record the id so autoplay never
@@ -675,6 +783,9 @@ export class GuildController extends EventEmitter {
       this.emit("changed");
       return true;
     } catch (err) {
+      // The fetch failed — clear the live status (and broadcast) so the panel drops the
+      // "downloading/processing" indicator instead of leaving it spinning forever.
+      this.setPreparing(null);
       this.deps.onTrackError?.({
         videoId: item.meta.videoId,
         title: item.meta.title,
@@ -766,11 +877,27 @@ export class GuildController extends EventEmitter {
     }
   }
 
-  private async ensureDownloaded(videoId: string): Promise<string> {
+  /**
+   * Ensure the track is on disk, returning its cached path. When `prepare` is supplied
+   * (the play-for-playback path) and the file is NOT already cached, the live preparing
+   * status advances to "downloading" and the download's onProgress streams into
+   * `preparing.percent` (throttled). A cache hit skips the download (and the downloading
+   * phase) entirely. The caller owns clearing/advancing the status afterwards.
+   */
+  private async ensureDownloaded(
+    videoId: string,
+    prepare?: { title: string; durationSec: number | null },
+  ): Promise<string> {
     const cached = this.deps.cache.get(videoId);
     if (cached) return cached;
+    if (prepare) {
+      this.setPreparing({ videoId, title: prepare.title, phase: "downloading", percent: 0 });
+    }
     const { path, audio } = await this.deps.downloads.run(() =>
-      this.deps.youtube.download(videoId, this.deps.cacheDir),
+      this.deps.youtube.download(videoId, this.deps.cacheDir, {
+        durationSec: prepare?.durationSec,
+        onProgress: prepare ? (p) => this.updatePreparingPercent(p.percent) : undefined,
+      }),
     );
     this.deps.cache.register(videoId, path, audio);
     return path;
@@ -808,6 +935,9 @@ export class GuildController extends EventEmitter {
     this.startedAt = null;
     this.pausedAt = null;
     this.pausedAccumMs = 0;
+    // A teardown cancels any in-flight fetch's relevance; clear the status so the panel
+    // doesn't keep showing a "downloading/processing" for a session that no longer exists.
+    this.preparing = null;
     for (const id of this.pinned) this.deps.cache.unpin(id);
     this.pinned.clear();
     // Forget the autoplay chain so a future session starts fresh.

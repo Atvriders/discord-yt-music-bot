@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, waitFor, fireEvent, cleanup } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, cleanup, act } from "@testing-library/react";
 import { App } from "./components/App.js";
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); localStorage.clear(); });
@@ -305,6 +305,29 @@ describe("App", () => {
     const removeBtn = await screen.findByRole("button", { name: /Remove Queued Song/i });
     fireEvent.click(removeBtn);
     await waitFor(() => expect(screen.getByText(/Couldn't remove — forbidden/i)).toBeTruthy());
+  });
+
+  it("shows the live downloading status from snapshot.preparing and hides it when cleared", async () => {
+    const wsRef: { current: { deliver: (s: unknown) => void } | null } = { current: null };
+    vi.stubGlobal("WebSocket", makeFakeWS({
+      current: null, upcoming: [], history: [], paused: false, idleTimeoutSec: 300,
+      preparing: { videoId: "aaaaaaaaaaa", title: "Long Concert Set", phase: "downloading", percent: 45 },
+    }, wsRef) as unknown as typeof WebSocket);
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "Booth" }] }) });
+      if (url.includes("/voice-channels")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [], currentChannelId: null }) });
+      return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: [], history: [], paused: false }) });
+    }));
+    render(<App />);
+    // The live status renders with the title + percent + a progress fill.
+    expect(await screen.findByText(/Long Concert Set/)).toBeTruthy();
+    expect(screen.getByText(/Downloading/i)).toBeTruthy();
+    expect(screen.getByText(/45%/)).toBeTruthy();
+    expect((screen.getByTestId("preparing-fill") as HTMLElement).style.width).toBe("45%");
+
+    // Clearing preparing (track started) hides the status entirely.
+    act(() => wsRef.current!.deliver({ current: { ...qItem("aaaaaaaaaaa", "Long Concert Set"), positionMs: 0, durationMs: 100000 }, upcoming: [], history: [], paused: false, idleTimeoutSec: 300, preparing: null }));
+    await waitFor(() => expect(screen.queryByText(/Downloading/i)).toBeNull());
   });
 
   it("BUG 1: refetches the snapshot after a successful remove when the WS is not live", async () => {

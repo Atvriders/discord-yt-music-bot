@@ -668,7 +668,6 @@ input[type="range"]:disabled {
 .reveal {
   opacity: 0;
   animation: rise var(--dur-reveal) var(--ease-out) forwards;
-  will-change: transform, opacity, filter;
 }
 
 /* -----------------------------------------------------------------------------

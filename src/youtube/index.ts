@@ -41,6 +41,86 @@ export interface DownloadResult {
   audio: AudioInfo | null;
 }
 
+/** Live download progress reported to a `download()` caller's `onProgress`. */
+export interface DownloadProgress {
+  /** Completion percentage 0–100 (clamped). */
+  percent: number;
+  /** Bytes downloaded so far (absent when yt-dlp can't report it, e.g. "NA"). */
+  downloadedBytes?: number;
+  /** Total bytes (absent when the size is unknown — common for streamed audio). */
+  totalBytes?: number;
+}
+
+/**
+ * yt-dlp `--progress-template` we hand it so each progress line is a compact,
+ * pipe-delimited record we can parse deterministically (vs scraping the human
+ * `[download] 45.2% of ~210MiB` line). The `download:` prefix lets us distinguish
+ * progress lines from other `--newline` stdout (warnings, the AUDIOFMT print, …).
+ */
+export const DOWNLOAD_PROGRESS_TEMPLATE =
+  "download:%(progress._percent_str)s|%(progress._downloaded_bytes)s|%(progress._total_bytes)s";
+
+/**
+ * Parse one `--progress-template`-formatted line. Returns null for any non-progress or
+ * malformed line so a caller can ignore it (best-effort: a bad line never breaks the
+ * download). Percent is required (and clamped to [0,100]); byte counts are optional —
+ * yt-dlp emits "NA" when a size is unknown, which we map to `undefined`.
+ */
+export function parseDownloadProgress(line: string): DownloadProgress | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("download:")) return null;
+  const body = trimmed.slice("download:".length);
+  const [pctRaw, dlRaw, totalRaw] = body.split("|");
+  if (pctRaw === undefined) return null;
+  const pct = Number.parseFloat(pctRaw.replace("%", "").trim());
+  if (!Number.isFinite(pct)) return null;
+  const num = (s: string | undefined): number | undefined => {
+    if (s === undefined) return undefined;
+    const v = Number.parseInt(s.trim(), 10);
+    return Number.isFinite(v) ? v : undefined;
+  };
+  return {
+    percent: Math.max(0, Math.min(100, pct)),
+    downloadedBytes: num(dlRaw),
+    totalBytes: num(totalRaw),
+  };
+}
+
+/** ≈ms of download budget per second of audio (a 1h track gets ~2h to download). */
+export const DOWNLOAD_PER_SEC_MS = 2000;
+/** Hard ceiling for an auto-scaled download timeout (30 min). */
+export const DOWNLOAD_TIMEOUT_CAP_MS = 30 * 60_000;
+
+/**
+ * Auto-scale the yt-dlp download timeout by track duration so a long mix/concert isn't
+ * killed by the short default. We give ~`DOWNLOAD_PER_SEC_MS` of budget per second of
+ * audio, never going below the operator's configured base and never above the 30-min
+ * cap — EXCEPT we never shrink a configured base that is itself above the cap.
+ *
+ *   effective = clamp(max(base, durationSec * PER_SEC_MS), base, max(base, CAP))
+ *
+ * A null/unknown duration falls back to the configured base (no scaling).
+ */
+export function scaleDownloadTimeout(
+  configuredMs: number,
+  durationSec: number | null | undefined,
+): number {
+  if (durationSec == null || !Number.isFinite(durationSec) || durationSec <= 0) {
+    return configuredMs;
+  }
+  const budget = Math.ceil(durationSec) * DOWNLOAD_PER_SEC_MS;
+  const cap = Math.max(configuredMs, DOWNLOAD_TIMEOUT_CAP_MS);
+  return Math.min(cap, Math.max(configuredMs, budget));
+}
+
+/** Per-call download options: track duration (for timeout scaling) + a live progress hook. */
+export interface DownloadOptions {
+  /** Track length in seconds; scales the yt-dlp timeout so long audio isn't cut off. */
+  durationSec?: number | null;
+  /** Fired for every parsed progress line as the download streams (best-effort). */
+  onProgress?: (p: DownloadProgress) => void;
+}
+
 /** Marker prefixing the yt-dlp --print line so we can locate it amid other stdout. */
 const AUDIO_PRINT_PREFIX = "AUDIOFMT::";
 /** Printed after the file lands on disk, reflecting the REAL post-processed format. */
@@ -355,13 +435,28 @@ export class YouTubeService {
     }
   }
 
-  async download(videoId: string, outDir: string): Promise<DownloadResult> {
+  async download(
+    videoId: string,
+    outDir: string,
+    opts: DownloadOptions = {},
+  ): Promise<DownloadResult> {
     if (!VIDEO_ID_RE.test(videoId)) {
       throw new YtError(
         YtErrorKind.Unavailable,
         `"${videoId}" is not a YouTube video id (likely a playlist, Mix, or channel result)`,
       );
     }
+    // Auto-scale the timeout so a long mix/concert isn't killed by the short default.
+    const timeoutMs = scaleDownloadTimeout(this.cfg.ytdlpTimeoutMs, opts.durationSec);
+    // Per progress line: parse it and (best-effort) forward to the caller. A throw inside
+    // onProgress is swallowed at the runner (runYtDlp's emitLine), so it can't break the
+    // download; we also guard the parse here.
+    const onLine = opts.onProgress
+      ? (line: string): void => {
+          const p = parseDownloadProgress(line);
+          if (p) opts.onProgress!(p);
+        }
+      : undefined;
     const maxMb = Math.floor(this.cfg.cacheMaxBytes / (1024 * 1024));
     const stdout = await this.withClientFallback(async (client) => {
       const args = [
@@ -375,7 +470,11 @@ export class YouTubeService {
         "--retries",
         "3",
         "--no-warnings",
-        "--no-progress",
+        // Emit one progress record per line (vs in-place \r rewrites) so the line-splitter
+        // can surface live download progress through onProgress.
+        "--newline",
+        "--progress-template",
+        DOWNLOAD_PROGRESS_TEMPLATE,
         "--print",
         AUDIO_PRINT_TEMPLATE,
         ...this.extractorArgs(client),
@@ -396,7 +495,7 @@ export class YouTubeService {
         `https://www.youtube.com/watch?v=${videoId}`,
       );
 
-      const { stdout, stderr, code } = await this.run(args, this.cfg.ytdlpTimeoutMs);
+      const { stdout, stderr, code } = await this.run(args, timeoutMs, onLine);
       if (code !== 0) throw classifyYtdlpError(stderr, code);
       return stdout;
     });

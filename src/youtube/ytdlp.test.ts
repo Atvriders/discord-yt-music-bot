@@ -64,4 +64,29 @@ describe("runYtDlp", () => {
     queueMicrotask(() => proc.emit("error", new Error("spawn yt-dlp ENOENT")));
     await expect(p).rejects.toThrow(/ENOENT/);
   });
+
+  it("invokes onLine for each COMPLETE stdout line as data streams in", async () => {
+    // Two chunks that split a line across the boundary: the parser must reassemble
+    // "line2" and only emit it once the trailing newline arrives.
+    const proc = new EventEmitter() as FakeProc;
+    proc.stdout = Readable.from(["line1\nlin", "e2\nline3"]);
+    proc.stderr = Readable.from([]);
+    proc.kill = vi.fn();
+    setImmediate(() => proc.emit("close", 0));
+    spawnMock.mockReturnValue(proc);
+
+    const lines: string[] = [];
+    const res = await runYtDlp(["-J"], 1000, (l) => lines.push(l));
+    // Complete lines stream as their newline lands; the final no-newline remainder
+    // ("line3") is flushed on close so a trailing progress line is never dropped.
+    expect(lines).toEqual(["line1", "line2", "line3"]);
+    // The buffered stdout is unchanged — onLine is purely an observer.
+    expect(res.stdout).toBe("line1\nline2\nline3");
+  });
+
+  it("works without an onLine callback (back-compat)", async () => {
+    spawnMock.mockReturnValue(fakeProc("a\nb\n", "", 0));
+    const res = await runYtDlp(["-J"], 1000);
+    expect(res.stdout).toBe("a\nb\n");
+  });
 });

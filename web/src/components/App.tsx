@@ -6,6 +6,7 @@ import { Grain } from "./Grain.js";
 import { LoginGate } from "./LoginGate.js";
 import { ServerSelector } from "./ServerSelector.js";
 import { NowPlaying } from "./NowPlaying.js";
+import { Preparing } from "./Preparing.js";
 import { Controls } from "./Controls.js";
 import { Queue } from "./Queue.js";
 import { AddBar } from "./AddBar.js";
@@ -518,6 +519,13 @@ export function App() {
               onSeek={onSeek}
             />
             </div>
+            {/* Live fetch status — shows a track is actively downloading/processing (not
+                stuck), driven by snapshot.preparing over the WS. Hidden when null. */}
+            {snap?.preparing && (
+              <div className="reveal" style={{ animationDelay: "135ms" }}>
+                <Preparing preparing={snap.preparing} />
+              </div>
+            )}
             {/* Transport strip — the console's control rail: keys, channel + settings
                 wells, and the signal-status counter. */}
             <div

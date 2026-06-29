@@ -6,7 +6,14 @@ import { join } from "node:path";
 const runMock = vi.hoisted(() => vi.fn());
 vi.mock("./ytdlp.js", () => ({ runYtDlp: runMock }));
 
-import { YouTubeService, parseAudioInfo, buildClientLadder } from "./index.js";
+import {
+  YouTubeService,
+  parseAudioInfo,
+  buildClientLadder,
+  parseDownloadProgress,
+  scaleDownloadTimeout,
+  DOWNLOAD_PROGRESS_TEMPLATE,
+} from "./index.js";
 import { YtErrorKind } from "./errors.js";
 import { loadMediaConfig } from "../config.js";
 
@@ -547,5 +554,156 @@ describe("parseAudioInfo", () => {
       bitrateKbps: 0,
       sampleRateHz: 0,
     });
+  });
+});
+
+describe("parseDownloadProgress", () => {
+  it("parses the templated 'download:PCT|DL|TOTAL' line", () => {
+    expect(parseDownloadProgress("download: 45.2%|110100480|210000000")).toEqual({
+      percent: 45.2,
+      downloadedBytes: 110100480,
+      totalBytes: 210000000,
+    });
+  });
+
+  it("trims whitespace and a trailing % yt-dlp pads into the field", () => {
+    expect(parseDownloadProgress("download:  5.0%|512|10240")).toMatchObject({ percent: 5 });
+  });
+
+  it("returns percent even when byte counts are 'NA' (unknown total)", () => {
+    const p = parseDownloadProgress("download: 12.5%|NA|NA");
+    expect(p?.percent).toBe(12.5);
+    expect(p?.downloadedBytes).toBeUndefined();
+    expect(p?.totalBytes).toBeUndefined();
+  });
+
+  it("clamps percent into [0,100]", () => {
+    expect(parseDownloadProgress("download: 120.0%|1|1")?.percent).toBe(100);
+    expect(parseDownloadProgress("download: -3.0%|1|1")?.percent).toBe(0);
+  });
+
+  it("returns null for a line without the download: marker", () => {
+    expect(parseDownloadProgress("[info] Writing thumbnail")).toBeNull();
+    expect(parseDownloadProgress("AUDIOFMT::opus|160|165|48000")).toBeNull();
+  });
+
+  it("returns null for a malformed download line (no percent)", () => {
+    expect(parseDownloadProgress("download: foo|bar|baz")).toBeNull();
+  });
+});
+
+describe("scaleDownloadTimeout", () => {
+  const BASE = 60_000;
+  it("returns the configured base for a short track", () => {
+    // 200s of audio * 2000ms ≈ 400_000 > base, so it actually scales up even here…
+    // a TRULY short track (≤30s) stays at base.
+    expect(scaleDownloadTimeout(BASE, 10)).toBe(BASE);
+  });
+
+  it("scales up for a long track (≈2s budget per audio second)", () => {
+    // A 2.5h mix = 9000s → 9000*2000 = 18_000_000ms, but capped at the 30-min ceiling.
+    const t = scaleDownloadTimeout(BASE, 9000);
+    expect(t).toBe(30 * 60_000); // hard cap
+    expect(t).toBeGreaterThan(BASE);
+  });
+
+  it("scales proportionally below the cap", () => {
+    // 120s * 2000 = 240_000ms, under both the cap and obviously above base.
+    expect(scaleDownloadTimeout(BASE, 120)).toBe(240_000);
+  });
+
+  it("never drops below the configured base (honors a larger configured value)", () => {
+    // A generously-configured base wins over a small computed budget.
+    expect(scaleDownloadTimeout(600_000, 30)).toBe(600_000);
+  });
+
+  it("treats null/unknown duration as the base (no scaling)", () => {
+    expect(scaleDownloadTimeout(BASE, null)).toBe(BASE);
+    expect(scaleDownloadTimeout(BASE, undefined)).toBe(BASE);
+  });
+
+  it("caps at 30 minutes even if the configured base is somehow higher", () => {
+    // The cap is the max of (base, ceiling) so a base above the ceiling still wins —
+    // we never SHRINK an operator's explicit base, only refuse to scale ABOVE the cap.
+    expect(scaleDownloadTimeout(40 * 60_000, 9000)).toBe(40 * 60_000);
+  });
+});
+
+describe("YouTubeService.download progress + timeout", () => {
+  beforeEach(() => runMock.mockReset());
+
+  it("passes --newline + --progress-template and reports parsed percents via onProgress", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yt-"));
+    await writeFile(join(dir, "dQw4w9WgXcQ.webm"), "fakeaudio");
+    // The mock plays back yt-dlp's streamed progress lines through onLine (3rd arg),
+    // then resolves with the post-download AUDIOFMT print.
+    runMock.mockImplementation(
+      async (_args: string[], _timeout: number, onLine?: (l: string) => void) => {
+        onLine?.("download:  0.0%|0|210000000");
+        onLine?.("download: 45.2%|94920000|210000000");
+        onLine?.("download: 100.0%|210000000|210000000");
+        return ok("AUDIOFMT::opus|160|165|48000\n");
+      },
+    );
+    const seen: number[] = [];
+    const res = await new YouTubeService(cfg).download("dQw4w9WgXcQ", dir, {
+      durationSec: 200,
+      onProgress: (p) => seen.push(p.percent),
+    });
+    expect(res.path).toBe(join(dir, "dQw4w9WgXcQ.webm"));
+    expect(seen).toEqual([0, 45.2, 100]);
+    const args = runMock.mock.calls[0]![0] as string[];
+    expect(args).toContain("--newline");
+    expect(args).toContain("--progress-template");
+    const tIdx = args.indexOf("--progress-template");
+    expect(args[tIdx + 1]).toBe(DOWNLOAD_PROGRESS_TEMPLATE);
+    // It must NOT suppress progress (the old path passed --no-progress).
+    expect(args).not.toContain("--no-progress");
+  });
+
+  it("ignores malformed progress lines without breaking the download", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yt-"));
+    await writeFile(join(dir, "dQw4w9WgXcQ.webm"), "fakeaudio");
+    runMock.mockImplementation(
+      async (_args: string[], _timeout: number, onLine?: (l: string) => void) => {
+        onLine?.("[info] some noise");
+        onLine?.("download: garbage line");
+        onLine?.("download: 50.0%|1|2");
+        return ok("");
+      },
+    );
+    const seen: number[] = [];
+    const res = await new YouTubeService(cfg).download("dQw4w9WgXcQ", dir, {
+      onProgress: (p) => seen.push(p.percent),
+    });
+    expect(res.path).toBe(join(dir, "dQw4w9WgXcQ.webm"));
+    expect(seen).toEqual([50]); // only the one well-formed line fired
+  });
+
+  it("auto-scales the timeout by track duration (long → larger, capped)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yt-"));
+    await writeFile(join(dir, "dQw4w9WgXcQ.webm"), "fakeaudio");
+    runMock.mockResolvedValue(ok(""));
+    // base 60s → for a 9000s (2.5h) mix the effective timeout is the 30-min cap.
+    await new YouTubeService(cfg).download("dQw4w9WgXcQ", dir, { durationSec: 9000 });
+    const timeoutArg = runMock.mock.calls[0]![1] as number;
+    expect(timeoutArg).toBe(30 * 60_000);
+  });
+
+  it("uses the base timeout for a short track", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yt-"));
+    await writeFile(join(dir, "dQw4w9WgXcQ.webm"), "fakeaudio");
+    runMock.mockResolvedValue(ok(""));
+    await new YouTubeService(cfg).download("dQw4w9WgXcQ", dir, { durationSec: 10 });
+    expect(runMock.mock.calls[0]![1] as number).toBe(cfg.ytdlpTimeoutMs);
+  });
+
+  it("still works with no options (back-compat: base timeout, no onProgress)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yt-"));
+    await writeFile(join(dir, "dQw4w9WgXcQ.webm"), "fakeaudio");
+    runMock.mockResolvedValue(ok(""));
+    const res = await new YouTubeService(cfg).download("dQw4w9WgXcQ", dir);
+    expect(res.path).toBe(join(dir, "dQw4w9WgXcQ.webm"));
+    expect(runMock.mock.calls[0]![1] as number).toBe(cfg.ytdlpTimeoutMs);
   });
 });

@@ -36,7 +36,17 @@ export interface GuildSettings {
   /** Audio FX preset (none | bassboost | nightcore | vaporwave | eightd | treble | karaoke). */
   fx: FxPreset;
 }
-export interface Snapshot extends GuildSettings { current: CurrentItem | null; upcoming: QueueItem[]; history: QueueItem[]; paused: boolean; }
+// The track currently being FETCHED for playback, surfaced so the panel can show a live
+// "⬇ Downloading … 45%" status (mirrors the backend PreparingState).
+export type PreparingPhase = "resolving" | "downloading" | "processing";
+export interface PreparingState {
+  videoId: string;
+  title: string;
+  phase: PreparingPhase;
+  /** Download completion 0–100; present during the downloading phase. */
+  percent?: number;
+}
+export interface Snapshot extends GuildSettings { current: CurrentItem | null; upcoming: QueueItem[]; history: QueueItem[]; paused: boolean; preparing: PreparingState | null; }
 export interface Me { user: { id: string; username: string; avatarUrl: string }; guilds: { id: string; name: string }[]; }
 export interface VoiceChannel { id: string; name: string; }
 // A saved, per-guild playlist summary (mirrors the backend PlaylistSummary).

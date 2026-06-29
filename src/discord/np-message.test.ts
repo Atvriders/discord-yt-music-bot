@@ -45,6 +45,7 @@ function snap(overrides: Partial<ControllerSnapshot> = {}): ControllerSnapshot {
     maxTrackDurationSec: 0,
     volume: 100,
     fx: "none",
+    preparing: null,
     ...overrides,
   };
 }

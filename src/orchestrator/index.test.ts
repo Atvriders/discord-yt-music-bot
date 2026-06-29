@@ -1212,3 +1212,217 @@ describe("GuildController volume + fx", () => {
     expect(setVolumeSpies[0]).not.toHaveBeenCalled();
   });
 });
+
+describe("GuildController preparing (live download/processing status)", () => {
+  // A controller whose download + makeResource can be paused mid-flight so we can observe
+  // the intermediate `preparing` phases (resolving → downloading → processing → null).
+  function makeDeferredController(opts: { onProgressCalls?: number[][] } = {}) {
+    const session = new FakeSession();
+    const cacheStore = new Map<string, string>();
+    const audioStore = new Map<string, AudioInfo | null>();
+    // Gate the download: it resolves only when `releaseDownload()` is called, after
+    // optionally replaying a scripted set of onProgress percents.
+    let releaseDownload!: () => void;
+    const downloadGate = new Promise<void>((r) => (releaseDownload = r));
+    const download = vi.fn(
+      async (
+        id: string,
+        _dir: string,
+        o?: { durationSec?: number | null; onProgress?: (p: { percent: number }) => void },
+      ) => {
+        for (const [pct] of opts.onProgressCalls ?? []) o?.onProgress?.({ percent: pct! });
+        await downloadGate;
+        return { path: `/cache/${id}.webm`, audio: AUDIO };
+      },
+    );
+    let releaseResource!: () => void;
+    const resourceGate = new Promise<void>((r) => (releaseResource = r));
+    const makeResource = vi.fn(async (p: string) => {
+      await resourceGate;
+      return { res: p };
+    });
+    const deps = {
+      youtube: { download, related: vi.fn(async () => []), artistTracks: vi.fn(async () => []) },
+      cache: {
+        get: (id: string) => cacheStore.get(id) ?? null,
+        getAudio: (id: string) => audioStore.get(id) ?? null,
+        has: (id: string) => cacheStore.has(id),
+        register: (id: string, p: string, audio: AudioInfo | null = null) => {
+          cacheStore.set(id, p);
+          audioStore.set(id, audio);
+        },
+        pin: vi.fn(),
+        unpin: vi.fn(),
+      },
+      cacheDir: "/cache",
+      createSession: vi.fn(async () => session as never),
+      makeResource,
+      prefetchDepth: 0, // disable prefetch so it doesn't pre-cache and skip downloading
+      idleTimeoutMs: 300_000,
+      downloads: new Semaphore(2),
+    };
+    const ctrl = new GuildController("G1", deps as never);
+    return { ctrl, session, deps, download, makeResource, releaseDownload, releaseResource };
+  }
+
+  it("snapshot carries preparing=null when idle", () => {
+    const { ctrl } = makeDeferredController();
+    expect(ctrl.snapshot().preparing).toBeNull();
+  });
+
+  it("walks preparing through downloading → processing → null as a track is fetched and started", async () => {
+    const { ctrl, deps, releaseDownload, releaseResource } = makeDeferredController();
+    await ctrl.ensureConnected("C1");
+    void ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    // Let enqueue → maybeStart → playItemLocked reach the (gated) download.
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Downloading: a fresh, uncached track is being fetched.
+    let prep = ctrl.snapshot().preparing;
+    expect(prep).toMatchObject({
+      videoId: "aaaaaaaaaaa",
+      title: "aaaaaaaaaaa",
+      phase: "downloading",
+    });
+
+    // Release the download → it advances to processing (makeResource is still gated).
+    releaseDownload();
+    await new Promise((r) => setTimeout(r, 0));
+    prep = ctrl.snapshot().preparing;
+    expect(prep).toMatchObject({ phase: "processing" });
+    // The playback path invoked download for this track (prefetch may also call it for the
+    // next item — we only assert the playback fetch happened).
+    expect(deps.youtube.download).toHaveBeenCalledWith(
+      "aaaaaaaaaaa",
+      "/cache",
+      expect.objectContaining({ durationSec: 100 }),
+    );
+
+    // Release makeResource → the track starts playing and preparing clears.
+    releaseResource();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ctrl.snapshot().preparing).toBeNull();
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+  });
+
+  it("forwards download progress percent into preparing.percent", async () => {
+    const { ctrl, releaseDownload, releaseResource } = makeDeferredController({
+      onProgressCalls: [[42]],
+    });
+    await ctrl.ensureConnected("C1");
+    void ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ctrl.snapshot().preparing).toMatchObject({ phase: "downloading", percent: 42 });
+    releaseDownload();
+    releaseResource();
+    await new Promise((r) => setTimeout(r, 0));
+  });
+
+  it("passes the track durationSec into youtube.download (for timeout scaling)", async () => {
+    const { ctrl, download, releaseDownload, releaseResource } = makeDeferredController();
+    await ctrl.ensureConnected("C1");
+    void ctrl.enqueue(meta("aaaaaaaaaaa"), requester); // meta() sets durationSec: 100
+    await new Promise((r) => setTimeout(r, 0));
+    releaseDownload();
+    releaseResource();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(download).toHaveBeenCalledWith(
+      "aaaaaaaaaaa",
+      "/cache",
+      expect.objectContaining({ durationSec: 100 }),
+    );
+  });
+
+  it("clears preparing (null) and reports the error when a download fails", async () => {
+    const onTrackError = vi.fn();
+    const session = new FakeSession();
+    const deps = {
+      youtube: {
+        download: vi.fn(async () => {
+          throw new Error("network died");
+        }),
+        related: vi.fn(async () => []),
+        artistTracks: vi.fn(async () => []),
+      },
+      cache: {
+        get: () => null,
+        getAudio: () => null,
+        has: () => false,
+        register: vi.fn(),
+        pin: vi.fn(),
+        unpin: vi.fn(),
+      },
+      cacheDir: "/cache",
+      createSession: vi.fn(async () => session as never),
+      makeResource: vi.fn(),
+      prefetchDepth: 0,
+      idleTimeoutMs: 300_000,
+      downloads: new Semaphore(2),
+      onTrackError,
+    };
+    const ctrl = new GuildController("G1", deps as never);
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(onTrackError).toHaveBeenCalled();
+    expect(ctrl.snapshot().preparing).toBeNull();
+    expect(ctrl.snapshot().current).toBeNull();
+  });
+
+  it("throttles percent broadcasts: small advances don't emit, ≥5% does", async () => {
+    // Drive onProgress with a scripted set of percents; capture each preparing.percent at
+    // every 'changed' emission. The throttle should suppress sub-5% advances.
+    const captured: (number | undefined)[] = [];
+    const session = new FakeSession();
+    const cacheStore = new Map<string, string>();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const deps = {
+      youtube: {
+        download: vi.fn(
+          async (
+            id: string,
+            _dir: string,
+            o?: { onProgress?: (p: { percent: number }) => void },
+          ) => {
+            // 0 (phase set) → 2 (suppressed) → 6 (emit) → 7 (suppressed) → 100 (emit)
+            for (const p of [0, 2, 6, 7, 100]) o?.onProgress?.({ percent: p });
+            await gate;
+            return { path: `/cache/${id}.webm`, audio: AUDIO };
+          },
+        ),
+        related: vi.fn(async () => []),
+        artistTracks: vi.fn(async () => []),
+      },
+      cache: {
+        get: (id: string) => cacheStore.get(id) ?? null,
+        getAudio: () => null,
+        has: (id: string) => cacheStore.has(id),
+        register: (id: string, p: string) => cacheStore.set(id, p),
+        pin: vi.fn(),
+        unpin: vi.fn(),
+      },
+      cacheDir: "/cache",
+      createSession: vi.fn(async () => session as never),
+      makeResource: vi.fn(async (p: string) => ({ res: p })),
+      prefetchDepth: 0,
+      idleTimeoutMs: 300_000,
+      downloads: new Semaphore(2),
+    };
+    const ctrl = new GuildController("G1", deps as never);
+    await ctrl.ensureConnected("C1");
+    ctrl.on("changed", () => {
+      const prep = ctrl.snapshot().preparing;
+      if (prep?.phase === "downloading") captured.push(prep.percent);
+    });
+    void ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    release();
+    await new Promise((r) => setTimeout(r, 0));
+    // 2 and 7 must be throttled out; 0 (initial), 6, and 100 survive (each ≥5% from prior).
+    expect(captured).toContain(6);
+    expect(captured).toContain(100);
+    expect(captured).not.toContain(2);
+    expect(captured).not.toContain(7);
+  });
+});
