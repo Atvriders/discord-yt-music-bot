@@ -65,6 +65,38 @@ describe("runYtDlp", () => {
     await expect(p).rejects.toThrow(/ENOENT/);
   });
 
+  it("rejects (does not crash) when child.stdout emits 'error' instead of throwing uncaught", async () => {
+    // An 'error' on a stream with no listener throws synchronously and would crash the
+    // process via uncaughtException. runYtDlp must attach its own listener and turn it into
+    // a promise rejection. We never emit 'close', so only the stream-error path can settle it.
+    const proc = new EventEmitter() as FakeProc;
+    proc.stdout = new Readable({ read() {} }); // never ends
+    proc.stderr = new Readable({ read() {} });
+    proc.kill = vi.fn();
+    spawnMock.mockReturnValue(proc);
+
+    const p = runYtDlp(["-J"], 1000);
+    queueMicrotask(() => proc.stdout.emit("error", new Error("EPIPE")));
+    await expect(p).rejects.toThrow(/EPIPE/);
+  });
+
+  it("does not crash when child.stderr emits 'error' (stderr error is swallowed)", async () => {
+    // A read error on the diagnostic stderr stream must not crash the process. With an
+    // 'error' listener attached it is swallowed; the run still resolves when 'close' fires.
+    const proc = new EventEmitter() as FakeProc;
+    proc.stdout = Readable.from(["{}"]);
+    proc.stderr = new Readable({ read() {} });
+    proc.kill = vi.fn();
+    spawnMock.mockReturnValue(proc);
+
+    const p = runYtDlp(["-J"], 1000);
+    queueMicrotask(() => {
+      proc.stderr.emit("error", new Error("stderr pipe error"));
+      setImmediate(() => proc.emit("close", 0));
+    });
+    await expect(p).resolves.toMatchObject({ code: 0 });
+  });
+
   it("invokes onLine for each COMPLETE stdout line as data streams in", async () => {
     // Two chunks that split a line across the boundary: the parser must reassemble
     // "line2" and only emit it once the trailing newline arrives.

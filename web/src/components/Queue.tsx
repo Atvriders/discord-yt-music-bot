@@ -249,7 +249,7 @@ export function Queue({
                   · {it.requester.displayName}
                 </p>
               </button>
-              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+              <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
                 <button aria-label={`Play next: ${it.meta.title}`} disabled={i === 0} onClick={() => onPlayNext(it.id)}
                   className="pill pill-ghost" style={{ padding: "0.3rem 0.6rem", fontSize: "0.7rem" }}>Play next</button>
                 <button aria-label="Move up" disabled={i === 0} onClick={() => onReorder(it.id, i - 1)}

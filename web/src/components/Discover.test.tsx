@@ -130,4 +130,29 @@ describe("Discover", () => {
     await waitFor(() => expect(onSearch).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(jazz.getAttribute("aria-pressed")).toBe("false"));
   });
+
+  it("clears the active pill and shows no picker when onSearch rejects", async () => {
+    const onSearch = vi.fn().mockRejectedValue(new Error("boom"));
+    render(<Discover onSearch={onSearch} onQueueAll={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /browse/i }));
+    const lofi = screen.getByRole("button", { name: "Lofi" });
+    fireEvent.click(lofi);
+    // The preset returns to aria-pressed=false (no permanently-stuck active state)...
+    await waitFor(() => expect(lofi.getAttribute("aria-pressed")).toBe("false"));
+    // ...and no picker is left mounted on the failure path.
+    expect(screen.queryByText(/pick the exact track/i)).toBeNull();
+  });
+
+  it("disables every preset (and does not search) when busy", () => {
+    const onSearch = vi.fn();
+    render(<Discover busy onSearch={onSearch} onQueueAll={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /browse/i }));
+    for (const p of [...GENRE_PRESETS, ...MOOD_PRESETS]) {
+      const btn = screen.getByRole("button", { name: p.label }) as HTMLButtonElement;
+      expect(btn.disabled).toBe(true);
+    }
+    // Clicking a disabled preset is a no-op.
+    fireEvent.click(screen.getByRole("button", { name: "Lofi" }));
+    expect(onSearch).not.toHaveBeenCalled();
+  });
 });

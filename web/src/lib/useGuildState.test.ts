@@ -2,6 +2,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import { useGuildState, reconnectDelayMs } from "./useGuildState.js";
+import type { Snapshot } from "../types.js";
 
 // Minimal controllable WebSocket double. Tracks every instance so a test can assert
 // that a new socket was created on reconnect, and lets us drive open/close/message.
@@ -136,10 +137,13 @@ describe("useGuildState reconnect", () => {
   });
 
   it("delivers a 'message' state frame through the hook: status goes live and snapshot updates", () => {
-    const snap = {
+    // Typed as Snapshot so the compiler flags drift when the wire format gains fields,
+    // and toEqual(snap) below exercises the COMPLETE shape (not a partial subset).
+    const snap: Snapshot = {
       current: null, upcoming: [], history: [], paused: false,
       idleTimeoutSec: 300, crossfadeSec: 0, normalizeLoudness: false,
       repeat: "off", autoplay: false, autoplaySource: "radio", maxTrackDurationSec: 0,
+      volume: 100, fx: "none", commandChannelId: null, preparing: null,
     };
     const { result } = renderHook(() => useGuildState("g1"));
     act(() => FakeWS.instances[0]!.open());
@@ -169,6 +173,44 @@ describe("useGuildState reconnect", () => {
     // 'online' should reconnect right away (no backoff wait).
     act(() => window.dispatchEvent(new Event("online")));
     expect(FakeWS.instances).toHaveLength(2);
+  });
+
+  it("stops reconnecting once a guild is forbidden ({type:'error'} then close)", () => {
+    const { result } = renderHook(() => useGuildState("g1"));
+    act(() => FakeWS.instances[0]!.open());
+    // Server rejects the subscription, then the socket closes.
+    act(() => FakeWS.instances[0]!.message(JSON.stringify({ type: "error", reason: "forbidden" })));
+    act(() => FakeWS.instances[0]!.drop());
+    expect(result.current.status).toBe("forbidden");
+    // No reconnect must ever happen — advance well past the max backoff cap.
+    act(() => vi.advanceTimersByTime(60000));
+    expect(FakeWS.instances).toHaveLength(1);
+    expect(result.current.status).toBe("forbidden");
+  });
+
+  it("stops reconnecting once a guild is revoked ({type:'revoked'} then close)", () => {
+    const { result } = renderHook(() => useGuildState("g1"));
+    act(() => FakeWS.instances[0]!.open());
+    act(() => FakeWS.instances[0]!.message(JSON.stringify({ type: "revoked" })));
+    act(() => FakeWS.instances[0]!.drop());
+    expect(result.current.status).toBe("forbidden");
+    act(() => vi.advanceTimersByTime(60000));
+    expect(FakeWS.instances).toHaveLength(1);
+    expect(result.current.status).toBe("forbidden");
+  });
+
+  it("does not reconnect a forbidden guild on visibilitychange or window 'online'", () => {
+    const { result } = renderHook(() => useGuildState("g1"));
+    act(() => FakeWS.instances[0]!.open());
+    act(() => FakeWS.instances[0]!.message(JSON.stringify({ type: "error", reason: "forbidden" })));
+    act(() => FakeWS.instances[0]!.drop());
+    expect(result.current.status).toBe("forbidden");
+    // Both immediate-reconnect triggers must be short-circuited by the forbidden latch.
+    visibility = "visible";
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    act(() => window.dispatchEvent(new Event("online")));
+    expect(FakeWS.instances).toHaveLength(1);
+    expect(result.current.status).toBe("forbidden");
   });
 
   it("removes the 'online' listener on unmount (no leak / no reconnect after teardown)", () => {

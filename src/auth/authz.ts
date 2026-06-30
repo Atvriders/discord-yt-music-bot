@@ -1,4 +1,6 @@
-const SNOWFLAKE = /^\d{17,20}$/;
+// Discord snowflake: 17–20 digits. Single source of truth — both the admin-id parser below
+// and config.ts's BotConfig.adminUserIds derive from this, so the format only lives here.
+export const SNOWFLAKE = /^\d{17,20}$/;
 
 export function parseAdminIds(env: Record<string, string | undefined>): Set<string> {
   return new Set(

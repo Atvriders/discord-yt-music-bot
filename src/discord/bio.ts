@@ -18,8 +18,12 @@ export interface BioCommand {
 }
 
 /**
- * The canonical command set, in the order they should appear in the bio. Mirrors the
- * commands the parser/handlers actually support (see command-parser.ts / handlers.ts).
+ * The canonical command set, in the order they should appear in the bio. Lists EVERY command
+ * the parser/handlers support (see command-parser.ts / handlers.ts) so the About Me advertises
+ * volume, channel, and history alongside playback control. A bio.test.ts consistency check
+ * derives the supported set from the parser and asserts each command name appears here, so a
+ * future parser addition can't silently drift from the bio. Volume's `vol` alias and the
+ * play/`?<url|query>` bare form are intentionally not separate entries (they share a name).
  */
 export const DEFAULT_BIO_COMMANDS: readonly BioCommand[] = [
   { name: "play", args: "<url|search>" },
@@ -30,6 +34,9 @@ export const DEFAULT_BIO_COMMANDS: readonly BioCommand[] = [
   { name: "queue" },
   { name: "np" },
   { name: "remove", args: "<n>" },
+  { name: "volume", args: "<0-200>" },
+  { name: "channel" },
+  { name: "history" },
   { name: "help" },
 ];
 

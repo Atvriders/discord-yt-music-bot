@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyError } from "fastify";
 import cookie from "@fastify/cookie";
 import session from "@fastify/session";
 import rateLimit from "@fastify/rate-limit";
@@ -20,6 +20,23 @@ export interface AppDeps extends RestDeps {
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const app = Fastify({ trustProxy: deps.cfg.trustProxy, logger: false });
+
+  // Defense-in-depth: never let an unexpected throw surface as a 500 that leaks the raw
+  // error message (yt-dlp stderr, filesystem paths, stack traces) to the client. A
+  // malformed-URI error (e.g. a stray decodeURIComponent on a '%') maps to a 400; anything
+  // else becomes a generic 500 with a stable, non-leaky body.
+  app.setErrorHandler((err: FastifyError, req, reply) => {
+    if (err instanceof URIError) {
+      return reply.code(400).send({ error: "bad_request" });
+    }
+    // Preserve explicit statusCodes set by validation/route logic (Fastify sets 4xx on
+    // validation errors); only sanitise genuine 5xx.
+    const status = err.statusCode ?? 500;
+    if (status >= 500) {
+      return reply.code(500).send({ error: "internal_error" });
+    }
+    return reply.code(status).send({ error: err.message });
+  });
 
   await app.register(cookie);
   await app.register(session, {

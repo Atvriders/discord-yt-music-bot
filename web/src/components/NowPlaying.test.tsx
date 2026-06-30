@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, act, cleanup, waitFor } from "@testing-library/react";
+import { render, screen, act, cleanup, waitFor, fireEvent } from "@testing-library/react";
 import { NowPlaying } from "./NowPlaying.js";
 import type { CurrentItem } from "../types.js";
 
@@ -46,13 +46,13 @@ describe("NowPlaying progress bar", () => {
     vi.setSystemTime(t0);
     render(<NowPlaying item={item(10_000, 100_000)} paused={false} receivedAt={t0} />);
     // Right after receipt: ~0:10 elapsed.
-    expect(screen.getByText("0:10")).toBeTruthy();
+    screen.getByText("0:10");
     // Advance 5s of wall-clock + fire the tick interval.
     act(() => {
       vi.setSystemTime(t0 + 5_000);
       vi.advanceTimersByTime(600);
     });
-    expect(screen.getByText("0:15")).toBeTruthy();
+    screen.getByText("0:15");
   });
 
   it("freezes the elapsed time while paused", () => {
@@ -60,13 +60,13 @@ describe("NowPlaying progress bar", () => {
     const t0 = 2_000_000;
     vi.setSystemTime(t0);
     render(<NowPlaying item={item(30_000, 100_000)} paused={true} receivedAt={t0} />);
-    expect(screen.getByText("0:30")).toBeTruthy();
+    screen.getByText("0:30");
     act(() => {
       vi.setSystemTime(t0 + 9_000);
       vi.advanceTimersByTime(1_000);
     });
     // Still 0:30 — paused must not advance.
-    expect(screen.getByText("0:30")).toBeTruthy();
+    screen.getByText("0:30");
   });
 
   it("renders a progress bar whose width reflects elapsed/duration", () => {
@@ -86,12 +86,21 @@ describe("NowPlaying progress bar", () => {
         receivedAt={0}
       />,
     );
-    expect(screen.getByText("opus · 160 kbps · 48 kHz")).toBeTruthy();
+    screen.getByText("opus · 160 kbps · 48 kHz");
   });
 
   it("renders no audio line when audio is null", () => {
     render(<NowPlaying item={item(0, 100_000, null)} paused={true} receivedAt={0} />);
     expect(screen.queryByText(/kbps/)).toBeNull();
+  });
+
+  it("renders a placeholder (no empty-src img) when the hero thumbnail is null", () => {
+    // item()'s default thumbnailUrl is null. The hero must NOT emit <img src=""> (a
+    // spurious same-origin GET + broken-image icon) — it renders a styled placeholder.
+    render(<NowPlaying item={item(0, 100_000, null)} paused={true} receivedAt={0} />);
+    screen.getByTestId("now-playing-thumb-placeholder");
+    // No hero <img> at all when the thumbnail is null (the 132px hero slot is the placeholder).
+    expect(document.querySelector("img[width='132']")).toBeNull();
   });
 });
 
@@ -99,12 +108,12 @@ describe("NowPlaying scrubbing", () => {
   it("is read-only (role=progressbar, no slider) when canSeek is false", () => {
     render(<NowPlaying item={item(0, 100_000)} paused={true} receivedAt={0} />);
     expect(screen.queryByRole("slider")).toBeNull();
-    expect(screen.getByRole("progressbar")).toBeTruthy();
+    screen.getByRole("progressbar");
   });
 
   it("exposes a slider when canSeek and the track has a duration", () => {
     render(<NowPlaying item={item(0, 100_000)} paused={true} receivedAt={0} canSeek onSeek={() => {}} />);
-    expect(screen.getByRole("slider", { name: /seek/i })).toBeTruthy();
+    screen.getByRole("slider", { name: /seek/i });
   });
 
   it("stays read-only for a live stream (no duration) even when canSeek", () => {
@@ -141,9 +150,9 @@ describe("NowPlaying scrubbing", () => {
     // pointerdown at 10% (=20s -> 0:20), then MOVE to 50% (=100s -> 1:40). The display
     // must CHANGE to 1:40, so onPointerMove is load-bearing for this assertion.
     pointer(slider, "pointerdown", 100);
-    expect(screen.getByText("0:20")).toBeTruthy();
+    screen.getByText("0:20");
     pointer(slider, "pointermove", 500);
-    expect(screen.getByText("1:40")).toBeTruthy();
+    screen.getByText("1:40");
     expect(screen.queryByText("0:20")).toBeNull();
     expect(onSeek).not.toHaveBeenCalled();
   });
@@ -171,7 +180,33 @@ describe("NowPlaying scrubbing", () => {
     // The rejection drops the hold (no confirming snapshot would ever arrive), so the
     // "seeking…" indicator clears and the bar falls back to the server position (0:10).
     await waitFor(() => expect(screen.queryByTestId("seeking-indicator")).toBeNull());
-    expect(screen.getByText("0:10")).toBeTruthy();
+    screen.getByText("0:10");
+  });
+
+  it("a superseded seek's late rejection does NOT clear the newer gesture's hold", async () => {
+    stubRect(1000, 0);
+    // First onSeek rejects (held), second stays pending. The first's late rejection must
+    // be a no-op so the second gesture's optimistic hold (target B) survives.
+    let rejectA!: (e: unknown) => void;
+    const onSeek = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise((_res, rej) => { rejectA = rej; }))
+      .mockImplementationOnce(() => new Promise(() => {})); // pending forever
+    render(<NowPlaying item={item(0, 200_000)} paused receivedAt={100} canSeek onSeek={onSeek} />);
+    const slider = screen.getByRole("slider", { name: /seek/i });
+    // Gesture A -> target 25% (50s).
+    pointer(slider, "pointerdown", 250);
+    pointer(slider, "pointerup", 250);
+    // Gesture B -> target 50% (1:40), still in flight.
+    pointer(slider, "pointerdown", 500);
+    pointer(slider, "pointerup", 500);
+    expect(onSeek).toHaveBeenNthCalledWith(1, 50_000);
+    expect(onSeek).toHaveBeenNthCalledWith(2, 100_000);
+    // Now A rejects late — it is superseded, so it must NOT drop B's hold.
+    await act(async () => { rejectA(new Error("stale")); });
+    // B's optimistic hold survives: still seeking, still showing target B (1:40).
+    expect(screen.getByTestId("seeking-indicator")).toBeTruthy();
+    screen.getByText("1:40");
   });
 
   it("clears a stale optimistic hold when the bar loses interactivity (canSeek -> false)", () => {
@@ -183,7 +218,7 @@ describe("NowPlaying scrubbing", () => {
     const slider = screen.getByRole("slider", { name: /seek/i });
     pointer(slider, "pointerdown", 500);
     pointer(slider, "pointerup", 500);
-    expect(screen.getByTestId("seeking-indicator")).toBeTruthy();
+    screen.getByTestId("seeking-indicator");
     // Socket drops to forbidden/closed: canSeek flips false. No confirming snapshot can
     // arrive, so the hold must be released rather than freezing on the target.
     rerender(<NowPlaying item={item(10_000, 200_000)} paused receivedAt={100} canSeek={false} onSeek={onSeek} />);
@@ -223,10 +258,10 @@ describe("NowPlaying scrubbing", () => {
     // The new WS snapshot has NOT arrived yet: same receivedAt, still old positionMs.
     // The bar must NOT snap back to 0:10 — it holds the seek target (1:40).
     rerender(<NowPlaying item={item(10_000, 200_000)} paused={true} receivedAt={100} canSeek onSeek={onSeek} />);
-    expect(screen.getByText("1:40")).toBeTruthy();
+    screen.getByText("1:40");
     expect(screen.queryByText("0:10")).toBeNull();
     // A "seeking" affordance is shown while we wait for confirmation.
-    expect(screen.getByTestId("seeking-indicator")).toBeTruthy();
+    screen.getByTestId("seeking-indicator");
   });
 
   it("releases the optimistic hold once the confirming snapshot lands", () => {
@@ -240,9 +275,58 @@ describe("NowPlaying scrubbing", () => {
     pointer(slider, "pointerup", 500);
     // New snapshot arrives (new receivedAt) reflecting the seeked position (1:40).
     rerender(<NowPlaying item={item(100_000, 200_000)} paused={true} receivedAt={200} canSeek onSeek={onSeek} />);
-    expect(screen.getByText("1:40")).toBeTruthy();
+    screen.getByText("1:40");
     // Hold released: seeking affordance gone, bar follows the server again.
     expect(screen.queryByTestId("seeking-indicator")).toBeNull();
+  });
+
+  it("is keyboard-operable: the slider is focusable and Arrow/Home/End seek", () => {
+    const onSeek = vi.fn();
+    const make = () => render(<NowPlaying item={item(10_000, 200_000)} paused receivedAt={100} canSeek onSeek={onSeek} />);
+    // Focusable + horizontal slider for keyboard/screen-reader users.
+    const { unmount } = make();
+    let slider = screen.getByRole("slider", { name: /seek/i });
+    expect((slider as HTMLElement).tabIndex).toBe(0);
+    expect(slider.getAttribute("aria-orientation")).toBe("horizontal");
+    // ArrowRight nudges +5s from the shown 0:10 => 15s.
+    fireEvent.keyDown(slider, { key: "ArrowRight" });
+    expect(onSeek).toHaveBeenLastCalledWith(15_000);
+
+    // Remount for an independent shown position (avoid the prior optimistic hold).
+    unmount();
+    make();
+    slider = screen.getByRole("slider", { name: /seek/i });
+    // PageUp pages +30s from the shown 0:10 => 40s.
+    fireEvent.keyDown(slider, { key: "PageUp" });
+    expect(onSeek).toHaveBeenLastCalledWith(40_000);
+    // End jumps to the duration; Home jumps to 0 (absolute, independent of prior).
+    fireEvent.keyDown(slider, { key: "End" });
+    expect(onSeek).toHaveBeenLastCalledWith(200_000);
+    fireEvent.keyDown(slider, { key: "Home" });
+    expect(onSeek).toHaveBeenLastCalledWith(0);
+  });
+
+  it("clamps keyboard seeks to [0, duration] and ignores non-scrub keys", () => {
+    const onSeek = vi.fn();
+    render(<NowPlaying item={item(2_000, 200_000)} paused receivedAt={100} canSeek onSeek={onSeek} />);
+    const slider = screen.getByRole("slider", { name: /seek/i });
+    // ArrowLeft from 2s would be -3s — clamps to 0.
+    fireEvent.keyDown(slider, { key: "ArrowLeft" });
+    expect(onSeek).toHaveBeenLastCalledWith(0);
+    // A non-scrub key (Tab) does nothing.
+    onSeek.mockClear();
+    fireEvent.keyDown(slider, { key: "Tab" });
+    expect(onSeek).not.toHaveBeenCalled();
+  });
+
+  it("is NOT keyboard-seekable when read-only (no tabIndex, no key handler)", () => {
+    const onSeek = vi.fn();
+    render(<NowPlaying item={item(10_000, 200_000)} paused receivedAt={100} />);
+    const bar = screen.getByRole("progressbar");
+    // Read-only bar is inert: not in the tab order and ignores scrub keys.
+    expect((bar as HTMLElement).tabIndex).toBe(-1);
+    fireEvent.keyDown(bar, { key: "ArrowRight" });
+    expect(onSeek).not.toHaveBeenCalled();
   });
 
   it("follows the new server position after a confirmed seek, not the stale target", () => {
@@ -257,6 +341,6 @@ describe("NowPlaying scrubbing", () => {
     // Confirming snapshot, then a later snapshot the server moved on to (1:45).
     rerender(<NowPlaying item={item(100_000, 200_000)} paused={true} receivedAt={200} canSeek onSeek={onSeek} />);
     rerender(<NowPlaying item={item(105_000, 200_000)} paused={true} receivedAt={300} canSeek onSeek={onSeek} />);
-    expect(screen.getByText("1:45")).toBeTruthy();
+    screen.getByText("1:45");
   });
 });

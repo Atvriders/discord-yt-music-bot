@@ -57,7 +57,7 @@ describe("VoiceSession", () => {
     expect(onErr).toHaveBeenCalledWith(err);
   });
 
-  it("play/pause/resume/skip delegate to the player", () => {
+  it("play/pause/resume/skip/stop delegate to the player with the right force flag", () => {
     const { session, player } = makeSession();
     const res = {} as never;
     session.play(res);
@@ -66,8 +66,40 @@ describe("VoiceSession", () => {
     expect(player.pause).toHaveBeenCalled();
     session.resume();
     expect(player.unpause).toHaveBeenCalled();
+    // skip() = player.stop() WITHOUT force (honors silence padding). A collapse of skip into
+    // stop would pass force=true and be caught here.
     session.skip();
-    expect(player.stop).toHaveBeenCalled();
+    expect(player.stop).toHaveBeenLastCalledWith();
+    // stop() = player.stop(true) (force, bypasses padding) — semantically distinct from skip().
+    session.stop();
+    expect(player.stop).toHaveBeenLastCalledWith(true);
+  });
+
+  it("keeps a permanent error listener so a stray error after destroy can't crash the process", () => {
+    // AudioPlayer has no internal self-listener; a listener-less "error" is converted by Node
+    // into an unhandled exception (process crash). The session attaches a permanent noop guard
+    // that is NEVER removed, so even after destroy() detaches the forwarding listener the
+    // player always retains an "error" handler. Emitting "error" after destroy must NOT throw.
+    const { session, player } = makeSession();
+    session.destroy();
+    expect(() => player.emit("error", new Error("stray after destroy"))).not.toThrow();
+    expect(player.listenerCount("error")).toBeGreaterThanOrEqual(1);
+  });
+
+  it("destroy removes the forwarding listeners so the session no longer reacts", () => {
+    // After destroy() the session must not fire trackEnd/error onto its (now-stale) consumer —
+    // critical for the moveTo/reconnect flow where a torn-down session's player must not drive
+    // the new session's controller. (The permanent error guard remains, so emit("error") is safe.)
+    const { session, player } = makeSession();
+    const onEnd = vi.fn();
+    const onErr = vi.fn();
+    session.on("trackEnd", onEnd);
+    session.on("error", onErr);
+    session.destroy();
+    player.transition("playing", "idle");
+    player.emit("error", new Error("x"));
+    expect(onEnd).not.toHaveBeenCalled();
+    expect(onErr).not.toHaveBeenCalled();
   });
 
   it("emits idle after the timeout, and cancel prevents it", () => {
@@ -149,5 +181,36 @@ describe("VoiceSession", () => {
     session.destroy();
     session.destroy();
     expect(conn.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it("destroy force-stops the player BEFORE destroying the connection (reaps ffmpeg)", () => {
+    // Forcing the player Idle first makes @discordjs/voice destroy the resource's
+    // playStream, which propagates to ff.stdout 'close' and triggers the SIGKILL reaper,
+    // preventing orphaned ffmpeg children on mid-playback teardown.
+    const { session, player, conn } = makeSession();
+    const order: string[] = [];
+    player.stop.mockImplementation(() => {
+      order.push("stop");
+      return true;
+    });
+    conn.destroy.mockImplementation(() => {
+      order.push("destroy");
+    });
+    session.destroy();
+    expect(player.stop).toHaveBeenCalledWith(true);
+    expect(order).toEqual(["stop", "destroy"]);
+  });
+
+  it("destroy does NOT emit trackEnd (listener removed before the forced stop)", () => {
+    const { session, player } = makeSession();
+    const onEnd = vi.fn();
+    session.on("trackEnd", onEnd);
+    // Simulate the forced stop driving the player to idle on destroy.
+    player.stop.mockImplementation(() => {
+      player.transition("playing", "idle");
+      return true;
+    });
+    session.destroy();
+    expect(onEnd).not.toHaveBeenCalled();
   });
 });

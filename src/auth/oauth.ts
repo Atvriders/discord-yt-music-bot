@@ -1,6 +1,9 @@
 import crypto from "node:crypto";
 import type { WebConfig } from "../config.js";
 
+/** Per-request timeout for outbound Discord OAuth calls (token/identity/revoke). */
+const OAUTH_FETCH_TIMEOUT_MS = 8000;
+
 export const DISCORD = {
   AUTHORIZE_URL: "https://discord.com/oauth2/authorize",
   TOKEN_URL: "https://discord.com/api/oauth2/token",
@@ -82,6 +85,10 @@ export async function exchangeCode(
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body,
+    // Cap a hung/slow Discord token endpoint so it can't tie up the /auth/callback request
+    // (and a Fastify worker) for minutes on the undici default ~300s headers timeout. The
+    // resulting AbortError flows through the same catch in routes.ts -> 502 oauth_failed.
+    signal: AbortSignal.timeout(OAUTH_FETCH_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`token exchange failed (${res.status})`);
   const token = (await res.json()) as TokenResponse;
@@ -95,6 +102,7 @@ export async function exchangeCode(
 export async function fetchIdentity(accessToken: string): Promise<DiscordUser> {
   const res = await fetch(DISCORD.USER_URL, {
     headers: { authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(OAUTH_FETCH_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`identity fetch failed (${res.status})`);
   return (await res.json()) as DiscordUser;
@@ -108,5 +116,7 @@ export async function revokeToken(
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ client_id: cfg.clientId, client_secret: cfg.clientSecret, token }),
+    signal: AbortSignal.timeout(OAUTH_FETCH_TIMEOUT_MS),
+    // Revocation is best-effort; a timeout (AbortError) is swallowed here like any failure.
   }).catch(() => undefined);
 }

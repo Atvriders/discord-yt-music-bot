@@ -117,6 +117,43 @@ describe("GuildController playlists", () => {
     expect(ids).toEqual(["aaaaaaaaaaa", "bbbbbbbbbbb"]);
   });
 
+  it("loadPlaylist enforces the maxTrackDurationSec cap, skipping over-limit tracks", async () => {
+    // A saved playlist must not be a back door around an admin's length cap: loadPlaylist
+    // applies the SAME authoritative maxTrackDurationSec guard enqueue() applies, SKIPPING
+    // over-limit tracks (so one long track can't abort the whole load) and counting only the
+    // accepted ones.
+    const { ctrl, playlists } = await makeCtrl(dir);
+    // meta() tracks are 100s; cap at 150 so they pass and only the 200s track is rejected.
+    ctrl.updateSettings({ maxTrackDurationSec: 150 }); // authoritative per-guild cap
+    const longMeta: TrackMeta = { ...meta("ccccccccccc"), durationSec: 200 }; // over the cap
+    await playlists.save("G1", "mix", [meta("aaaaaaaaaaa"), longMeta, meta("bbbbbbbbbbb")]);
+    await ctrl.ensureConnected("C1");
+    const n = await ctrl.loadPlaylist("mix", requester);
+    // Only the two within-cap tracks were enqueued; the 200s track was skipped.
+    expect(n).toBe(2);
+    await new Promise((r) => setTimeout(r, 0));
+    const snap = ctrl.snapshot();
+    const ids = [
+      ...(snap.current ? [snap.current.meta.videoId] : []),
+      ...snap.upcoming.map((i) => i.meta.videoId),
+    ];
+    expect(ids).toEqual(["aaaaaaaaaaa", "bbbbbbbbbbb"]);
+    expect(ids).not.toContain("ccccccccccc");
+  });
+
+  it("loadPlaylist resets the autoplay chain so the loaded tracks get a fresh follow-on budget", async () => {
+    // A real user-initiated load mirrors enqueue()'s autoplayChain reset: loading a playlist
+    // after an autoplay chain was in progress must give the fresh queue a full follow-on budget.
+    const { ctrl, playlists } = await makeCtrl(dir);
+    await playlists.save("G1", "mix", [meta("aaaaaaaaaaa")]);
+    await ctrl.ensureConnected("C1");
+    // Drive autoplayChain above 0 via the private field (no public setter; mirrors how autoplay
+    // would have incremented it during a prior chain).
+    (ctrl as unknown as { autoplayChain: number }).autoplayChain = 5;
+    await ctrl.loadPlaylist("mix", requester);
+    expect((ctrl as unknown as { autoplayChain: number }).autoplayChain).toBe(0);
+  });
+
   it("loadPlaylist returns 0 (no enqueue) for an unknown name", async () => {
     const { ctrl } = await makeCtrl(dir);
     await ctrl.ensureConnected("C1");

@@ -33,6 +33,38 @@ describe("parseInput — rejections", () => {
   it("rejects an empty string", () => {
     expect(parseInput("   ").kind).toBe("reject");
   });
+
+  // youtu.be reject branch (url-parser.ts:36-40): the `?? ""` fallback + VIDEO_ID guard.
+  it.each([
+    "https://youtu.be/", // empty path → id="" via the ?? "" fallback
+    "https://youtu.be/tooshort", // 8 chars
+    "https://youtu.be/TooLongXXXXX", // 12 chars
+    "https://youtu.be/invalid!chars", // invalid character
+  ])("rejects a youtu.be link with an invalid/missing id: %s", (url) => {
+    expect(parseInput(url)).toEqual({ kind: "reject", reason: "invalid youtu.be video id" });
+  });
+
+  // Path-prefix routes (/shorts/, /embed/, /live/, /v/) with a malformed or missing
+  // candidate id fall through to the playlist-then-generic-reject chain (url-parser.ts:47-57).
+  it.each([
+    "https://www.youtube.com/shorts/notvalidXX", // bad chars
+    "https://www.youtube.com/embed/tooshort", // wrong length
+    "https://www.youtube.com/live/", // missing candidate (no segs[1])
+    "https://www.youtube.com/v/!!!", // invalid id
+  ])("rejects a path-prefix route with an invalid/missing id: %s", (url) => {
+    expect(parseInput(url).kind).toBe("reject");
+  });
+
+  // `?v=` with an invalid id and no list param → the line-57 generic reject branch.
+  it("rejects a watch URL whose v param is not a valid 11-char id (no list)", () => {
+    expect(parseInput("https://www.youtube.com/watch?v=tooshort")).toEqual({
+      kind: "reject",
+      reason: expect.stringContaining("video id"),
+    });
+  });
+  it("rejects a watch URL whose 11-char v param contains an invalid character", () => {
+    expect(parseInput("https://www.youtube.com/watch?v=dQw4w9WgX!Q").kind).toBe("reject");
+  });
 });
 
 describe("parseInput — queries", () => {

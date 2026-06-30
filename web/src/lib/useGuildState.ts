@@ -84,6 +84,12 @@ export function useGuildState(guildId: string | null): WsState {
     let socket: WebSocket | null = null;
     let attempt = 0; // failed-connection counter, drives the backoff schedule
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    // Permission errors are PERMANENT for this guild: once the server sends `error`
+    // or `revoked`, reconnecting just gets rejected again. Latch a flag so every
+    // reconnect entry point (backoff, visibilitychange, window online) stops
+    // recreating sockets — otherwise a forbidden guild loops forever, opening a new
+    // socket each backoff interval. Reset per guildId change (the effect re-runs).
+    let forbidden = false;
 
     const clearRetry = () => {
       if (retryTimer !== null) {
@@ -93,7 +99,7 @@ export function useGuildState(guildId: string | null): WsState {
     };
 
     const scheduleReconnect = () => {
-      if (unmounted || retryTimer !== null) return;
+      if (unmounted || forbidden || retryTimer !== null) return;
       const delay = reconnectDelayMs(attempt);
       attempt += 1;
       retryTimer = setTimeout(() => {
@@ -133,7 +139,14 @@ export function useGuildState(guildId: string | null): WsState {
       });
       ws.addEventListener("message", (e) => {
         if (ws._dead) return;
-        dispatch({ raw: String(e.data) });
+        const raw = String(e.data);
+        // Latch the permanent-permission-error stop BEFORE dispatch so the close that
+        // typically follows an error/revoked frame doesn't schedule a doomed reconnect.
+        try {
+          const type = (JSON.parse(raw) as { type?: string }).type;
+          if (type === "error" || type === "revoked") forbidden = true;
+        } catch { /* malformed frame — the reducer ignores it */ }
+        dispatch({ raw });
       });
       const onDown = () => {
         if (ws._dead || ws !== socket) return; // a stale/replaced socket
@@ -148,7 +161,7 @@ export function useGuildState(guildId: string | null): WsState {
     // Reconnect immediately (no backoff wait) when the user returns to the tab or the
     // network comes back — but only if we don't already have a live/connecting socket.
     const reconnectNow = () => {
-      if (unmounted) return;
+      if (unmounted || forbidden) return;
       const ready = socket?.readyState;
       if (ready === WebSocket.OPEN || ready === WebSocket.CONNECTING) return;
       clearRetry();

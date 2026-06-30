@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { GuildSettings, Me, PlaylistSummary, TrackMeta, VoiceChannel } from "../types.js";
+import type {
+  GuildSettings,
+  Me,
+  PlaylistSummary,
+  TextChannel,
+  TrackMeta,
+  VoiceChannel,
+} from "../types.js";
 import { api, ApiError, type ControlAction } from "../lib/api.js";
 import { useGuildState } from "../lib/useGuildState.js";
 import { Grain } from "./Grain.js";
@@ -70,6 +77,8 @@ export function App() {
   // failed" so the picker can show a recoverable error rather than vanishing silently.
   const [channelsLoadFailed, setChannelsLoadFailed] = useState(false);
   const [voiceChannelId, setVoiceChannelId] = useState<string | null>(null);
+  // The guild's text channels, for the single-channel command-restriction picker.
+  const [textChannels, setTextChannels] = useState<TextChannel[]>([]);
   const [playlists, setPlaylists] = useState<PlaylistSummary[]>([]);
   // True once the user manually picks a channel for this guild, so later channel
   // refreshes don't clobber their choice with the auto-detected current channel.
@@ -149,6 +158,18 @@ export function App() {
     if (!guildId) { setChannels([]); setVoiceChannelId(null); setChannelsLoadFailed(false); return; }
     loadChannels(guildId);
   }, [guildId, loadChannels]);
+
+  // Load the guild's text channels for the command-channel picker. Non-fatal on failure —
+  // the picker simply shows just the "Any channel" option (plus the persisted value, if any).
+  useEffect(() => {
+    if (!guildId) { setTextChannels([]); return; }
+    let cancelled = false;
+    api
+      .textChannels(guildId)
+      .then((r) => { if (!cancelled) setTextChannels(r.channels ?? []); })
+      .catch(() => { if (!cancelled) setTextChannels([]); });
+    return () => { cancelled = true; };
+  }, [guildId]);
 
   // Load this guild's saved playlists (and clear them on guild switch). A fetch failure
   // is non-fatal — the panel just shows an empty list.
@@ -297,7 +318,7 @@ export function App() {
   // internally). The bulk path below aggregates these into one summary banner so
   // queuing N tracks no longer stomps N-1 results onto a single banner.
   const pickOne = useCallback(
-    async (videoId: string): Promise<{ ok: boolean; title?: string; reason?: string }> => {
+    async (videoId: string): Promise<{ ok: boolean; title?: string; reason?: string; moveSuppressed?: boolean }> => {
       if (!guildId) return { ok: false, reason: "No server selected" };
       if (noVoiceTarget) return { ok: false, reason: "Pick a voice channel first" };
       const gen = genRef.current;
@@ -306,7 +327,7 @@ export function App() {
         // The guild changed while this pick was in flight — drop the stale result so
         // we never report (or refresh) into a now-different guild.
         if (genRef.current !== gen) return { ok: false, reason: "stale" };
-        return { ok: true, title: r.queued?.title };
+        return { ok: true, title: r.queued?.title, moveSuppressed: !!r.moveSuppressed };
       } catch (err) {
         const reason = err instanceof ApiError ? err.message : "Something went wrong";
         return { ok: false, reason };
@@ -326,18 +347,21 @@ export function App() {
         showBanner({ kind: "error", text: "Pick a voice channel first" });
         return false;
       }
-      const results: { ok: boolean; title?: string; reason?: string }[] = [];
+      const results: { ok: boolean; title?: string; reason?: string; moveSuppressed?: boolean }[] = [];
       for (const id of videoIds) results.push(await pickOne(id)); // sequential => ordered
       const ok = results.filter((r) => r.ok);
       const failed = results.filter((r) => !r.ok && r.reason !== "stale");
       if (ok.length === 0 && failed.length === 0) return false; // all stale (guild switched)
+      // If any successful pick reported the bot couldn't move, surface that note (matching
+      // the single-link path's announceQueued / onRequeue / onLoadPlaylist messaging).
+      const moveNote = ok.some((r) => r.moveSuppressed) ? " — only an admin can move the bot" : "";
       if (failed.length === 0) {
         showBanner({
           kind: "success",
           text:
-            ok.length === 1 && ok[0]!.title
+            (ok.length === 1 && ok[0]!.title
               ? `Queued: ${ok[0]!.title}`
-              : `Queued ${ok.length} track${ok.length === 1 ? "" : "s"}`,
+              : `Queued ${ok.length} track${ok.length === 1 ? "" : "s"}`) + moveNote,
         });
       } else if (ok.length === 0) {
         const reason = failed[0]!.reason ?? "failed";
@@ -427,7 +451,8 @@ export function App() {
     const r = await pickOne(videoId);
     if (r.reason === "stale") return;
     if (r.ok) {
-      showBanner({ kind: "success", text: r.title ? `Queued: ${r.title}` : "Re-queued" });
+      const note = r.moveSuppressed ? " — only an admin can move the bot" : "";
+      showBanner({ kind: "success", text: (r.title ? `Queued: ${r.title}` : "Re-queued") + note });
       await refreshIfNotLive();
     } else {
       showBanner({ kind: "error", text: `Couldn't re-queue — ${r.reason ?? "failed"}` });
@@ -512,7 +537,12 @@ export function App() {
             <NowPlaying
               item={snap?.current ?? null}
               guildId={guildId}
-              paused={snap?.paused ?? false}
+              // Use the local optimistic `paused` (not the snapshot's) so the progress bar
+              // freezes in lockstep with the Visualizer (`playing`) and the Controls label
+              // during the optimistic window. The serverPaused effect (above) reconciles
+              // `paused` to the authoritative value on the next WS snapshot, so server truth
+              // still wins shortly after — this just removes the bar/visualizer/label desync.
+              paused={paused}
               playing={!!snap?.current && !paused}
               receivedAt={live.receivedAt}
               canSeek={live.status === "live" && !!snap?.current}
@@ -551,6 +581,8 @@ export function App() {
                   maxTrackDurationSec={snap?.maxTrackDurationSec}
                   volume={snap?.volume}
                   fx={snap?.fx}
+                  commandChannelId={snap?.commandChannelId ?? null}
+                  textChannels={textChannels}
                   disabled={live.status === "forbidden"}
                   onChange={onSetIdleTimeout}
                   onAudioChange={onPatchSettings}
@@ -573,11 +605,15 @@ export function App() {
               </span>
             </div>
             {banner && <StatusBanner msg={banner} onDismiss={dismissBanner} />}
+            {/* key={guildId} remounts these on a guild switch so their local search/candidate
+                state (and the Picker's selection) resets — otherwise a stale candidate list
+                from guild A could be queued into guild B, since the queue handlers close over
+                the CURRENT guildId. */}
             <div className="reveal" style={{ animationDelay: "180ms" }}>
-              <AddBar onPlay={onPlay} onQueueAll={onQueueAll} busy={noVoiceTarget} />
+              <AddBar key={guildId} onPlay={onPlay} onQueueAll={onQueueAll} busy={noVoiceTarget} />
             </div>
             <div className="reveal" style={{ animationDelay: "220ms" }}>
-              <Discover onSearch={onPlay} onQueueAll={onQueueAll} busy={noVoiceTarget} />
+              <Discover key={guildId} onSearch={onPlay} onQueueAll={onQueueAll} busy={noVoiceTarget} />
             </div>
             <div className="reveal" style={{ animationDelay: "260ms" }}>
               <Queue items={snap?.upcoming ?? []} current={snap?.current ?? null} onRemove={onRemove} onReorder={onReorder} onShuffle={onShuffle} onPlayNext={onPlayNext} onJump={onJump} autoplay={snap?.autoplay ?? false} autoplaySource={snap?.autoplaySource ?? "radio"} onToggleAutoplay={onPatchSettings} />
@@ -595,6 +631,10 @@ export function App() {
           style={{ color: "var(--color-ink-faint)", animationDelay: "380ms", letterSpacing: "0.02em" }}
         >
           the real audio from the exact video — never a mirror track · YouTube Music Bot
+          <span className="block mt-1" style={{ opacity: 0.65 }}>
+            Not affiliated with or endorsed by YouTube or Google. &ldquo;YouTube&rdquo; is a trademark of
+            Google LLC.
+          </span>
         </footer>
       </div>
     </div>

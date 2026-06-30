@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, cleanup, waitFor, act } from "@testing-library/react";
 import { Picker } from "./Picker.js";
 import type { TrackMeta } from "../types.js";
 
@@ -112,6 +112,30 @@ describe("Picker (multi-select)", () => {
     // Teardown is gated on success: onQueued NOT called, selection preserved for retry.
     expect(onQueued).not.toHaveBeenCalled();
     expect(row("Title aaaaaaaaaaa").getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("disables the queue button and row toggles WHILE a queue is in flight (re-entrancy guard)", async () => {
+    let resolve!: (v: boolean) => void;
+    const p = new Promise<boolean>((r) => { resolve = r; });
+    const onQueueSelected = vi.fn(() => p);
+    render(
+      <Picker
+        candidates={[track("aaaaaaaaaaa"), track("bbbbbbbbbbb")]}
+        onQueueSelected={onQueueSelected}
+        onQueued={() => {}}
+      />,
+    );
+    fireEvent.click(row("Title aaaaaaaaaaa"));
+    fireEvent.click(screen.getByRole("button", { name: /queue 1 selected/i }));
+    // Mid-flight: the queue button shows the spinner label and the row toggles disable,
+    // so no second submit / no selection change can slip through.
+    await screen.findByText(/queuing/i);
+    expect((row("Title aaaaaaaaaaa")).disabled).toBe(true);
+    expect((row("Title bbbbbbbbbbb")).disabled).toBe(true);
+    // Resolve → controls re-enable and the selection clears (button gone).
+    await act(async () => { resolve(true); });
+    await waitFor(() => expect(screen.queryByRole("button", { name: /queue \d+ selected/i })).toBeNull());
+    expect((row("Title aaaaaaaaaaa")).disabled).toBe(false);
   });
 
   it("disables the queue button and row toggles when busy", () => {

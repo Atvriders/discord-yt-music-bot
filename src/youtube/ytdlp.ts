@@ -44,6 +44,21 @@ export function runYtDlp(
       child.kill("SIGKILL");
     }, timeoutMs);
 
+    // child.stdout / child.stderr are independent EventEmitters: the 'error' listener on
+    // `child` does NOT catch errors emitted on its streams. In Node, an 'error' event on a
+    // stream with no listener throws synchronously and crashes the process via
+    // uncaughtException (e.g. an OOM-killed yt-dlp tearing down the stdio pipe, or a
+    // platform-level ECONNRESET on the fd). Convert any stream error into a promise
+    // rejection instead. If 'close' has already settled the promise, this reject is a no-op.
+    child.stdout.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.stderr.on("error", () => {
+      // stderr is purely diagnostic; a read error on it must not crash the process. The
+      // stdout 'error' / 'close' paths already settle the promise.
+    });
+
     child.stdout.on("data", (d: Buffer) => {
       const chunk = d.toString();
       stdout += chunk;

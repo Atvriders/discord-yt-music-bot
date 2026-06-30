@@ -53,6 +53,26 @@ describe("runShutdown", () => {
       vi.useRealTimers();
     }
   });
+  it("returns false when the ONLY task resolves after the grace timer (no second exit)", async () => {
+    vi.useFakeTimers();
+    try {
+      const exit = vi.fn();
+      // A single task that finishes only AFTER the grace timer fires. The in-loop
+      // `if (forced) return false` guard never runs (there's no next iteration), so the
+      // post-loop `return !forced` must report the forced shutdown -> false.
+      const p = runShutdown([() => new Promise<void>((res) => setTimeout(res, 8))], {
+        graceMs: 5,
+        exitFn: exit,
+      });
+      await vi.advanceTimersByTimeAsync(6); // grace timer fires -> forced=true, exit(1)
+      await vi.advanceTimersByTimeAsync(3); // task resolves -> loop exits, return !forced
+      expect(await p).toBe(false);
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(exit).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("installSignalHandlers", () => {
@@ -93,6 +113,24 @@ describe("installSignalHandlers", () => {
       await vi.advanceTimersByTimeAsync(10);
       expect(exit).toHaveBeenCalledWith(1);
       expect(exit).not.toHaveBeenCalledWith(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not exit(0) when a SINGLE task resolves only after the grace timer fired", async () => {
+    vi.useFakeTimers();
+    try {
+      const exit = vi.fn();
+      installSignalHandlers([() => new Promise<void>((res) => setTimeout(res, 8))], {
+        graceMs: 5,
+        exitFn: exit,
+      });
+      process.emit("SIGTERM");
+      await vi.advanceTimersByTimeAsync(6); // grace timer -> exit(1)
+      await vi.advanceTimersByTimeAsync(3); // task resolves; runShutdown returns false
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(exit).not.toHaveBeenCalledWith(0); // must NOT double-exit with 0
     } finally {
       vi.useRealTimers();
     }

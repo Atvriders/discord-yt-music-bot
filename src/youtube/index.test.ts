@@ -208,6 +208,13 @@ describe("YouTubeService.resolve", () => {
     await expect(new YouTubeService(cfg).resolve("dQw4w9WgXcQ")).rejects.toMatchObject({
       kind: YtErrorKind.Unknown,
     });
+    // INTENTIONAL: a non-JSON zero-exit is classified as Unknown, which is retryable, so the
+    // WHOLE client ladder is exhausted before surfacing the failure. The rationale is that a
+    // truncated/empty stdout is often a transient per-client extraction hiccup that a
+    // different player_client recovers from (the same reason resolve()/download() retry).
+    // Pin the count so this behavior can't silently change to either 1 (short-circuit) or
+    // some partial run.
+    expect(runMock).toHaveBeenCalledTimes(buildClientLadder(cfg.playerClients).length);
   });
 });
 
@@ -343,8 +350,34 @@ describe("YouTubeService.related", () => {
   });
 
   it("returns [] on a non-zero exit instead of throwing (autoplay is best-effort)", async () => {
-    runMock.mockResolvedValue({ stdout: "", stderr: "ERROR: nope", code: 1 });
+    // EVERY client fails (retryable extraction error), so the whole ladder is exhausted and
+    // the best-effort contract resolves to []. Pin the count to prove the ladder was tried.
+    runMock.mockResolvedValue({
+      stdout: "",
+      stderr: "ERROR: nsig extraction failed: Some formats may be missing",
+      code: 1,
+    });
     await expect(new YouTubeService(cfg).related("seedaaaaaaa")).resolves.toEqual([]);
+    expect(runMock).toHaveBeenCalledTimes(buildClientLadder(cfg.playerClients).length);
+  });
+
+  it("retries across the client ladder when the first client yields a retryable error", async () => {
+    // First-client breakage (the exact scenario the ladder exists for) must NOT permanently
+    // disable autoplay radio: related() advances to the next client and succeeds.
+    runMock
+      .mockResolvedValueOnce({
+        stdout: "",
+        stderr: "ERROR: nsig extraction failed: Some formats may be missing",
+        code: 1,
+      })
+      .mockResolvedValueOnce(ok(JSON.stringify({ entries: [{ id: "bbbbbbbbbbb", title: "B" }] })));
+    const res = await new YouTubeService(cfg).related("seedaaaaaaa");
+    expect(res.map((r) => r.videoId)).toEqual(["bbbbbbbbbbb"]);
+    expect(runMock).toHaveBeenCalledTimes(2);
+    const clientOf = (args: string[]) => args[args.indexOf("--extractor-args") + 1];
+    const c1 = clientOf(runMock.mock.calls[0]![0] as string[]);
+    const c2 = clientOf(runMock.mock.calls[1]![0] as string[]);
+    expect(c2).not.toBe(c1);
   });
 
   it("returns [] when the mix has no entries", async () => {
@@ -485,10 +518,28 @@ describe("YouTubeService.download", () => {
     expect(args[sbIdx + 1]).toBe("sponsor,music_offtopic");
   });
 
-  it("throws when yt-dlp succeeds but no file is produced", async () => {
+  it("throws a classified YtError(Unknown) when yt-dlp succeeds but no file is produced", async () => {
     const dir = await mkdtemp(join(tmpdir(), "yt-"));
     runMock.mockResolvedValue(ok(""));
-    await expect(new YouTubeService(cfg).download("dQw4w9WgXcQ", dir)).rejects.toThrow();
+    // Pin the classified domain-error contract (not just "something threw"): the production
+    // path throws YtError(YtErrorKind.Unknown, "download completed but no file…").
+    await expect(new YouTubeService(cfg).download("dQw4w9WgXcQ", dir)).rejects.toMatchObject({
+      kind: YtErrorKind.Unknown,
+    });
+  });
+
+  it("never selects a partial `.part` artifact, even when it sorts first in readdir", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yt-"));
+    // Seed a stale partial from a previously-killed attempt FIRST (so it sorts ahead on most
+    // filesystems), then the real finalized file. download() must return the finalized one.
+    await writeFile(join(dir, "dQw4w9WgXcQ.webm.part"), "partialgarbage");
+    await writeFile(join(dir, "dQw4w9WgXcQ.opus"), "fakeaudio");
+    runMock.mockResolvedValue(ok("AUDIOFMT::opus|160|165|48000\n"));
+    const res = await new YouTubeService(cfg).download("dQw4w9WgXcQ", dir);
+    expect(res.path).toBe(join(dir, "dQw4w9WgXcQ.opus"));
+    // And it passes --no-part so future attempts don't even create a .part artifact.
+    const args = runMock.mock.calls[0]![0] as string[];
+    expect(args).toContain("--no-part");
   });
 
   it("falls back to the next player client when the first download fails, then succeeds", async () => {

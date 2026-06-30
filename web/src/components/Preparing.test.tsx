@@ -43,8 +43,21 @@ describe("Preparing", () => {
     expect(screen.getByText(/Downloading/i)).toBeTruthy();
     // No percent figure yet.
     expect(screen.queryByText(/%/)).toBeNull();
-    // The bar is still present (indeterminate), so the user sees activity.
-    expect(screen.getByTestId("preparing-fill")).toBeTruthy();
+    const fill = screen.getByTestId("preparing-fill") as HTMLElement;
+    // Indeterminate fill is a fixed partial width (NOT a false 0%/45%).
+    expect(fill.style.width).toBe("40%");
+    // ...and it pulses so the user reads it as actively working.
+    expect(fill.className).toContain("animate-pulse");
+    // The progressbar reports no numeric value while indeterminate.
+    expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBeNull();
+  });
+
+  it("exposes the progressbar ARIA value-now when a percent is known (clamped)", () => {
+    const { rerender } = render(<Preparing preparing={dl(45)} />);
+    expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("45");
+    // Over-100 percent clamps to 100 in the reported value too.
+    rerender(<Preparing preparing={dl(140)} />);
+    expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("100");
   });
 
   it("renders a Processing status (no percent bar) for the processing phase", () => {

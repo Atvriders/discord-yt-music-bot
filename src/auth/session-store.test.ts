@@ -13,7 +13,9 @@ describe("MemorySessionStore", () => {
     expect(got).toEqual({ userId: "u1" });
     await p((cb) => s.destroy("sid1", cb));
     const after = await p((cb) => s.get("sid1", cb as never));
-    expect(after ?? null).toBeNull();
+    // Strict null (not `?? null`): the store must call cb(null, null) per the @fastify/session
+    // contract for a missing entry. A regression returning undefined would be caught here.
+    expect(after).toBeNull();
     s.close();
   });
 
@@ -24,7 +26,8 @@ describe("MemorySessionStore", () => {
     expect(s.size).toBe(1);
     t = 1101; // past expiresAt (1000 + 100)
     const got = await p((cb) => s.get("sid1", cb as never));
-    expect(got ?? null).toBeNull();
+    // Strict null: an expired entry must yield cb(null, null), not undefined.
+    expect(got).toBeNull();
     expect(s.size).toBe(0); // get() deletes the expired entry
     s.close();
   });

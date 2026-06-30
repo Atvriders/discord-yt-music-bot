@@ -24,6 +24,11 @@ export function Playlists({
 }) {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
+  // Per-row in-flight guard for Load/Delete so rapid clicks can't fire duplicate
+  // in-flight API calls for the same playlist (a double Delete would 404 the second
+  // request and desync the list). Keyed by playlist name; different rows stay
+  // independently actionable.
+  const [acting, setActing] = useState<Set<string>>(new Set());
 
   const trimmed = name.trim();
   const canSave = !disabled && !busy && trimmed.length > 0;
@@ -34,8 +39,29 @@ export function Playlists({
     try {
       await onSave(trimmed);
       setName("");
+    } catch {
+      // The parent surfaces error banners; swallow here so a rejected save doesn't become
+      // an unhandled promise rejection. The typed name is intentionally left intact (NOT
+      // cleared) so the user can retry, and the finally still re-enables the Save button.
     } finally {
       setBusy(false);
+    }
+  };
+
+  const run = async (target: string, fn: (name: string) => Promise<void> | void) => {
+    if (acting.has(target)) return; // already in flight for this row — ignore the dup
+    setActing((s) => new Set(s).add(target));
+    try {
+      await fn(target);
+    } catch {
+      // The parent surfaces error banners; swallow here so a rejection doesn't become
+      // an unhandled promise rejection. The finally still releases the row guard.
+    } finally {
+      setActing((s) => {
+        const n = new Set(s);
+        n.delete(target);
+        return n;
+      });
     }
   };
 
@@ -152,8 +178,8 @@ export function Playlists({
                 <button
                   type="button"
                   aria-label={`Load ${p.name}`}
-                  disabled={disabled}
-                  onClick={() => void onLoad(p.name)}
+                  disabled={disabled || acting.has(p.name)}
+                  onClick={() => void run(p.name, onLoad)}
                   className="pill pill-ghost"
                   style={{ padding: "0.3rem 0.75rem", fontSize: "0.75rem" }}
                 >
@@ -162,8 +188,8 @@ export function Playlists({
                 <button
                   type="button"
                   aria-label={`Delete ${p.name}`}
-                  disabled={disabled}
-                  onClick={() => void onDelete(p.name)}
+                  disabled={disabled || acting.has(p.name)}
+                  onClick={() => void run(p.name, onDelete)}
                   className="pill pill-ghost"
                   style={{ padding: "0.3rem 0.75rem", fontSize: "0.75rem" }}
                 >

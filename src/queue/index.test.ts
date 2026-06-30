@@ -149,6 +149,40 @@ describe("GuildQueue", () => {
     expect(q.snapshot().history).toEqual([]);
   });
 
+  it("requeueHistory replays the FULL set even when it exceeds historyMax (no dropped tracks)", async () => {
+    // Regression: repeat-all recycled off the bounded display-history ring (historyMax=2), so a
+    // queue larger than the cap silently dropped every track past the cap on the 2nd lap.
+    // requeueHistory must rebuild from the UNCAPPED played buffer, replaying all tracks in order.
+    const q = newQueue(); // historyMax 2
+    const ids = ["aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc", "ddddddddddd", "eeeeeeeeeee"];
+    for (const v of ids) await q.add(meta(v), requester);
+    // Advance 5×: A..D roll into history/played, E becomes current (upcoming drains to empty).
+    for (let i = 0; i < ids.length; i++) await q.advance();
+    expect(q.current?.meta.videoId).toBe("eeeeeeeeeee");
+    expect(q.snapshot().upcoming).toEqual([]);
+    // Display history is still bounded (last 2 of the 4 archived: C, D) — cap intact for Replay.
+    expect(q.snapshot().history.map((i) => i.meta.videoId)).toEqual(["ccccccccccc", "ddddddddddd"]);
+
+    const n = await q.requeueHistory();
+    expect(n).toBe(5); // ALL five recycled, not just the 2 that survived the history cap
+    expect(q.snapshot().upcoming.map((i) => i.meta.videoId)).toEqual(ids);
+    expect(q.snapshot().history).toEqual([]);
+  });
+
+  it("clear() drops the uncapped played buffer so a later repeat-all requeue is empty", async () => {
+    // Stop ends the repeat-all cycle: after clear(), requeueHistory must NOT resurrect tracks
+    // from the stopped session (the display history is kept, but the cycle buffer is dropped).
+    const q = newQueue();
+    await q.add(meta("aaaaaaaaaaa"), requester);
+    await q.add(meta("bbbbbbbbbbb"), requester);
+    await q.advance(); // current = A
+    await q.advance(); // current = B, played = [A]
+    await q.clear();
+    const n = await q.requeueHistory();
+    expect(n).toBe(0);
+    expect(q.snapshot().upcoming).toEqual([]);
+  });
+
   it("requeueHistory is a no-op when nothing has played", async () => {
     const q = newQueue();
     await q.add(meta("aaaaaaaaaaa"), requester);
@@ -202,7 +236,11 @@ describe("GuildQueue", () => {
     expect([...q.snapshot().upcoming.map((i) => i.id)].sort()).toEqual([...created].sort());
   });
 
-  it("serializes concurrent adds without losing or duplicating items", async () => {
+  it("keeps the final queue intact (unique, non-lossy) under many concurrent adds", async () => {
+    // NOTE: add()'s mutex-wrapped body is fully synchronous, so in a single-threaded runtime
+    // these adds can't actually interleave — this test pins the observable FINAL STATE (every
+    // id present exactly once, none lost or duplicated), not the mutex's async serialization
+    // per se. The Mutex's async-serialization contract is covered in src/util/mutex.test.ts.
     const q = newQueue();
     await Promise.all(
       Array.from({ length: 50 }, (_, i) =>

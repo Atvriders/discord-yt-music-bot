@@ -20,11 +20,21 @@ describe("loadBotConfig", () => {
     });
     expect(c.adminUserIds).toEqual(["123456789012345678", "234567890123456789"]);
   });
-  it("defaults logLevel to info and accepts override", () => {
+  it("defaults logLevel to info and accepts a valid override", () => {
     const c1 = loadBotConfig({ DISCORD_TOKEN: "t" });
     expect(c1.logLevel).toBe("info");
     const c2 = loadBotConfig({ DISCORD_TOKEN: "t", LOG_LEVEL: "warn" });
     expect(c2.logLevel).toBe("warn");
+  });
+  it("accepts a valid LOG_LEVEL in any case and normalizes to lowercase", () => {
+    // A docker-compose/CI override like LOG_LEVEL=WARN must map to "warn", not silently
+    // fall back to "info".
+    expect(loadBotConfig({ DISCORD_TOKEN: "t", LOG_LEVEL: "WARN" }).logLevel).toBe("warn");
+    expect(loadBotConfig({ DISCORD_TOKEN: "t", LOG_LEVEL: "Debug" }).logLevel).toBe("debug");
+  });
+  it("throws fast on an unrecognized LOG_LEVEL instead of silently demoting to info", () => {
+    expect(() => loadBotConfig({ DISCORD_TOKEN: "t", LOG_LEVEL: "verbose" })).toThrow(/LOG_LEVEL/);
+    expect(() => loadBotConfig({ DISCORD_TOKEN: "t", LOG_LEVEL: "nonsense" })).toThrow(/LOG_LEVEL/);
   });
   it("throws on non-integer IDLE_TIMEOUT_SEC", () => {
     expect(() => loadBotConfig({ DISCORD_TOKEN: "t", IDLE_TIMEOUT_SEC: "abc" })).toThrow(

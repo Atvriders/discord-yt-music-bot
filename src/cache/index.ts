@@ -47,12 +47,26 @@ export class AudioCache {
     if (stat === null) return;
     const { size } = stat;
     const oldEntry = this.entries.get(videoId);
-    // When re-registering an existing videoId, the old entry's bytes are about to be
-    // freed (overwritten below), so they must NOT count against the eviction threshold —
-    // otherwise innocent entries get evicted to make room that the overwrite already frees.
-    const oldSize = oldEntry?.sizeBytes ?? 0;
-    // Evict to make room for the new entry
-    while (this.totalBytes() - oldSize + size > this.maxBytes) {
+    // Free the old entry's accounting UP FRONT (delete from the map; remove its file if the
+    // path actually changes) before the eviction loop. This makes totalBytes() reflect reality
+    // throughout the loop. The previous approach subtracted a constant `oldSize` from
+    // totalBytes() in the loop condition; if the old entry was ITSELF chosen as an eviction
+    // victim mid-loop, it left the map yet `- oldSize` kept subtracting it — a phantom credit
+    // that undercounted used bytes, exited the loop early, and could leave the cache over the
+    // cap with other evictable entries still present.
+    if (oldEntry) {
+      this.entries.delete(videoId);
+      if (oldEntry.filePath !== filePath) {
+        try {
+          rmSync(oldEntry.filePath, { force: true });
+        } catch {
+          // File already gone, ignore
+        }
+      }
+    }
+    // Evict to make room for the new entry. No `oldSize` term is needed now — the old entry's
+    // bytes are genuinely gone from the map rather than being subtracted as a constant.
+    while (this.totalBytes() + size > this.maxBytes) {
       let victim: CacheEntry | null = null;
       for (const e of this.entries.values()) {
         if (e.pinned) continue;
@@ -67,7 +81,7 @@ export class AudioCache {
         // File already gone, ignore
       }
     }
-    // Now add the entry (overwrites any existing entry for videoId)
+    // Now add the entry (the old one for this videoId, if any, was already removed above).
     this.entries.set(videoId, {
       videoId,
       filePath,

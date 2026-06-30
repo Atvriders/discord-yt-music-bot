@@ -18,6 +18,23 @@ describe("GuildHub", () => {
     expect(factory.mock.calls).toEqual([["G1"], ["G2"]]);
   });
 
+  it("has() reports existence without creating a controller", () => {
+    // src/index.ts uses hub.has(guildId) as a guard specifically to AVOID auto-creating a
+    // controller (which hub.get() does). Pin that no-side-effect contract so a refactor that
+    // makes has() delegate to get() (or swaps the two) fails the suite.
+    const factory = vi.fn((guildId: string) => ({ guildId }) as never);
+    const hub = new GuildHub(factory);
+    // has() before any get() must be false AND must not invoke the factory.
+    expect(hub.has("G1")).toBe(false);
+    expect(factory).not.toHaveBeenCalled();
+    // get() creates it.
+    hub.get("G1");
+    expect(factory).toHaveBeenCalledTimes(1);
+    // has() now true, and calling it again does not re-invoke the factory.
+    expect(hub.has("G1")).toBe(true);
+    expect(factory).toHaveBeenCalledTimes(1);
+  });
+
   it("exposes guildIds() and controllers() matching the created controllers", () => {
     const factory = vi.fn((guildId: string) => ({ guildId }) as never);
     const hub = new GuildHub(factory);

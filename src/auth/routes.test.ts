@@ -1,11 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import Fastify from "fastify";
+import cookie from "@fastify/cookie";
 import { registerAuthRoutes } from "./routes.js";
 
 // Mock the OAuth network layer so the callback route runs purely in-process.
 const exchangeCode = vi.fn();
 const fetchIdentity = vi.fn();
 const revokeToken = vi.fn(async (..._a: unknown[]) => {});
+// verifyState is STUBBED here (the real timing-safe comparison is covered by
+// oauth.state.test.ts). The handler tests below assert that the route correctly wires
+// verifyState's boolean result to the accept/reject decision: `verifyStateResult` is
+// flipped to false to drive the state-mismatch branch.
+let verifyStateResult = true;
 vi.mock("./oauth.js", async () => {
   const actual = await vi.importActual<typeof import("./oauth.js")>("./oauth.js");
   return {
@@ -13,8 +19,7 @@ vi.mock("./oauth.js", async () => {
     exchangeCode: (...a: unknown[]) => exchangeCode(...a),
     fetchIdentity: (...a: unknown[]) => fetchIdentity(...a),
     revokeToken: (...a: unknown[]) => revokeToken(...a),
-    // verifyState is exercised for real; force a match by stubbing it to true here.
-    verifyState: () => true,
+    verifyState: () => verifyStateResult,
   };
 });
 
@@ -26,6 +31,10 @@ const cfg = {
 
 function buildApp() {
   const app = Fastify();
+  // The logout route calls reply.clearCookie, which @fastify/cookie decorates. Register it
+  // so the in-isolation route tests mirror the real buildApp() wiring. (inject() awaits
+  // readiness, so registering without an explicit await here is fine.)
+  void app.register(cookie);
   const destroyed: string[] = [];
   // Minimal session stub mimicking @fastify/session's surface used by the route.
   let sessionId = "old-sid";
@@ -60,6 +69,7 @@ beforeEach(() => {
   exchangeCode.mockReset();
   fetchIdentity.mockReset();
   revokeToken.mockReset().mockResolvedValue(undefined);
+  verifyStateResult = true;
 });
 
 describe("auth callback", () => {
@@ -102,5 +112,59 @@ describe("auth callback", () => {
     });
     expect(res.statusCode).toBe(502);
     expect(revokeToken).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 with the Discord error when ?error= is present (and exchanges nothing)", async () => {
+    const { app } = buildApp();
+    const res = await app.inject({
+      method: "GET",
+      url: "/auth/callback?error=access_denied",
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("access_denied");
+    expect(exchangeCode).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 invalid_state when the code is missing", async () => {
+    const { app } = buildApp();
+    const res = await app.inject({
+      method: "GET",
+      url: "/auth/callback?state=STATE",
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("invalid_state");
+    expect(exchangeCode).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 invalid_state when verifyState rejects a mismatched state", async () => {
+    verifyStateResult = false; // drive the state-mismatch branch
+    const { app } = buildApp();
+    const res = await app.inject({
+      method: "GET",
+      url: "/auth/callback?code=C&state=WRONG",
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("invalid_state");
+    expect(exchangeCode).not.toHaveBeenCalled();
+  });
+});
+
+describe("auth logout", () => {
+  it("destroys the session, clears the sid cookie, and returns 204", async () => {
+    const { app, session } = buildApp();
+    const res = await app.inject({ method: "POST", url: "/auth/logout" });
+    expect(res.statusCode).toBe(204);
+    expect(session.destroy).toHaveBeenCalled();
+    const setCookie = res.headers["set-cookie"];
+    const cookieStr = Array.isArray(setCookie) ? setCookie.join(";") : (setCookie ?? "");
+    // clearCookie emits an expired/empty sid cookie.
+    expect(cookieStr).toContain("sid=");
+  });
+
+  it("propagates a 500 when the session store fails to destroy", async () => {
+    const { app, session } = buildApp();
+    session.destroy.mockRejectedValueOnce(new Error("store down"));
+    const res = await app.inject({ method: "POST", url: "/auth/logout" });
+    expect(res.statusCode).toBe(500);
   });
 });

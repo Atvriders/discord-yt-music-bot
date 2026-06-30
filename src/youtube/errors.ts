@@ -34,7 +34,10 @@ const RULES: ReadonlyArray<[YtErrorKind, RegExp]> = [
   [YtErrorKind.AgeRestricted, /confirm your age|age-restricted|inappropriate/i],
   [YtErrorKind.Private, /private video|this video is private/i],
   [YtErrorKind.GeoBlocked, /available in your country/i],
-  [YtErrorKind.RateLimited, /rate-limited by youtube|ratelimit exceeded/i],
+  [
+    YtErrorKind.RateLimited,
+    /rate-limited by youtube|ratelimit exceeded|http error 429|too many requests/i,
+  ],
   [YtErrorKind.Unavailable, /video unavailable|has been removed|no longer available/i],
 ];
 

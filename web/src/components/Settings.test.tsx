@@ -21,15 +21,17 @@ describe("Settings (idle timeout)", () => {
     expect(select().value).toBe("300");
   });
 
-  it("offers the documented presets including a 'Never' option mapped to 3600", () => {
+  it("offers the documented presets including the honest '1 hour' max (3600)", () => {
     render(<Settings idleTimeoutSec={300} disabled={false} onChange={() => {}} />);
     const values = Array.from(select().options).map((o) => o.value);
     expect(values).toEqual(["60", "300", "600", "900", "1800", "3600"]);
-    // The max value is labeled as a never/stay option.
+    // The max value is labeled honestly as 1 hour — NOT a "Never" the backend can't honor
+    // (3600 still arms a real idle timeout; the bot disconnects after an hour of idle).
     const opts = select().options;
     const last = opts[opts.length - 1]!;
     expect(last.value).toBe("3600");
-    expect(last.textContent ?? "").toMatch(/never|stay/i);
+    expect(last.textContent ?? "").toMatch(/1 hour/i);
+    expect(last.textContent ?? "").not.toMatch(/never|stay until/i);
   });
 
   it("calls onChange with the new seconds value when the user picks a preset", () => {
@@ -234,11 +236,16 @@ describe("Settings (audio options)", () => {
   });
 
   it("documents the artist source is a best-effort channel/artist search (honesty)", () => {
-    render(
+    const { unmount } = render(
       <Settings idleTimeoutSec={300} autoplay={true} onChange={() => {}} onAudioChange={() => {}} />,
     );
-    expect(screen.getByText(/best-effort/i)).toBeTruthy();
-    expect(screen.getByText(/channel\/artist|artist name/i)).toBeTruthy();
+    screen.getByText(/best-effort/i);
+    screen.getByText(/channel\/artist|artist name/i);
+    // The honesty copy is UNCONDITIONAL — it must still render with autoplay off, proving
+    // it isn't accidentally gated behind autoplay (which would hide it when off).
+    unmount();
+    render(<Settings idleTimeoutSec={300} autoplay={false} onChange={() => {}} onAudioChange={() => {}} />);
+    screen.getByText(/best-effort/i);
   });
 
   it("documents that autoplay is YouTube's radio, not a genre classifier (honesty)", () => {
@@ -403,5 +410,103 @@ describe("Settings (audio options)", () => {
     );
     expect((screen.getByLabelText(/crossfade seconds/i) as HTMLInputElement).disabled).toBe(true);
     expect((screen.getByLabelText(/autoplay source/i) as HTMLSelectElement).disabled).toBe(true);
+  });
+});
+
+describe("Settings (command channel)", () => {
+  const channels = [
+    { id: "T1", name: "general" },
+    { id: "T2", name: "music" },
+  ];
+  function commandSelect(): HTMLSelectElement {
+    return screen.getByLabelText(/command channel/i) as HTMLSelectElement;
+  }
+
+  it("offers an 'Any channel' option plus every text channel", () => {
+    render(
+      <Settings
+        idleTimeoutSec={300}
+        textChannels={channels}
+        commandChannelId={null}
+        onChange={() => {}}
+        onAudioChange={() => {}}
+      />,
+    );
+    const values = Array.from(commandSelect().options).map((o) => o.value);
+    // "" represents the null/Any option.
+    expect(values).toEqual(["", "T1", "T2"]);
+    // With no restriction, the Any option is selected.
+    expect(commandSelect().value).toBe("");
+  });
+
+  it("reflects the configured commandChannelId as the selected option", () => {
+    render(
+      <Settings
+        idleTimeoutSec={300}
+        textChannels={channels}
+        commandChannelId="T2"
+        onChange={() => {}}
+        onAudioChange={() => {}}
+      />,
+    );
+    expect(commandSelect().value).toBe("T2");
+  });
+
+  it("posts a commandChannelId patch when a text channel is picked", () => {
+    const onAudioChange = vi.fn();
+    render(
+      <Settings
+        idleTimeoutSec={300}
+        textChannels={channels}
+        commandChannelId={null}
+        onChange={() => {}}
+        onAudioChange={onAudioChange}
+      />,
+    );
+    fireEvent.change(commandSelect(), { target: { value: "T1" } });
+    expect(onAudioChange).toHaveBeenCalledWith({ commandChannelId: "T1" });
+  });
+
+  it("posts a null commandChannelId patch when 'Any channel' is picked", () => {
+    const onAudioChange = vi.fn();
+    render(
+      <Settings
+        idleTimeoutSec={300}
+        textChannels={channels}
+        commandChannelId="T1"
+        onChange={() => {}}
+        onAudioChange={onAudioChange}
+      />,
+    );
+    fireEvent.change(commandSelect(), { target: { value: "" } });
+    expect(onAudioChange).toHaveBeenCalledWith({ commandChannelId: null });
+  });
+
+  it("surfaces a non-listed configured channel as a synthetic option (not blank)", () => {
+    render(
+      <Settings
+        idleTimeoutSec={300}
+        textChannels={channels}
+        commandChannelId="T9"
+        onChange={() => {}}
+        onAudioChange={() => {}}
+      />,
+    );
+    // The select shows the persisted value even when the channel isn't in the fetched list.
+    expect(commandSelect().value).toBe("T9");
+  });
+
+  it("disables the command-channel select when disabled", () => {
+    render(
+      <Settings
+        idleTimeoutSec={300}
+        textChannels={channels}
+        commandChannelId={null}
+        disabled={true}
+        onChange={() => {}}
+        onAudioChange={() => {}}
+      />,
+    );
+    expect(commandSelect().disabled).toBe(true);
   });
 });

@@ -88,6 +88,14 @@ export interface GuildSettings {
    * config (which now only seeds this default and acts as an absolute sanity ceiling).
    */
   maxTrackDurationSec: number;
+  /**
+   * Restrict the bot to a single text channel. When set to a channel id, the bot only
+   * accepts `?` commands in THAT channel and posts its messages (the live now-playing
+   * card, command replies/errors) there. `null` = unrestricted (the default) — the bot
+   * works in any channel, which is the original behavior. An admin sets it via `?channel`
+   * (run in the target channel) or the panel, and clears it with `?channel off`.
+   */
+  commandChannelId: string | null;
 }
 
 export const DEFAULT_SETTINGS: GuildSettings = {
@@ -102,6 +110,8 @@ export const DEFAULT_SETTINGS: GuildSettings = {
   // 0 = no limit. The host (index.ts) overrides this seed from the configured
   // MAX_TRACK_DURATION_SEC; an unset config leaves it at 0 (unlimited).
   maxTrackDurationSec: 0,
+  // null = unrestricted: the bot works in any channel (original behavior).
+  commandChannelId: null,
 };
 
 export const IDLE_TIMEOUT_MAX_SEC = 3600;
@@ -123,6 +133,11 @@ const FX_PRESETS: ReadonlySet<FxPreset> = new Set<FxPreset>([
 ]);
 
 function clampInt(value: unknown, min: number, max: number, fallback: number): number {
+  // Booleans coerce via Number() to 0/1 and would otherwise slip past as "valid" numbers —
+  // e.g. {volume:false} silently mutes, {maxTrackDurationSec:false} removes the length cap,
+  // {idleTimeoutSec:false} keeps the bot in voice forever. Treat them as invalid (fall back),
+  // matching how the boolean fields' own `typeof === "boolean"` guards reject non-booleans.
+  if (typeof value === "boolean") return fallback;
   const n = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(min, Math.min(max, Math.round(n)));
@@ -147,6 +162,15 @@ export function applySettingsPatch(
       : base.autoplaySource;
   const fx =
     typeof p.fx === "string" && FX_PRESETS.has(p.fx as FxPreset) ? (p.fx as FxPreset) : base.fx;
+  // commandChannelId: a non-empty trimmed string sets the restriction; explicit null or an
+  // empty/whitespace string clears it (→ null); any other type (or absent key) keeps base.
+  let commandChannelId = base.commandChannelId;
+  if (p.commandChannelId === null) {
+    commandChannelId = null;
+  } else if (typeof p.commandChannelId === "string") {
+    const trimmed = p.commandChannelId.trim();
+    commandChannelId = trimmed === "" ? null : trimmed;
+  }
   return {
     idleTimeoutSec:
       p.idleTimeoutSec == null
@@ -172,5 +196,6 @@ export function applySettingsPatch(
             MAX_TRACK_DURATION_CEILING_SEC,
             base.maxTrackDurationSec,
           ),
+    commandChannelId,
   };
 }

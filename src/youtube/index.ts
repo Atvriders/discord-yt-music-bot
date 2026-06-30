@@ -354,22 +354,34 @@ export class YouTubeService {
     // never break normal playback.
     try {
       const url = `https://www.youtube.com/watch?v=${videoId}&list=RD${videoId}`;
-      const [client] = buildClientLadder(this.cfg.playerClients);
-      const { stdout, code } = await this.run(
-        [
-          "-J",
-          "--flat-playlist",
-          "--no-warnings",
-          "--no-progress",
-          ...this.extractorArgs(client ?? this.cfg.playerClients),
-          "--",
-          url,
-        ],
-        this.cfg.ytdlpTimeoutMs,
-      );
-      if (code !== 0) return [];
+      // Use the SAME client fallback ladder as resolve()/download(): a first-client outage
+      // (the exact YouTube-side breakage the ladder exists for) must not permanently disable
+      // autoplay radio. A retryable extraction error advances to the next client; the outer
+      // try/catch still honors the best-effort contract by resolving to [] if every client fails.
+      const parsed = await this.withClientFallback(async (client) => {
+        const { stdout, stderr, code } = await this.run(
+          [
+            "-J",
+            "--flat-playlist",
+            "--no-warnings",
+            "--no-progress",
+            ...this.extractorArgs(client),
+            "--",
+            url,
+          ],
+          this.cfg.ytdlpTimeoutMs,
+        );
+        if (code !== 0) throw classifyYtdlpError(stderr, code);
+        // Non-JSON on a zero exit → typed YtError(Unknown) so it's retried across the ladder
+        // (a SyntaxError is not a YtError and would be treated as retryable anyway, but a typed
+        // error keeps the failure classified rather than leaking a raw SyntaxError).
+        try {
+          return JSON.parse(stdout) as { entries?: RawInfo[] };
+        } catch {
+          throw new YtError(YtErrorKind.Unknown, "related: yt-dlp returned non-JSON output");
+        }
+      });
 
-      const parsed = JSON.parse(stdout) as { entries?: RawInfo[] };
       const seen = new Set<string>([videoId]);
       const out: TrackMeta[] = [];
       for (const entry of parsed.entries ?? []) {
@@ -463,6 +475,10 @@ export class YouTubeService {
         "-f",
         "bestaudio[acodec=opus]/bestaudio/best",
         "--no-playlist",
+        // Write the download in place rather than to a separate `<id>.<fmt>.part` file, so a
+        // killed/timed-out attempt (SIGKILL on timeout skips yt-dlp's own cleanup) cannot
+        // leave a partial artifact that the readdir-based file detection below could pick up.
+        "--no-part",
         "--max-filesize",
         `${Math.max(1, Math.min(maxMb, 500))}M`,
         "--socket-timeout",
@@ -501,7 +517,18 @@ export class YouTubeService {
     });
 
     const files = await readdir(outDir);
-    const produced = files.find((f) => f.startsWith(`${videoId}.`));
+    // Never select a partial/intermediate artifact. A previous client's timed-out attempt is
+    // SIGKILLed (no yt-dlp cleanup), so a `<videoId>.<fmt>.part` (or `.ytdl`/`.temp`) can
+    // linger in outDir; readdir typically returns it first (creation order), and the bare
+    // `startsWith(videoId + ".")` predicate would match it — returning a truncated file to play
+    // or cache. Filter those out so only the finalized audio file is ever chosen.
+    const produced = files.find(
+      (f) =>
+        f.startsWith(`${videoId}.`) &&
+        !f.endsWith(".part") &&
+        !f.endsWith(".ytdl") &&
+        !f.endsWith(".temp"),
+    );
     if (!produced) {
       throw new YtError(
         YtErrorKind.Unknown,

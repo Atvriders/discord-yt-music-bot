@@ -18,6 +18,12 @@ export class GuildQueue extends EventEmitter {
   private _current: QueueItem | null = null;
   private _upcoming: QueueItem[] = [];
   private _history: QueueItem[] = [];
+  // UNCAPPED record of every track that has played (cleanly advanced) this cycle, kept
+  // separately from the bounded `_history` ring so repeat="all" can re-cycle the FULL set even
+  // when it exceeds historyMax. `_history` exists only for the display/Replay surface and is
+  // capped; recycling off it would silently drop every track past historyMax on the 2nd lap.
+  // Reset whenever the cycle is consumed (requeueHistory) or the queue is cleared.
+  private _played: QueueItem[] = [];
   private readonly mutex = new Mutex();
   private readonly historyMax: number;
   private readonly idFactory: () => string;
@@ -61,6 +67,9 @@ export class GuildQueue extends EventEmitter {
   advance(): Promise<QueueItem | null> {
     return this.mutex.runExclusive(() => {
       if (this._current) {
+        // Record into the UNCAPPED cycle buffer first (repeat=all replays the full set), then
+        // into the bounded display history ring.
+        this._played.push(this._current);
         this._history.push(this._current);
         if (this._history.length > this.historyMax) {
           this._history.splice(0, this._history.length - this.historyMax);
@@ -130,15 +139,20 @@ export class GuildQueue extends EventEmitter {
   }
 
   /**
-   * Repeat-all support: move played history (and the current track, if any) back to
-   * the end of the upcoming list so the set replays in its original order. History is
-   * cleared. No-op when there is nothing to requeue. Returns the number requeued.
+   * Repeat-all support: move the FULL set of tracks played this cycle (and the current track,
+   * if any) back to the end of the upcoming list so the set replays in its original order.
+   *
+   * Recycles off the UNCAPPED `_played` buffer rather than the bounded `_history` ring, so a
+   * playlist larger than historyMax replays in full on the next lap instead of silently losing
+   * every track past the cap. Both the cycle buffer and the display history are cleared. No-op
+   * when nothing has played. Returns the number requeued.
    */
   requeueHistory(): Promise<number> {
     return this.mutex.runExclusive(() => {
-      const recycled = [...this._history];
+      const recycled = [...this._played];
       if (this._current) recycled.push(this._current);
       if (recycled.length === 0) return 0;
+      this._played = [];
       this._history = [];
       this._current = null;
       this._upcoming.push(...recycled);
@@ -151,12 +165,18 @@ export class GuildQueue extends EventEmitter {
     return this.mutex.runExclusive(() => {
       this._current = null;
       this._upcoming = [];
+      // Stop ends the repeat-all cycle: drop the uncapped played buffer so a later repeat=all
+      // requeue can't resurrect tracks from a session the user already stopped. (Display
+      // `_history` is intentionally KEPT so the Replay surface survives a stop.)
+      this._played = [];
       this.emitChange();
     });
   }
 
   private emitChange(): void {
     this.emit("changed", this.snapshot());
-    this.emit("prefetch", this._upcoming[0]?.meta.videoId ?? null);
+    // Optional-chain through `meta` too: a malformed head item (from a partial/torn snapshot
+    // restore) must not crash the prefetch emit by reading .videoId off an undefined meta.
+    this.emit("prefetch", this._upcoming[0]?.meta?.videoId ?? null);
   }
 }

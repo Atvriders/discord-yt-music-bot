@@ -30,6 +30,10 @@ function ctx(overrides: Partial<Parameters<typeof handleCommand>[1]> = {}) {
     remove: vi.fn(async () => true),
     snapshot: vi.fn(() => ({ current: null, upcoming: [], history: [] })),
     setVolume: vi.fn((pct: number) => ({ volume: pct })),
+    updateSettings: vi.fn((patch: Record<string, unknown>) => ({
+      commandChannelId: null,
+      ...patch,
+    })),
   };
   const youtube = { resolve: vi.fn(), search: vi.fn() };
   const { controller: _c, youtube: _y, ...rest } = overrides;
@@ -37,6 +41,7 @@ function ctx(overrides: Partial<Parameters<typeof handleCommand>[1]> = {}) {
     requester,
     requesterChannelId: "A" as string | null,
     botChannelId: null as string | null,
+    channelId: "text-chan-1" as string,
     isAdmin: false,
     searchLimit: 5,
     ...rest,
@@ -101,6 +106,41 @@ describe("handleCommand — play", () => {
     expect(c.controller.ensureConnected).not.toHaveBeenCalled();
     expect(c.controller.enqueue).toHaveBeenCalled();
     expect(res).toEqual({ type: "message", content: expect.stringContaining("Song") });
+  });
+
+  it("surfaces a concrete message when ensureConnected throws (e.g. missing CONNECT perm)", async () => {
+    const c = ctx();
+    c.youtube.resolve.mockResolvedValue(meta("aaaaaaaaaaa", "Song"));
+    c.controller.ensureConnected = vi.fn(async () => {
+      throw new Error("Missing Permissions");
+    });
+    const res = await handleCommand(
+      { kind: "play", input: "https://youtu.be/aaaaaaaaaaa" },
+      c as never,
+    );
+    expect(res).toEqual({
+      type: "message",
+      content: expect.stringContaining("Couldn't join that voice channel"),
+    });
+    // A failed join must NOT proceed to enqueue.
+    expect(c.controller.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a concrete message when moveTo throws (admin cross-channel join failure)", async () => {
+    const c = ctx({ requesterChannelId: "A", botChannelId: "B", isAdmin: true });
+    c.youtube.resolve.mockResolvedValue(meta("aaaaaaaaaaa", "Song"));
+    c.controller.moveTo = vi.fn(async () => {
+      throw new Error("connection failed");
+    });
+    const res = await handleCommand(
+      { kind: "play", input: "https://youtu.be/aaaaaaaaaaa" },
+      c as never,
+    );
+    expect(res).toEqual({
+      type: "message",
+      content: expect.stringContaining("Couldn't join that voice channel"),
+    });
+    expect(c.controller.enqueue).not.toHaveBeenCalled();
   });
 
   it("returns a picker for a search query", async () => {
@@ -230,5 +270,111 @@ describe("handleCommand — controls", () => {
     c.controller.snapshot.mockReturnValue({ current: null, upcoming: [], history: [] } as never);
     const res = await handleCommand({ kind: "history" }, c as never);
     expect(res).toEqual({ type: "message", content: expect.stringContaining("No history") });
+  });
+});
+
+describe("handleCommand — queue/np", () => {
+  const reqItem = (id: string, title: string) => ({
+    id,
+    meta: { title },
+    requester: { displayName: "dj" },
+  });
+
+  it("np reports nothing playing when current is null", async () => {
+    const c = ctx();
+    c.controller.snapshot.mockReturnValue({ current: null, upcoming: [], history: [] } as never);
+    const res = await handleCommand({ kind: "np" }, c as never);
+    expect(res).toEqual({
+      type: "message",
+      content: expect.stringContaining("Nothing is playing"),
+    });
+  });
+
+  it("np shows the current track title and requester", async () => {
+    const c = ctx();
+    c.controller.snapshot.mockReturnValue({
+      current: { id: "cur", meta: { title: "Now Song" }, requester: { displayName: "Alice" } },
+      upcoming: [],
+      history: [],
+    } as never);
+    const res = await handleCommand({ kind: "np" }, c as never);
+    if (res.type !== "message") throw new Error("expected message");
+    expect(res.content).toContain("Now Song");
+    expect(res.content).toContain("Alice");
+  });
+
+  it("queue says nothing playing with no current and no upcoming, and omits Up next", async () => {
+    const c = ctx();
+    c.controller.snapshot.mockReturnValue({ current: null, upcoming: [], history: [] } as never);
+    const res = await handleCommand({ kind: "queue" }, c as never);
+    if (res.type !== "message") throw new Error("expected message");
+    expect(res.content).toContain("Nothing playing.");
+    expect(res.content).not.toContain("Up next");
+  });
+
+  it("queue lists exactly 10 upcoming items with no overflow line", async () => {
+    const c = ctx();
+    const upcoming = Array.from({ length: 10 }, (_, i) => reqItem(`u${i}`, `Track ${i + 1}`));
+    c.controller.snapshot.mockReturnValue({
+      current: { id: "cur", meta: { title: "Cur" }, requester: { displayName: "dj" } },
+      upcoming,
+      history: [],
+    } as never);
+    const res = await handleCommand({ kind: "queue" }, c as never);
+    if (res.type !== "message") throw new Error("expected message");
+    expect(res.content).toContain("1. Track 1");
+    expect(res.content).toContain("10. Track 10");
+    expect(res.content).not.toContain("…and");
+  });
+
+  it("queue caps at 10 and appends `…and N more` for 11+ upcoming", async () => {
+    const c = ctx();
+    const upcoming = Array.from({ length: 13 }, (_, i) => reqItem(`u${i}`, `Track ${i + 1}`));
+    c.controller.snapshot.mockReturnValue({
+      current: { id: "cur", meta: { title: "Cur" }, requester: { displayName: "dj" } },
+      upcoming,
+      history: [],
+    } as never);
+    const res = await handleCommand({ kind: "queue" }, c as never);
+    if (res.type !== "message") throw new Error("expected message");
+    expect(res.content).toContain("10. Track 10");
+    expect(res.content).not.toContain("11. Track 11");
+    expect(res.content).toContain("…and 3 more");
+  });
+});
+
+describe("handleCommand — channel restriction", () => {
+  it("admin `?channel` set restricts commands to the message's channel and confirms", async () => {
+    const c = ctx({ isAdmin: true, channelId: "chan-42" });
+    const res = await handleCommand({ kind: "channel", mode: "set" }, c as never);
+    expect(c.controller.updateSettings).toHaveBeenCalledWith({ commandChannelId: "chan-42" });
+    expect(res.type).toBe("message");
+    if (res.type === "message") {
+      expect(res.content).toContain("<#chan-42>");
+      expect(res.content).toMatch(/restricted/i);
+    }
+  });
+
+  it("admin `?channel off` clears the restriction (commandChannelId null) and confirms", async () => {
+    const c = ctx({ isAdmin: true, channelId: "chan-42" });
+    const res = await handleCommand({ kind: "channel", mode: "off" }, c as never);
+    expect(c.controller.updateSettings).toHaveBeenCalledWith({ commandChannelId: null });
+    expect(res.type).toBe("message");
+    if (res.type === "message") expect(res.content).toMatch(/removed|cleared/i);
+  });
+
+  it("non-admin `?channel` is rejected and never touches settings", async () => {
+    const c = ctx({ isAdmin: false, channelId: "chan-42" });
+    const res = await handleCommand({ kind: "channel", mode: "set" }, c as never);
+    expect(c.controller.updateSettings).not.toHaveBeenCalled();
+    expect(res.type).toBe("message");
+    if (res.type === "message") expect(res.content).toMatch(/admin/i);
+  });
+
+  it("non-admin `?channel off` is also rejected", async () => {
+    const c = ctx({ isAdmin: false, channelId: "chan-42" });
+    const res = await handleCommand({ kind: "channel", mode: "off" }, c as never);
+    expect(c.controller.updateSettings).not.toHaveBeenCalled();
+    expect(res.type).toBe("message");
   });
 });

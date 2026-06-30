@@ -2,7 +2,9 @@ import { describe, it, expect, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { writeFile } from "node:fs/promises";
 import { collectSnapshot, writeSnapshot, readSnapshot, restoreSnapshot } from "./snapshot.js";
+import { DEFAULT_SETTINGS } from "./settings.js";
 
 const meta = (id: string) => ({
   videoId: id,
@@ -57,11 +59,19 @@ describe("snapshot", () => {
   });
 
   it("persists and restores per-guild settings", async () => {
+    // Build from DEFAULT_SETTINGS so all 9 fields are covered (and future fields auto-track),
+    // not just the original 4 — otherwise a dropped field (e.g. commandChannelId) on restart
+    // would go undetected by the toEqual assertions below.
     const settings = {
+      ...DEFAULT_SETTINGS,
       idleTimeoutSec: 120,
       crossfadeSec: 4,
       normalizeLoudness: true,
       repeat: "all" as const,
+      volume: 80,
+      fx: "bassboost" as const,
+      maxTrackDurationSec: 600,
+      commandChannelId: "CHAN1",
     };
     const collectHub = {
       guildIds: () => ["G1"],
@@ -104,6 +114,15 @@ describe("snapshot", () => {
       };
       await writeSnapshot(dir, file);
       expect(await readSnapshot(dir)).toEqual(file);
+
+      // readSnapshot's guard returns null for an unrecognized version or a non-array guilds —
+      // both plausible from a schema migration or a partial write. Pin both branches so an
+      // accidental inversion/removal during a future schema bump is caught.
+      const snapFile = join(dir, "session-snapshot.json");
+      await writeFile(snapFile, JSON.stringify({ version: 2, savedAt: 1, guilds: [] }));
+      expect(await readSnapshot(dir)).toBeNull();
+      await writeFile(snapFile, JSON.stringify({ version: 1, savedAt: 1, guilds: null }));
+      expect(await readSnapshot(dir)).toBeNull();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

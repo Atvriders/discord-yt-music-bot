@@ -82,10 +82,39 @@ export function NowPlaying({
   return (
     <section className="card hero-glow p-7 sm:p-8">
       <div className="relative z-10 flex gap-6">
-        {/* Album art seated in a machined faceplate slot — inset rim, contact shadow. */}
+        {/* Album art seated in a machined faceplate slot — inset rim, contact shadow.
+            yt-dlp doesn't always return a thumbnail (older uploads / some search entries);
+            render a styled placeholder rather than an <img src=""> (which the browser
+            resolves as a spurious same-origin GET + broken-image icon in the hero slot). */}
         <div className="shrink-0 relative">
-          <img src={meta.thumbnailUrl ?? ""} alt="" width={132} height={132}
-            className="object-cover" style={{ width: 132, height: 132, borderRadius: "var(--radius)", boxShadow: "0 10px 28px -12px rgba(0,0,0,0.7)" }} />
+          {meta.thumbnailUrl ? (
+            <img src={meta.thumbnailUrl} alt="" width={132} height={132}
+              className="object-cover" style={{ width: 132, height: 132, borderRadius: "var(--radius)", boxShadow: "0 10px 28px -12px rgba(0,0,0,0.7)" }} />
+          ) : (
+            <span
+              aria-hidden
+              data-testid="now-playing-thumb-placeholder"
+              className="grid place-items-center"
+              style={{
+                width: 132,
+                height: 132,
+                borderRadius: "var(--radius)",
+                boxShadow: "0 10px 28px -12px rgba(0,0,0,0.7)",
+                background:
+                  "radial-gradient(120% 90% at 50% 0%, rgba(255,0,0,0.10), transparent 60%)," +
+                  "linear-gradient(180deg, var(--color-raised) 0%, var(--color-sunken) 100%)",
+                color: "var(--color-ink-faint)",
+              }}
+            >
+              <svg width={48} height={48} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"
+                style={{ filter: "drop-shadow(0 1px 0 rgba(0,0,0,0.5))" }}>
+                <path d="M9 18V5l12-2v13" />
+                <circle cx="6" cy="18" r="3" />
+                <circle cx="18" cy="16" r="3" />
+              </svg>
+            </span>
+          )}
           {/* carved seam + faint red rim-light, like a lit jewel set into the deck */}
           <span className="absolute inset-0" aria-hidden style={{ borderRadius: "var(--radius)", boxShadow: "inset 0 0 0 1px var(--color-line), inset 0 0 22px -10px rgba(255,0,0,0.35)" }} />
         </div>
@@ -178,6 +207,9 @@ function ProgressBar({ durationMs, displayedMs, receivedAt, canSeek, onSeek }: P
   const [pendingMs, setPendingMs] = useState<number | null>(null);
   // The snapshot id in effect when the seek was issued; a later id means "confirmed".
   const seekSnapshotRef = useRef<number | null>(null);
+  // Monotonic generation for in-flight seeks. Each new gesture/commit bumps it so a stale
+  // rejection from a SUPERSEDED seek is a no-op (it must not clear the live gesture's hold).
+  const seekGenRef = useRef(0);
 
   // Release the optimistic hold once a fresh snapshot lands (the server has applied the seek).
   useEffect(() => {
@@ -204,7 +236,9 @@ function ProgressBar({ durationMs, displayedMs, receivedAt, canSeek, onSeek }: P
       if (!interactive) return;
       e.preventDefault();
       draggingRef.current = true;
-      // Drop any prior optimistic hold — this new gesture supersedes it.
+      // Drop any prior optimistic hold — this new gesture supersedes it. Bump the seek
+      // generation so a prior in-flight seek's late rejection can't clear this gesture.
+      seekGenRef.current++;
       setPendingMs(null);
       seekSnapshotRef.current = null;
       setDragMs(posFromClientX(e.clientX));
@@ -221,25 +255,66 @@ function ProgressBar({ durationMs, displayedMs, receivedAt, canSeek, onSeek }: P
     [posFromClientX],
   );
 
-  const endDrag = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      if (!draggingRef.current) return;
-      draggingRef.current = false;
-      const target = Math.round(posFromClientX(e.clientX));
+  // The position the bar currently shows: the live drag target, else the optimistic hold,
+  // else the server-extrapolated position. Computed here (above the keyboard handler) so the
+  // keyboard scrub can step relative to what the user actually sees.
+  const shownMs = dragMs ?? pendingMs ?? displayedMs;
+
+  // Commit a seek to `target` (ms) through the optimistic-hold path: hold the target until
+  // the server confirms (next snapshot), and release the hold if the seek fails (a failed
+  // seek emits no confirming snapshot, so without this the bar would stay pinned with the
+  // "seeking…" indicator pulsing forever). Shared by pointer-release AND keyboard.
+  const commitSeek = useCallback(
+    (target: number) => {
+      const clamped = Math.round(Math.max(0, Math.min(durationMs, target)));
+      const gen = ++seekGenRef.current; // this commit supersedes any prior in-flight seek
       setDragMs(null);
-      // Hold the target optimistically until the server confirms (next snapshot), so the bar
-      // doesn't snap back to the stale position during the seek round-trip.
-      setPendingMs(target);
+      setPendingMs(clamped);
       seekSnapshotRef.current = receivedAt;
-      // If the seek fails, release the optimistic hold — a failed seek emits no confirming
-      // snapshot, so without this the bar would stay pinned at the target with the
-      // "seeking…" indicator pulsing forever.
-      Promise.resolve(onSeek?.(target)).catch(() => {
+      Promise.resolve(onSeek?.(clamped)).catch(() => {
+        // A superseded seek's late rejection must NOT clear the newer gesture's hold.
+        if (gen !== seekGenRef.current) return;
         setPendingMs(null);
         seekSnapshotRef.current = null;
       });
     },
-    [posFromClientX, onSeek, receivedAt],
+    [durationMs, onSeek, receivedAt],
+  );
+
+  const endDrag = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!draggingRef.current) return;
+      draggingRef.current = false;
+      commitSeek(posFromClientX(e.clientX));
+    },
+    [posFromClientX, commitSeek],
+  );
+
+  // Keyboard scrubbing: the slider is focusable (tabIndex when interactive) and responds
+  // to Arrow/Page/Home/End, computing a clamped target from the currently-shown position
+  // and committing through the same optimistic-hold path as a pointer release. Without
+  // this the role="slider" would be a lie for keyboard/screen-reader users.
+  const onKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (!interactive) return;
+      const STEP = 5000;
+      const PAGE = 30000;
+      let target: number | null = null;
+      switch (e.key) {
+        case "ArrowLeft":
+        case "ArrowDown": target = shownMs - STEP; break;
+        case "ArrowRight":
+        case "ArrowUp": target = shownMs + STEP; break;
+        case "PageDown": target = shownMs - PAGE; break;
+        case "PageUp": target = shownMs + PAGE; break;
+        case "Home": target = 0; break;
+        case "End": target = durationMs; break;
+        default: return; // not a scrub key — let the event through
+      }
+      e.preventDefault();
+      commitSeek(target);
+    },
+    [interactive, durationMs, commitSeek, shownMs],
   );
 
   // A cancelled pointer gesture (touch taken over by scroll, device disconnected) carries
@@ -265,7 +340,6 @@ function ProgressBar({ durationMs, displayedMs, receivedAt, canSeek, onSeek }: P
   }, [interactive]);
 
   const seeking = pendingMs !== null;
-  const shownMs = dragMs ?? pendingMs ?? displayedMs;
   const pct = durationMs > 0 ? Math.max(0, Math.min(100, (shownMs / durationMs) * 100)) : 0;
   const elapsedLabel = fmtTime(shownMs / 1000);
   const durationLabel = durationMs > 0 ? fmtTime(durationMs / 1000) : "live feed";
@@ -277,9 +351,14 @@ function ProgressBar({ durationMs, displayedMs, receivedAt, canSeek, onSeek }: P
         className="vu"
         role={interactive ? "slider" : "progressbar"}
         aria-label={interactive ? "Seek" : "Playback progress"}
+        aria-orientation={interactive ? "horizontal" : undefined}
         aria-valuemin={0}
         aria-valuemax={durationMs > 0 ? Math.round(durationMs / 1000) : undefined}
         aria-valuenow={Math.round(shownMs / 1000)}
+        // Only a real, operable slider is focusable + key-driven; the read-only
+        // progressbar stays inert (no tabIndex/keydown).
+        tabIndex={interactive ? 0 : undefined}
+        onKeyDown={interactive ? onKeyDown : undefined}
         style={{
           position: "relative",
           cursor: interactive ? "pointer" : undefined,

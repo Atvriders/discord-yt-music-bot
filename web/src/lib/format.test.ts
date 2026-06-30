@@ -31,6 +31,15 @@ describe("fmtAudio", () => {
       "aac · 128 kbps · 44.1 kHz",
     );
   });
+  it("preserves sub-kHz precision for standard rates (22.05 / 11.025 kHz)", () => {
+    // The old 1-decimal rounding misrepresented these as 22.1 / 11.0 — pin the accurate output.
+    expect(fmtAudio({ codec: "aac", bitrateKbps: 96, sampleRateHz: 22050 })).toBe(
+      "aac · 96 kbps · 22.05 kHz",
+    );
+    expect(fmtAudio({ codec: "aac", bitrateKbps: 64, sampleRateHz: 11025 })).toBe(
+      "aac · 64 kbps · 11.025 kHz",
+    );
+  });
   it("drops zeroed numeric fields but keeps the codec", () => {
     expect(fmtAudio({ codec: "opus", bitrateKbps: 0, sampleRateHz: 0 })).toBe("opus");
   });

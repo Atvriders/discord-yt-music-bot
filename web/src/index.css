@@ -662,7 +662,11 @@ input[type="range"]:disabled {
   to {
     opacity: 1;
     transform: none;
-    filter: blur(0);
+    /* `none` (not blur(0)): with animation-fill-mode:forwards the end state freezes on
+       every .reveal panel. blur(0) is still a non-initial filter that creates a stacking
+       context, silently trapping any future position:fixed/high-z descendant inside the
+       panel. `none` resolves to the initial value and avoids that. Visually identical. */
+    filter: none;
   }
 }
 .reveal {

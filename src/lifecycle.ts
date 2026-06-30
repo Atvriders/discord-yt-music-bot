@@ -29,7 +29,11 @@ export async function runShutdown(tasks: Task[], opts: ShutdownOpts): Promise<bo
     }
   }
   clearTimeout(timer);
-  return true;
+  // The in-loop `if (forced) return false` guard only fires when there is a *next* task to
+  // skip. If the LAST (or only) task resolves after the grace timer already fired, the loop
+  // exits normally — so re-check `forced` here. Otherwise a single hung-then-resolved task
+  // would return true and trigger a second exit(0) on top of the timer's exit(1).
+  return !forced;
 }
 
 export function installSignalHandlers(tasks: Task[], opts: ShutdownOpts, log?: Logger): void {

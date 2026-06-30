@@ -41,6 +41,10 @@ describe("oauth state + urls", () => {
   it("avatarUrl builds a CDN url or a default", () => {
     expect(avatarUrl({ id: "1", avatar: "abc" })).toContain("/avatars/1/abc.png");
     expect(avatarUrl({ id: "1", avatar: "a_xyz" })).toContain(".gif");
-    expect(avatarUrl({ id: "22", avatar: null })).toContain("/embed/avatars/");
+    // id='22' >> 22 = 0, so index 0 regardless of the modulus — assert the exact index.
+    expect(avatarUrl({ id: "22", avatar: null })).toContain("/embed/avatars/0.png");
+    // A NON-zero shifted value exercises the % 6n modulus: 20971520 >> 22 = 5, 5 % 6 = 5.
+    // (5 % 5 = 0 under the old 5-avatar formula, so this distinguishes the two.)
+    expect(avatarUrl({ id: "20971520", avatar: null })).toContain("/embed/avatars/5.png");
   });
 });

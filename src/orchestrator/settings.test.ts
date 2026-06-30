@@ -36,6 +36,23 @@ describe("applySettingsPatch", () => {
     ).toBe(true);
     const base = { ...DEFAULT_SETTINGS, normalizeLoudness: true };
     expect(applySettingsPatch(base, { normalizeLoudness: "yes" }).normalizeLoudness).toBe(true);
+    // true -> false: the "turn off loudness normalization" path (mirrors the autoplay coverage).
+    expect(applySettingsPatch(base, { normalizeLoudness: false }).normalizeLoudness).toBe(false);
+  });
+
+  it("rejects boolean values for numeric fields (does not coerce false->0 / true->1)", () => {
+    // Booleans coerce via Number() to 0/1 and would otherwise slip past the numeric guards:
+    // {volume:false} would mute, {maxTrackDurationSec:false} would drop the cap,
+    // {idleTimeoutSec:false} would keep the bot in voice forever. They must fall back to base.
+    const base = {
+      ...DEFAULT_SETTINGS,
+      volume: 80,
+      maxTrackDurationSec: 3600,
+      idleTimeoutSec: 300,
+    };
+    expect(applySettingsPatch(base, { volume: false }).volume).toBe(80);
+    expect(applySettingsPatch(base, { maxTrackDurationSec: true }).maxTrackDurationSec).toBe(3600);
+    expect(applySettingsPatch(base, { idleTimeoutSec: false }).idleTimeoutSec).toBe(300);
   });
 
   it("accepts only valid repeat modes, else keeps base", () => {
@@ -140,6 +157,33 @@ describe("applySettingsPatch", () => {
     const base = { ...DEFAULT_SETTINGS, fx: "nightcore" as const };
     expect(applySettingsPatch(base, { fx: "bogus" }).fx).toBe("nightcore");
     expect(applySettingsPatch(base, { fx: 42 }).fx).toBe("nightcore");
+    // Explicit reset-to-none (the "turn off FX" flow): a valid "none" patch is accepted.
+    expect(applySettingsPatch(base, { fx: "none" }).fx).toBe("none");
+  });
+
+  it("defaults commandChannelId to null (unrestricted)", () => {
+    expect(DEFAULT_SETTINGS.commandChannelId).toBeNull();
+  });
+
+  it("accepts a non-empty string commandChannelId", () => {
+    expect(
+      applySettingsPatch(DEFAULT_SETTINGS, { commandChannelId: "123456789012345678" })
+        .commandChannelId,
+    ).toBe("123456789012345678");
+  });
+
+  it("treats null / empty-string commandChannelId as unrestricted (null)", () => {
+    const base = { ...DEFAULT_SETTINGS, commandChannelId: "999" };
+    expect(applySettingsPatch(base, { commandChannelId: null }).commandChannelId).toBeNull();
+    expect(applySettingsPatch(base, { commandChannelId: "" }).commandChannelId).toBeNull();
+    expect(applySettingsPatch(base, { commandChannelId: "   " }).commandChannelId).toBeNull();
+  });
+
+  it("keeps base commandChannelId for a non-string (and absent) patch value", () => {
+    const base = { ...DEFAULT_SETTINGS, commandChannelId: "555" };
+    expect(applySettingsPatch(base, { commandChannelId: 42 }).commandChannelId).toBe("555");
+    expect(applySettingsPatch(base, { commandChannelId: true }).commandChannelId).toBe("555");
+    expect(applySettingsPatch(base, {}).commandChannelId).toBe("555");
   });
 
   it("ignores unrelated / non-numeric input gracefully", () => {

@@ -77,12 +77,17 @@ export function registerWebsocket(app: FastifyInstance, deps: WsDeps): void {
 
     socket.on("message", (raw) => {
       void (async () => {
-        let msg: { subscribe?: string; unsubscribe?: string };
+        let parsed: unknown;
         try {
-          msg = JSON.parse(raw.toString()) as { subscribe?: string; unsubscribe?: string };
+          parsed = JSON.parse(raw.toString());
         } catch {
           return;
         }
+        // JSON.parse("null"), "123", "[]", '"x"' are all valid JSON but not control
+        // messages. Silently ignore any non-object payload — otherwise `msg.subscribe`
+        // below would throw (e.g. on null) and reject the IIFE as an unhandled rejection.
+        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return;
+        const msg = parsed as { subscribe?: string; unsubscribe?: string };
         if (msg.subscribe) {
           const gid = msg.subscribe;
           if (!(await canControl(deps.client, userId, gid, deps.adminIds))) {

@@ -482,10 +482,16 @@ describe("GuildController playback position + paused", () => {
     const session = new FakeSession();
     const cacheStore = new Map<string, string>();
     const audioStore = new Map<string, AudioInfo | null>();
-    const makeResource = vi.fn((p: string, _item: unknown, opts?: { seekMs?: number }) => ({
-      res: p,
-      seekMs: opts?.seekMs ?? 0,
-    }));
+    const makeResource = vi.fn(
+      (
+        p: string,
+        _item: unknown,
+        opts?: { seekMs?: number },
+      ): { res: string; seekMs: number } | Promise<{ res: string; seekMs: number }> => ({
+        res: p,
+        seekMs: opts?.seekMs ?? 0,
+      }),
+    );
     const deps = {
       youtube: {
         download: vi.fn(async (id: string) => ({ path: `/cache/${id}.webm`, audio: AUDIO })),
@@ -631,6 +637,104 @@ describe("GuildController playback position + paused", () => {
     expect(ctrl.snapshot().current).toBeNull();
   });
 
+  it("stop() during an in-flight download does NOT resume playback after the download completes", async () => {
+    // The stop()-race: stop() runs while playItemLocked is awaiting ensureDownloaded. stop()
+    // keeps the same session alive (only session.stop()), so the `this.session !== session`
+    // guard alone would NOT fire and the resumed download would pin + playResource — resuming
+    // playback the user explicitly stopped. stop() must serialize under the lock AND invalidate
+    // the in-flight prepare (stopEpoch) so the resumed playItemLocked bails.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const { ctrl, session } = makeController({
+      downloadFn: async (id: string) => {
+        await gate; // block the first download until we release it
+        return { path: `/cache/${id}.webm`, audio: AUDIO };
+      },
+    });
+    await ctrl.ensureConnected("C1");
+    // Kick off enqueue → playItemLocked, which now blocks awaiting the gated download.
+    void ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(session.play).not.toHaveBeenCalled(); // still downloading
+
+    // Stop while the download is in flight. stop() takes the lock; the in-flight playItemLocked
+    // holds it across the await, so stop() runs AFTER the download resumes — but the stopEpoch
+    // bump makes that resumed prepare bail before pinning/playing.
+    const stopped = ctrl.stop();
+    release(); // let the download finish
+    await stopped;
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Playback must NOT have resumed: the resumed playItemLocked saw the bumped stopEpoch and
+    // bailed before pinning/playing. Queue cleared, no now-playing, no lingering prepare.
+    expect(session.play).not.toHaveBeenCalled();
+    expect(ctrl.snapshot().current).toBeNull();
+    expect(ctrl.snapshot().preparing).toBeNull();
+  });
+
+  it("does NOT record consecutive download FAILURES in history (only cleanly-played tracks)", async () => {
+    // Two-or-more consecutive failures: the first failed track is discarded (not historied),
+    // but the promoted next that ALSO fails must likewise be discarded — advance() would wrongly
+    // archive it, letting Replay re-add a track that re-fails. Neither failed id may be in history.
+    const onTrackError = vi.fn();
+    const { ctrl } = makeController({
+      onTrackError,
+      // Every download fails so each promoted track fails to play in turn.
+      downloadFn: async () => {
+        throw new Error("download failed");
+      },
+    });
+    await ctrl.ensureConnected("C1");
+    // Seed history with a cleanly-played track via a successful first download, THEN switch to
+    // failing — simpler: just enqueue three that all fail and assert none reach history.
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
+    await ctrl.enqueue(meta("ccccccccccc"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    const history = ctrl.snapshot().history.map((i) => i.meta.videoId);
+    expect(history).not.toContain("aaaaaaaaaaa");
+    expect(history).not.toContain("bbbbbbbbbbb");
+    expect(history).not.toContain("ccccccccccc");
+  });
+
+  it("a skip() during the prepare window is honored once the track starts (not swallowed)", async () => {
+    // skip() during a track's download/processing finds the player Idle, so a plain
+    // session.skip() emits no fresh trackEnd and the click is lost. The controller records the
+    // intent and, the instant the track starts, advances past it — so the queued next track plays.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const { ctrl, session } = makeController({
+      downloadFn: async (id: string) => {
+        // Gate EVERY download of track A (both the playItemLocked prepare and the prefetch),
+        // so A stays in the "downloading" prepare phase until we release — avoiding a race
+        // where prefetch finishes A first and lets playItemLocked skip the gated phase.
+        if (id === "aaaaaaaaaaa") await gate;
+        return { path: `/cache/${id}.webm`, audio: AUDIO };
+      },
+    });
+    await ctrl.ensureConnected("C1");
+    // Both enqueues block in maybeStart behind the gated first download (queue.add itself runs
+    // immediately on its own mutex, so B still lands in the queue) — so DON'T await them.
+    void ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    void ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    // First track is mid-prepare (downloading); skip it now.
+    expect(ctrl.snapshot().preparing?.videoId).toBe("aaaaaaaaaaa");
+    ctrl.skip();
+    release();
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    // The skipped track must not be the current; the next one plays instead.
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("bbbbbbbbbbb");
+    expect(session.play).toHaveBeenCalled();
+  });
+
   describe("GuildController.seek", () => {
     it("re-creates the resource at the offset, re-anchors position, and broadcasts", async () => {
       const { ctrl, session, makeResource, advanceClock } = makeClockController();
@@ -673,6 +777,41 @@ describe("GuildController playback position + paused", () => {
       expect(ctrl.snapshot().current?.positionMs).toBe(20_000);
       advanceClock(5000); // time passes while paused -> position stays frozen
       expect(ctrl.snapshot().current?.positionMs).toBe(20_000);
+    });
+
+    it("a resume() issued DURING a seek's await is honored (not overwritten by the pre-await pause)", async () => {
+      // Race: seek() captures the resource via an awaited makeResource. A resume() that lands
+      // during that await must WIN — the controller re-reads the live pause intent AFTER the
+      // await instead of re-applying a stale pre-await snapshot. Otherwise the user's resume is
+      // silently dropped and the bar stays frozen.
+      const { ctrl, session, makeResource } = makeClockController();
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+      await new Promise((r) => setTimeout(r, 0));
+      ctrl.pause();
+      expect(ctrl.snapshot().paused).toBe(true);
+
+      // Make the NEXT makeResource (the seek's) block until we release it, opening the await window.
+      let release!: () => void;
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      session.resume.mockClear();
+      makeResource.mockImplementationOnce(async (p: string) => {
+        await gate;
+        return { res: p, seekMs: 0 };
+      });
+
+      const seeking = ctrl.seek(10_000);
+      await new Promise((r) => setTimeout(r, 0));
+      // Resume arrives mid-seek (while makeResource is still pending).
+      ctrl.resume();
+      release();
+      await seeking;
+
+      // The resume won: the track is unpaused and the session was resumed, not paused.
+      expect(ctrl.snapshot().paused).toBe(false);
+      expect(session.resume).toHaveBeenCalled();
     });
 
     it("returns false when nothing is playing", async () => {
@@ -1081,12 +1220,16 @@ describe("GuildController settings", () => {
       session.emit("trackEnd");
       await new Promise((r) => setTimeout(r, 0));
 
-      // Nothing new to play -> idle. related() was consulted (de-dup filtered every id), but
-      // a BOUNDED number of times — the seen-id de-dup + chain cap stop it spinning.
+      // Nothing new to play -> idle. In the all-seen path the AUTOPLAY_MAX_CHAIN cap never
+      // fires (autoplayChain is only incremented on a HIT, after the `if (!next) return null`
+      // early-out), so ONLY the seen-id de-dup bounds the calls. related() is consulted by both
+      // the reactive trackEnd path and the proactive low-water top-ups — a small constant, not
+      // the chain cap. Pin a tight bound so a regression that loops related() up to the cap
+      // (which would pass a ≤cap+1 bound) is caught.
       expect(ctrl.snapshot().current).toBeNull();
       expect(session.startIdleTimer).toHaveBeenCalled();
       expect(related.mock.calls.length).toBeGreaterThanOrEqual(1);
-      expect(related.mock.calls.length).toBeLessThanOrEqual(AUTOPLAY_MAX_CHAIN + 1);
+      expect(related.mock.calls.length).toBeLessThanOrEqual(3);
     });
 
     it("caps consecutive autoplay enqueues at AUTOPLAY_MAX_CHAIN even when fresh ids keep arriving", async () => {
@@ -1115,8 +1258,9 @@ describe("GuildController settings", () => {
       // Autoplay stopped at the cap: current is null and the idle timer started.
       expect(ctrl.snapshot().current).toBeNull();
       expect(session.startIdleTimer).toHaveBeenCalled();
-      // related() was consulted for each enqueue (AUTOPLAY_MAX_CHAIN) plus the final pull
-      // that hit the cap before enqueuing — bounded, never unbounded.
+      // related() is called once per successful autoplay enqueue (AUTOPLAY_MAX_CHAIN times);
+      // the chain-cap guard in nextAutoplayCandidate returns BEFORE related() is invoked, so
+      // there is no extra cap-hit call — bounded, never unbounded.
       expect(related.mock.calls.length).toBe(AUTOPLAY_MAX_CHAIN);
     });
 

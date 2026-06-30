@@ -130,6 +130,75 @@ describe("Queue power tools", () => {
     );
     expect(totalText()).toBe("1:00");
   });
+
+  function renderQueue(props: Partial<Parameters<typeof Queue>[0]> = {}) {
+    return render(
+      <Queue
+        items={[item("a", 60), item("b", 60), item("c", 60)]}
+        current={null}
+        onRemove={noop}
+        onReorder={noop}
+        onShuffle={noop}
+        onPlayNext={noop}
+        onJump={noop}
+        {...props}
+      />,
+    );
+  }
+
+  it("Move up calls onReorder(id, i-1); the first row's Move up is disabled", () => {
+    const onReorder = vi.fn();
+    renderQueue({ onReorder });
+    const rows = screen.getAllByRole("listitem");
+    fireEvent.click(within(rows[1]!).getByRole("button", { name: /move up/i }));
+    expect(onReorder).toHaveBeenCalledWith("b", 0);
+    const firstUp = within(rows[0]!).getByRole("button", { name: /move up/i }) as HTMLButtonElement;
+    expect(firstUp.disabled).toBe(true);
+    fireEvent.click(firstUp);
+    expect(onReorder).toHaveBeenCalledTimes(1); // disabled click was a no-op
+  });
+
+  it("Move down calls onReorder(id, i+1); the last row's Move down is disabled", () => {
+    const onReorder = vi.fn();
+    renderQueue({ onReorder });
+    const rows = screen.getAllByRole("listitem");
+    fireEvent.click(within(rows[0]!).getByRole("button", { name: /move down/i }));
+    expect(onReorder).toHaveBeenCalledWith("a", 1);
+    const lastDown = within(rows[2]!).getByRole("button", { name: /move down/i }) as HTMLButtonElement;
+    expect(lastDown.disabled).toBe(true);
+    fireEvent.click(lastDown);
+    expect(onReorder).toHaveBeenCalledTimes(1);
+  });
+
+  it("Remove calls onRemove with the row's id", () => {
+    const onRemove = vi.fn();
+    renderQueue({ onRemove });
+    const rows = screen.getAllByRole("listitem");
+    fireEvent.click(within(rows[1]!).getByRole("button", { name: /remove/i }));
+    expect(onRemove).toHaveBeenCalledWith("b");
+  });
+
+  it("renders the empty-queue notice and no rows when there are no upcoming items", () => {
+    render(
+      <Queue items={[]} current={null} onRemove={noop} onReorder={noop} onShuffle={noop}
+        onPlayNext={noop} onJump={noop} />,
+    );
+    screen.getByText("The queue is empty.");
+    expect(screen.queryAllByRole("listitem")).toHaveLength(0);
+  });
+
+  it("disables Shuffle with fewer than 2 items, enables it with 2", () => {
+    const { rerender } = render(
+      <Queue items={[item("a", 60)]} current={null} onRemove={noop} onReorder={noop}
+        onShuffle={noop} onPlayNext={noop} onJump={noop} />,
+    );
+    expect((screen.getByRole("button", { name: /shuffle/i }) as HTMLButtonElement).disabled).toBe(true);
+    rerender(
+      <Queue items={[item("a", 60), item("b", 60)]} current={null} onRemove={noop} onReorder={noop}
+        onShuffle={noop} onPlayNext={noop} onJump={noop} />,
+    );
+    expect((screen.getByRole("button", { name: /shuffle/i }) as HTMLButtonElement).disabled).toBe(false);
+  });
 });
 
 describe("Queue auto-discover toggle", () => {

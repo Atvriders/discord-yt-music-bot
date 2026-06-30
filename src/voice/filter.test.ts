@@ -65,14 +65,33 @@ describe("buildAudioFilter", () => {
   it("emits the correct ffmpeg fragment for each FX preset", () => {
     const cases: Record<string, string> = {
       bassboost: "bass=g=15",
-      nightcore: "aresample=48000,asetrate=48000*1.25",
-      vaporwave: "asetrate=48000*0.8,aresample=48000",
+      // nightcore/vaporwave include an explicit aformat=channel_layouts=stereo before the
+      // resample so the fragment is self-contained (see the loudnorm-chain test below).
+      nightcore: "aformat=channel_layouts=stereo,aresample=48000,asetrate=48000*1.25",
+      vaporwave: "asetrate=48000*0.8,aformat=channel_layouts=stereo,aresample=48000",
       eightd: "apulsator=hz=0.09",
       treble: "treble=g=10",
       karaoke: "stereotools=mlev=0.015",
     };
     for (const [fx, frag] of Object.entries(cases)) {
       expect(buildAudioFilter({ ...off, fx: fx as never }, 180, false)).toBe(frag);
+    }
+  });
+
+  it("guards nightcore/vaporwave with an aformat BEFORE the aresample when loudnorm precedes them", () => {
+    // Regression: loudnorm emits a non-standard channel-layout annotation; a downstream
+    // aresample then fails hard ("Unknown channel layouts not supported ... Failed to inject
+    // frame"), closing ffmpeg's stdout → an empty stream → a silently-failed track. The
+    // explicit aformat pins a concrete layout so the aresample can always negotiate, making
+    // the loudnorm + nightcore/vaporwave combination valid.
+    for (const fx of ["nightcore", "vaporwave"] as const) {
+      const f = buildAudioFilter({ ...off, normalizeLoudness: true, fx }, 180, false)!;
+      expect(f.startsWith("loudnorm,")).toBe(true);
+      const afmt = f.indexOf("aformat=channel_layouts=stereo");
+      const resample = f.indexOf("aresample=48000");
+      expect(afmt).toBeGreaterThanOrEqual(0);
+      // The layout guard must precede the resample so the resample has a concrete layout.
+      expect(afmt).toBeLessThan(resample);
     }
   });
 

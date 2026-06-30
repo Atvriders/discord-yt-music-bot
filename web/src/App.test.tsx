@@ -109,8 +109,12 @@ describe("App", () => {
 
     // The control call was made...
     await waitFor(() => expect(pauseCalls).toBe(1));
-    // ...and the failure is surfaced to the user, not silently swallowed.
-    await waitFor(() => expect(screen.getByText(/forbidden|couldn't pause|pause failed/i)).toBeTruthy());
+    // ...and the failure is surfaced to the user with the action name pinned (not a
+    // generic "forbidden" banner that the word 'forbidden' alone would satisfy).
+    await waitFor(() => expect(screen.getByText(/couldn't pause — forbidden/i)).toBeTruthy());
+    // The optimistic toggle is reverted: the transport button re-labels back to "Pause"
+    // after the failed attempt (it must not get stuck on "Resume").
+    await waitFor(() => expect(screen.getByRole("button", { name: "Pause" })).toBeTruthy());
   });
 
   it("ITEM 1: defaults to the stored guild when it is one the user can control", async () => {
@@ -244,6 +248,57 @@ describe("App", () => {
     // Changing it posts the new value to the settings endpoint.
     fireEvent.change(sel, { target: { value: "60" } });
     await waitFor(() => expect(settingsPosts).toContainEqual({ idleTimeoutSec: 60 }));
+  });
+
+  it("Command channel: reflects the WS snapshot value and posts a commandChannelId patch on change", async () => {
+    class FakeWS {
+      readonly listeners: Record<string, ((e: unknown) => void)[]> = {};
+      constructor() {
+        setTimeout(() => {
+          this.emit("open", {});
+          this.emit("message", {
+            data: JSON.stringify({
+              type: "state",
+              state: { current: null, upcoming: [], history: [], paused: false, idleTimeoutSec: 300, commandChannelId: "T1" },
+            }),
+          });
+        }, 0);
+      }
+      addEventListener(ev: string, cb: (e: unknown) => void) { (this.listeners[ev] ??= []).push(cb); }
+      emit(ev: string, e: unknown) { for (const cb of this.listeners[ev] ?? []) cb(e); }
+      send() {}
+      close() {}
+    }
+    vi.stubGlobal("WebSocket", FakeWS as unknown as typeof WebSocket);
+
+    const settingsPosts: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
+      if (url.includes("/api/me")) {
+        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "The Booth" }] }) });
+      }
+      if (url.includes("/api/guilds/G1/voice-channels")) {
+        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [], currentChannelId: null }) });
+      }
+      if (url.includes("/api/guilds/G1/text-channels")) {
+        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [{ id: "T1", name: "general" }, { id: "T2", name: "music" }] }) });
+      }
+      if (url.endsWith("/api/guilds/G1/settings") && init?.method === "POST") {
+        settingsPosts.push(JSON.parse(String(init.body)));
+        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ settings: { commandChannelId: "T2" } }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: [], history: [], paused: false, idleTimeoutSec: 300 }) });
+    }));
+
+    render(<App />);
+    const sel = (await screen.findByLabelText(/command channel/i)) as HTMLSelectElement;
+    // Reflects the WS snapshot's commandChannelId.
+    await waitFor(() => expect(sel.value).toBe("T1"));
+    // Changing it posts the new channel id to the settings endpoint.
+    fireEvent.change(sel, { target: { value: "T2" } });
+    await waitFor(() => expect(settingsPosts).toContainEqual({ commandChannelId: "T2" }));
+    // Selecting "Any channel" posts null.
+    fireEvent.change(sel, { target: { value: "" } });
+    await waitFor(() => expect(settingsPosts).toContainEqual({ commandChannelId: null }));
   });
 
   it("shows the panel + server selector when logged in", async () => {

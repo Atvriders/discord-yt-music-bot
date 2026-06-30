@@ -79,7 +79,12 @@ describe("registerWebsocket (integration)", () => {
     allow?: { value: boolean };
     revalidateMs?: number;
     broadcaster?: GuildBroadcaster;
-  }): Promise<{ url: string; deps: WsDeps; allow: { value: boolean } }> {
+  }): Promise<{
+    url: string;
+    deps: WsDeps;
+    allow: { value: boolean };
+    controller: EventEmitter & { snapshot: () => unknown };
+  }> {
     const allow = opts.allow ?? { value: true };
     const guild = {
       members: {
@@ -90,14 +95,15 @@ describe("registerWebsocket (integration)", () => {
       },
     };
     const client = { guilds: { cache: new Map([[GUILD, guild]]) } } as never;
+    // A real EventEmitter-backed controller so attach()'s on('changed', …) wiring is exercised
+    // end-to-end: emitting 'changed' must reach a subscribed socket. A plain { on: () => {} }
+    // stub silently discarded the listener and could not catch a broken/removed attach().
+    const controller = Object.assign(new EventEmitter(), {
+      snapshot: () => ({ current: null, upcoming: [], history: [], paused: false }),
+    });
     const deps: WsDeps = {
       broadcaster: opts.broadcaster ?? new GuildBroadcaster(),
-      hub: {
-        get: () => ({
-          on: () => undefined,
-          snapshot: () => ({ current: null, upcoming: [], history: [], paused: false }),
-        }),
-      },
+      hub: { get: () => controller as never },
       client,
       adminIds: new Set<string>(),
       allowedOrigins: [ORIGIN],
@@ -114,14 +120,24 @@ describe("registerWebsocket (integration)", () => {
     await app.listen({ port: 0, host: "127.0.0.1" });
     const addr = app.server.address();
     const port = typeof addr === "object" && addr ? addr.port : 0;
-    return { url: `ws://127.0.0.1:${port}/ws`, deps, allow };
+    return { url: `ws://127.0.0.1:${port}/ws`, deps, allow, controller };
   }
 
+  // Reject on an unexpected close/error so a missing/wrong message fails fast with a
+  // descriptive error instead of hanging until vitest's default 5 s timeout (which gives no
+  // diagnostic). Diagnostic-quality only — currently-passing tests are unaffected.
   function nextMessage(ws: WebSocket): Promise<unknown> {
-    return new Promise((res) => ws.once("message", (d) => res(JSON.parse(d.toString()))));
+    return new Promise((res, rej) => {
+      ws.once("message", (d) => res(JSON.parse(d.toString())));
+      ws.once("error", rej);
+      ws.once("close", (code) => rej(new Error(`socket closed (code ${code}) before a message`)));
+    });
   }
   function closed(ws: WebSocket): Promise<number> {
-    return new Promise((res) => ws.once("close", (code) => res(code)));
+    return new Promise((res, rej) => {
+      ws.once("close", (code) => res(code));
+      ws.once("error", rej);
+    });
   }
 
   it("rejects a disallowed Origin with HTTP 403 bad_origin", async () => {
@@ -168,6 +184,56 @@ describe("registerWebsocket (integration)", () => {
     const msg = await nextMessage(ws);
     expect(msg).toMatchObject({ type: "state", guildId: GUILD });
     expect(subSpy).toHaveBeenCalledWith(GUILD, expect.any(Function));
+    ws.close();
+  });
+
+  it("a controller 'changed' event reaches the subscribed socket as a state frame", async () => {
+    const { url, controller } = await boot({});
+    const ws = new WebSocket(url, { headers: { origin: ORIGIN } });
+    await new Promise((r) => ws.once("open", r));
+    ws.send(JSON.stringify({ subscribe: GUILD }));
+    await nextMessage(ws); // initial snapshot
+    // Drive the real controller; attach() must have wired this through to the broadcaster.
+    controller.emit("changed");
+    const frame = await nextMessage(ws);
+    expect(frame).toMatchObject({ type: "state", guildId: GUILD });
+    ws.close();
+  });
+
+  it("an explicit {unsubscribe} stops further broadcasts to the socket", async () => {
+    const broadcaster = new GuildBroadcaster();
+    const unsubSpy = vi.spyOn(broadcaster, "unsubscribe");
+    const { url, controller } = await boot({ broadcaster });
+    const ws = new WebSocket(url, { headers: { origin: ORIGIN } });
+    await new Promise((r) => ws.once("open", r));
+    ws.send(JSON.stringify({ subscribe: GUILD }));
+    await nextMessage(ws); // initial snapshot
+    ws.send(JSON.stringify({ unsubscribe: GUILD }));
+    // Give the unsubscribe message a tick to be processed server-side.
+    await new Promise((r) => setTimeout(r, 30));
+    expect(unsubSpy).toHaveBeenCalledWith(GUILD, expect.any(Function));
+    // After unsubscribe, a 'changed' must NOT deliver any further frame.
+    let got = false;
+    ws.on("message", () => (got = true));
+    controller.emit("changed");
+    await new Promise((r) => setTimeout(r, 50));
+    expect(got).toBe(false);
+    ws.close();
+  });
+
+  it("ignores a non-object JSON payload (e.g. null) without crashing the connection", async () => {
+    const { url } = await boot({});
+    const ws = new WebSocket(url, { headers: { origin: ORIGIN } });
+    await new Promise((r) => ws.once("open", r));
+    // JSON.parse("null") is valid JSON but not a control message; the handler must
+    // silently ignore it rather than throw on `msg.subscribe` (unhandled rejection).
+    ws.send("null");
+    ws.send("123");
+    ws.send("not json{");
+    // The socket must stay open and still serve a legitimate subscribe afterwards.
+    ws.send(JSON.stringify({ subscribe: GUILD }));
+    const msg = await nextMessage(ws);
+    expect(msg).toMatchObject({ type: "state", guildId: GUILD });
     ws.close();
   });
 

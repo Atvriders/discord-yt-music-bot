@@ -83,6 +83,44 @@ describe("AudioCache", () => {
     expect(cache.totalBytes()).toBe(600);
   });
 
+  it("keeps evicting when the re-registered id is itself the LRU victim (no phantom credit)", async () => {
+    // Regression for the eviction undercount: when the entry being overwritten is ALSO the
+    // LRU victim, the old code subtracted a constant `oldSize` from totalBytes() across the
+    // loop even after that entry left the map — a phantom credit that exited the loop early
+    // and left the cache OVER the cap with other evictable entries still present.
+    //
+    // maxBytes=1000, A:400 then B:400 (A is LRU). Re-register A with a LARGER 700-byte file.
+    // Freeing A up front leaves B:400; 400+700=1100 > 1000 -> B must be evicted, landing at
+    // A':700 ≤ 1000. The bug would have left {B:400, A':700} = 1100 > cap.
+    const cache = new AudioCache(dir, 1000);
+    await cache.init();
+    cache.register("aaaaaaaaaaa", await makeFile("aaaaaaaaaaa.webm", 400));
+    cache.register("bbbbbbbbbbb", await makeFile("bbbbbbbbbbb.webm", 400));
+    cache.register("aaaaaaaaaaa", await makeFile("aaaaaaaaaaa2.webm", 700)); // larger overwrite
+    expect(cache.totalBytes()).toBeLessThanOrEqual(1000);
+    expect(cache.has("bbbbbbbbbbb")).toBe(false); // the LRU innocent entry WAS evicted
+    expect(cache.has("aaaaaaaaaaa")).toBe(true);
+    expect(cache.get("aaaaaaaaaaa")).toBe(join(dir, "aaaaaaaaaaa2.webm")); // new path
+    expect(cache.totalBytes()).toBe(700);
+  });
+
+  it("preserves the pinned flag across re-registration (currently-playing track survives)", async () => {
+    // The orchestrator pins the currently-playing track. If that track is re-registered while
+    // pinned (e.g. a re-download), the new entry must STAY pinned or it becomes eviction-
+    // eligible mid-playback. Guards index.ts `pinned: oldEntry?.pinned ?? false`.
+    const cache = new AudioCache(dir, 500);
+    await cache.init();
+    cache.register("aaaaaaaaaaa", await makeFile("aaaaaaaaaaa.webm", 200));
+    cache.pin("aaaaaaaaaaa");
+    // Re-register the SAME id (still pinned) with a new file/path.
+    cache.register("aaaaaaaaaaa", await makeFile("aaaaaaaaaaa2.webm", 200));
+    expect(cache.has("aaaaaaaaaaa")).toBe(true);
+    expect(cache.get("aaaaaaaaaaa")).toBe(join(dir, "aaaaaaaaaaa2.webm"));
+    // Push the cache over the cap; the still-pinned re-registered entry must survive eviction.
+    cache.register("bbbbbbbbbbb", await makeFile("bbbbbbbbbbb.webm", 400)); // 200+400=600 > 500
+    expect(cache.has("aaaaaaaaaaa")).toBe(true); // pin preserved across re-register
+  });
+
   it("does not register a ghost entry for a file that is missing on disk", async () => {
     const cache = new AudioCache(dir, 1000);
     await cache.init();

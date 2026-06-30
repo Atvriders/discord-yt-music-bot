@@ -19,6 +19,17 @@ describe("parseAdminIds", () => {
   it("keeps valid snowflakes, drops junk", () => {
     expect([...parseAdminIds({ ADMIN_USER_IDS: `${SNOW}, 99, ${GUILD}` })]).toEqual([SNOW, GUILD]);
   });
+  it("enforces the 17–20 digit snowflake length boundaries", () => {
+    const tooShort = "1234567890123456"; // 16 digits (one below min)
+    const tooLong = "123456789012345678901"; // 21 digits (one above max)
+    const result = [
+      ...parseAdminIds({ ADMIN_USER_IDS: `${tooShort}, ${SNOW}, ${tooLong}, ${GUILD}` }),
+    ];
+    // Pins {17,20}: a regression to {16,20} or {17,} would let a boundary value slip in.
+    expect(result).toEqual([SNOW, GUILD]);
+    expect(result).not.toContain(tooShort);
+    expect(result).not.toContain(tooLong);
+  });
 });
 
 describe("canControl", () => {
@@ -47,9 +58,19 @@ describe("canControl", () => {
       ),
     ).toBe(true);
   });
-  it("false for malformed ids", async () => {
+  it("false for a malformed userId", async () => {
     expect(
       await canControl(clientWith({ hasGuild: true, isMember: true }), "bad", GUILD, new Set()),
+    ).toBe(false);
+  });
+  it("false for a malformed guildId (symmetric snowflake guard)", async () => {
+    expect(
+      await canControl(
+        clientWith({ hasGuild: true, isMember: true }),
+        SNOW,
+        "bad-guild",
+        new Set(),
+      ),
     ).toBe(false);
   });
 });

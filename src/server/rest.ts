@@ -136,7 +136,15 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
       const parsed = parseInput(input);
       if (parsed.kind === "reject") return reply.code(400).send({ error: parsed.reason });
       if (parsed.kind === "query") {
-        return { candidates: await deps.youtube.search(parsed.query, deps.searchLimit) };
+        // Mirror the resolve handler: a yt-dlp failure throws YtError whose .message carries
+        // raw stderr. Map it to a 400 with the error KIND (not message) so a search failure
+        // is a clean 4xx and never leaks yt-dlp internals as an unhandled 500 body.
+        try {
+          return { candidates: await deps.youtube.search(parsed.query, deps.searchLimit) };
+        } catch (err) {
+          if (err instanceof YtError) return reply.code(400).send({ error: err.kind });
+          throw err;
+        }
       }
       return enqueueVideo(req, reply, parsed.videoId);
     },
@@ -207,16 +215,19 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
     const body = (req.body ?? {}) as { voiceChannelId?: string };
     const user = sessionUser(req);
     if (!user) return reply.code(401).send({ error: "unauthenticated" });
+    const controller = deps.hub.get(params.id);
+    // Validate/connect the voice target BEFORE the (multi-second) YouTube resolve so a doomed
+    // request (no_voice_channel / voice_connect_failed) returns immediately instead of after a
+    // wasted round-trip — and so this matches the playlist-load path which checks voice first.
+    const voice = await ensureVoiceTarget(req, controller, body.voiceChannelId);
+    if ("error" in voice) return reply.code(400).send({ error: voice.error });
+    const moveSuppressed = voice.moveSuppressed;
     let meta: TrackMeta;
     try {
       meta = await deps.youtube.resolve(videoId);
     } catch (err) {
       return reply.code(400).send({ error: err instanceof YtError ? err.kind : "resolve_failed" });
     }
-    const controller = deps.hub.get(params.id);
-    const voice = await ensureVoiceTarget(req, controller, body.voiceChannelId);
-    if ("error" in voice) return reply.code(400).send({ error: voice.error });
-    const moveSuppressed = voice.moveSuppressed;
     const requester: Requester = {
       discordUserId: user.id,
       displayName: user.global_name ?? user.username,
@@ -232,7 +243,10 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
       if (err instanceof YtError) {
         return reply.code(400).send({ error: err.message });
       }
-      throw err;
+      // Any other enqueue failure (e.g. an unexpected internal error) is an infrastructure
+      // problem, not a user error. Return a sanitised 500 rather than rethrowing, so the raw
+      // error message / stack is never leaked to the client.
+      return reply.code(500).send({ error: "enqueue_failed" });
     }
     return {
       queued: { id: item.id, title: meta.title },
@@ -343,6 +357,36 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
     return { channels, currentChannelId };
   });
 
+  // The guild's TEXT channels (for the single-channel command restriction picker). Mirrors
+  // the voice-channels endpoint. A discord.js voice channel is also "text-based" (it has a
+  // chat), so we exclude voice channels explicitly — this returns true text channels only.
+  app.get<{ Params: { id: string } }>("/api/guilds/:id/text-channels", async (req, reply) => {
+    if (!(await requireControl(req, reply, req.params.id))) return;
+    const guild = deps.client.guilds.cache.get(req.params.id) as
+      | {
+          channels?: {
+            cache: Map<
+              string,
+              {
+                id: string;
+                name: string;
+                type: number;
+                isTextBased?: () => boolean;
+                isVoiceBased?: () => boolean;
+              }
+            >;
+          };
+        }
+      | undefined;
+    const channels: { id: string; name: string }[] = [];
+    for (const ch of guild?.channels?.cache?.values() ?? []) {
+      const textBased = ch.isTextBased?.() ?? false;
+      const voiceBased = ch.isVoiceBased?.() ?? false;
+      if (textBased && !voiceBased) channels.push({ id: ch.id, name: ch.name });
+    }
+    return { channels };
+  });
+
   // Per-guild panel settings: idle timeout (how long the bot lingers in voice after
   // playback ends), pseudo-crossfade seconds, loudness normalization, and repeat mode.
   app.get<{ Params: { id: string } }>("/api/guilds/:id/settings", async (req, reply) => {
@@ -378,11 +422,15 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
       try {
         await deps.hub.get(req.params.id).savePlaylist(name);
       } catch (err) {
-        // save() throws on a blank name (guarded above) or an empty queue — surface the
-        // latter as a 400 ("cannot save an empty playlist") rather than a generic 500.
-        return reply
-          .code(400)
-          .send({ error: err instanceof Error ? err.message : "could not save playlist" });
+        // Distinguish expected DOMAIN errors (blank name / empty queue) from infrastructure
+        // I/O errors (ENOSPC/EACCES/ENOENT from persist()'s mkdir+writeFile+rename). Only the
+        // former are 400s with their message; an I/O failure is a 500 with a generic message
+        // so the raw fs error (which embeds the server-side filesystem path) never leaks.
+        const msg = err instanceof Error ? err.message : "";
+        if (msg.startsWith("playlist name") || msg.startsWith("cannot save")) {
+          return reply.code(400).send({ error: msg });
+        }
+        return reply.code(500).send({ error: "could not save playlist" });
       }
       return { ok: true, playlists: deps.hub.get(req.params.id).listPlaylists() };
     },
@@ -406,7 +454,11 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
         avatarUrl: avatarUrl(user),
         source: "web",
       };
-      const name = decodeURIComponent(req.params.name);
+      // find-my-way (Fastify's router) already percent-decodes path params, so req.params.name
+      // is the real name. A second decodeURIComponent here would throw URIError -> unhandled
+      // 500 for any saved name containing a literal '%' (e.g. "50% off" arrives URL-encoded as
+      // "50%25off", decoded once to "50%off", then a second decode throws).
+      const name = req.params.name;
       // loadPlaylist enqueues the saved tracks and calls maybeStart(), so playback begins
       // immediately now that the bot is connected.
       const count = await controller.loadPlaylist(name, requester);
@@ -424,7 +476,9 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
     "/api/guilds/:id/playlists/:name",
     async (req, reply) => {
       if (!(await requireControl(req, reply, req.params.id))) return;
-      const name = decodeURIComponent(req.params.name);
+      // find-my-way already percent-decodes path params; a second decode would throw
+      // URIError -> unhandled 500 for any name containing a literal '%'. See the load route.
+      const name = req.params.name;
       const existed = await deps.hub.get(req.params.id).deletePlaylist(name);
       if (!existed) return reply.code(404).send({ error: "playlist not found" });
       return { ok: true, playlists: deps.hub.get(req.params.id).listPlaylists() };

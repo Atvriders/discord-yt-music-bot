@@ -20,6 +20,7 @@ export interface HandlerContext {
     | "remove"
     | "snapshot"
     | "setVolume"
+    | "updateSettings"
   >;
   youtube: {
     resolve(videoId: string): Promise<TrackMeta>;
@@ -28,6 +29,8 @@ export interface HandlerContext {
   requester: Requester;
   requesterChannelId: string | null;
   botChannelId: string | null;
+  /** The text channel id the command was sent in (used by `?channel` to set the restriction). */
+  channelId: string;
   isAdmin: boolean;
   searchLimit: number;
 }
@@ -44,6 +47,7 @@ const HELP = [
   "`?history` — show recently played tracks",
   "`?remove <n>` — remove queue item n",
   "`?volume <0-200>` — set playback volume (100 = normal)",
+  "`?channel` — (admin) restrict the bot to this channel · `?channel off` to clear",
 ].join("\n");
 
 function msg(content: string): HandlerResult {
@@ -72,6 +76,8 @@ export async function handleCommand(cmd: Command, ctx: HandlerContext): Promise<
       const settings = ctx.controller.setVolume(cmd.percent);
       return msg(`🔊 Volume set to **${settings.volume}%**.`);
     }
+    case "channel":
+      return handleChannel(cmd.mode, ctx);
     case "queue":
       return msg(formatQueue(ctx));
     case "np":
@@ -124,8 +130,19 @@ async function handlePlay(input: string, ctx: HandlerContext): Promise<HandlerRe
     isAdmin: ctx.isAdmin,
   });
   if (!target.ok) return msg(`❌ ${target.reason}`);
-  if (target.move) await ctx.controller.moveTo(target.channelId);
-  else await ctx.controller.ensureConnected(target.channelId);
+  // Voice-join can fail for concrete, user-actionable reasons (missing CONNECT permission,
+  // the channel was deleted, a transient gateway/network error). Without this guard the
+  // rejection escapes to bot.ts's generic "Something went wrong", and a failed moveTo —
+  // which destroys the old session before reconnecting — would silently leave the guild with
+  // no session and only an opaque error. Surface a concrete, actionable message instead.
+  try {
+    if (target.move) await ctx.controller.moveTo(target.channelId);
+    else await ctx.controller.ensureConnected(target.channelId);
+  } catch {
+    return msg(
+      "❌ Couldn't join that voice channel — check my permissions and that the channel still exists.",
+    );
+  }
   try {
     await ctx.controller.enqueue(meta, ctx.requester);
   } catch (err) {
@@ -135,6 +152,24 @@ async function handlePlay(input: string, ctx: HandlerContext): Promise<HandlerRe
     throw err;
   }
   return msg(`➕ Queued **${meta.title}**.`);
+}
+
+/**
+ * `?channel` (admin-only): restrict the bot to the channel the command ran in, or
+ * `?channel off` to remove the restriction. Gated by the same admin check the other
+ * admin actions use (ctx.isAdmin); non-admins get a friendly rejection and nothing
+ * changes. Applies the change via the controller settings update (commandChannelId).
+ */
+function handleChannel(mode: "set" | "off", ctx: HandlerContext): HandlerResult {
+  if (!ctx.isAdmin) {
+    return msg("❌ Only an admin can change the bot's command channel.");
+  }
+  if (mode === "off") {
+    ctx.controller.updateSettings({ commandChannelId: null });
+    return msg("✅ Channel restriction removed — commands now work in any channel.");
+  }
+  ctx.controller.updateSettings({ commandChannelId: ctx.channelId });
+  return msg(`✅ Commands now restricted to <#${ctx.channelId}>.`);
 }
 
 async function handleRemove(index: number, ctx: HandlerContext): Promise<HandlerResult> {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { exchangeCode, fetchIdentity } from "./oauth.js";
+import { exchangeCode, fetchIdentity, revokeToken } from "./oauth.js";
 
 const cfg = { clientId: "cid", clientSecret: "sec", redirectUri: "https://m/cb" } as never;
 
@@ -43,7 +43,15 @@ describe("exchangeCode", () => {
     mockFetch([{ ok: false, json: {} }]);
     await expect(exchangeCode(cfg, "CODE")).rejects.toThrow();
   });
-  it("throws when the granted scope is missing identify or guilds", async () => {
+  // Drive each insufficient-scope branch independently so a regression that flips the &&
+  // (both required) to || (either suffices) is caught. "identify guilds" is the only accepted
+  // value; everything else must reject.
+  it.each([
+    [""], // empty
+    ["identify"], // guilds absent
+    ["guilds"], // identify absent
+    ["email"], // unrelated
+  ])("throws when the granted scope is %j (insufficient)", async (scope) => {
     mockFetch([
       {
         ok: true,
@@ -52,7 +60,7 @@ describe("exchangeCode", () => {
           token_type: "Bearer",
           expires_in: 1,
           refresh_token: "RT",
-          scope: "identify",
+          scope,
         },
       },
     ]);
@@ -69,5 +77,33 @@ describe("fetchIdentity", () => {
   it("throws when the identity endpoint fails", async () => {
     mockFetch([{ ok: false, json: {} }]);
     await expect(fetchIdentity("AT")).rejects.toThrow();
+  });
+});
+
+describe("OAuth fetch timeouts", () => {
+  it("attaches an abort signal to exchangeCode, fetchIdentity and revokeToken", async () => {
+    const fn = mockFetch([
+      {
+        ok: true,
+        json: {
+          access_token: "AT",
+          token_type: "Bearer",
+          expires_in: 1,
+          refresh_token: "RT",
+          scope: "identify guilds",
+        },
+      },
+      { ok: true, json: { id: "1", username: "u", avatar: null } },
+      { ok: true, json: {} },
+    ]);
+    await exchangeCode(cfg, "CODE");
+    await fetchIdentity("AT");
+    await revokeToken(cfg, "AT");
+    // Every outbound OAuth call must carry an AbortSignal so a hung Discord endpoint
+    // cannot tie up a request/worker indefinitely.
+    for (const call of fn.mock.calls) {
+      const init = call[1] as RequestInit;
+      expect(init.signal).toBeInstanceOf(AbortSignal);
+    }
   });
 });

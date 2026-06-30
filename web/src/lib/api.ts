@@ -3,6 +3,7 @@ import type {
   Me,
   PlaylistSummary,
   Snapshot,
+  TextChannel,
   TrackMeta,
   VoiceChannel,
 } from "../types.js";
@@ -51,6 +52,9 @@ export const api = {
     req<{ channels: VoiceChannel[]; currentChannelId: string | null }>(
       `/api/guilds/${g}/voice-channels`,
     ),
+  // The guild's text channels (for the single-channel command-restriction picker).
+  textChannels: (g: string) =>
+    req<{ channels: TextChannel[] }>(`/api/guilds/${g}/text-channels`),
   play: (g: string, input: string, voiceChannelId?: string) =>
     post<EnqueueResult & { candidates?: TrackMeta[] }>(`/api/guilds/${g}/play`, { input, voiceChannelId }),
   pick: (g: string, videoId: string, voiceChannelId?: string) =>
@@ -73,8 +77,12 @@ export const api = {
     post<{ ok: boolean; playlists: PlaylistSummary[] }>(`/api/guilds/${g}/playlists`, { name }),
   // Loading connects the bot to voice first (like play/pick), so the saved tracks
   // actually start playing instead of queueing into the void when it's disconnected.
+  // The load endpoint returns its OWN shape ({ ok, queued: <count>, moveSuppressed? }) —
+  // NOT EnqueueResult. Intersecting with EnqueueResult collapsed `queued` to
+  // `{id,title} & number` → never; declare the real shape so `queued` is an unambiguous
+  // number matching the backend (src/server/rest.ts).
   loadPlaylist: (g: string, name: string, voiceChannelId?: string) =>
-    post<EnqueueResult & { ok: boolean; queued: number }>(
+    post<{ ok: boolean; queued: number; moveSuppressed?: { requested: string; actual: string | null } }>(
       `/api/guilds/${g}/playlists/${encodeURIComponent(name)}/load`,
       { voiceChannelId },
     ),

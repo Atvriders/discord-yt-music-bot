@@ -21,7 +21,15 @@ type ApiButtonRow = ReturnType<ActionRowBuilder<ButtonBuilder>["toJSON"]>;
  */
 
 /** The control actions a now-playing button can trigger. */
-export type NpAction = "pauseresume" | "skip" | "stop" | "shuffle";
+export type NpAction =
+  | "pauseresume"
+  | "skip"
+  | "stop"
+  | "shuffle"
+  | "repeat"
+  | "autodiscover"
+  | "voldown"
+  | "volup";
 
 const PREFIX = "np";
 
@@ -39,6 +47,10 @@ export function decodeNpAction(customId: string): NpAction | null {
     case "skip":
     case "stop":
     case "shuffle":
+    case "repeat":
+    case "autodiscover":
+    case "voldown":
+    case "volup":
       return action;
     default:
       return null;
@@ -51,6 +63,7 @@ export interface NpPayload {
   components: ApiButtonRow[];
 }
 
+/** Format a number of SECONDS as m:ss or h:mm:ss; "—" for missing/zero. */
 function fmtDuration(sec: number | null | undefined): string {
   if (sec === null || sec === undefined || sec <= 0) return "—";
   const total = Math.floor(sec);
@@ -60,8 +73,70 @@ function fmtDuration(sec: number | null | undefined): string {
   return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
 }
 
-/** The control-button row. `paused` flips the first button between ⏸ Pause and ▶ Resume. */
-function buttonRow(paused: boolean): ActionRowBuilder<ButtonBuilder> {
+/** Format a number of MILLISECONDS as a clock string (delegates to fmtDuration). */
+function fmtMs(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined || ms <= 0) return "0:00";
+  return fmtDuration(ms / 1000);
+}
+
+const BAR_WIDTH = 12;
+
+/**
+ * A simple text progress bar reflecting `positionMs / durationMs` AT EDIT TIME (no live
+ * timer): `◍` marks the current position over a `▬`/`─` track, e.g. `▬▬▬▬◍───────`. With an
+ * unknown duration there is no meaningful fraction, so we render an all-track bar.
+ */
+function progressBar(positionMs: number, durationMs: number): string {
+  if (!(durationMs > 0)) return "─".repeat(BAR_WIDTH);
+  const frac = Math.max(0, Math.min(1, positionMs / durationMs));
+  const marker = Math.min(BAR_WIDTH - 1, Math.floor(frac * BAR_WIDTH));
+  let bar = "";
+  for (let i = 0; i < BAR_WIDTH; i++) {
+    bar += i < marker ? "▬" : i === marker ? "◍" : "─";
+  }
+  return bar;
+}
+
+/** "elapsed ▬▬◍──── duration" progress line from the snapshot's position/duration. */
+function progressLine(positionMs: number, durationMs: number): string {
+  const elapsed = fmtMs(positionMs);
+  const total = durationMs > 0 ? fmtMs(durationMs) : "—";
+  return `${elapsed} ${progressBar(positionMs, durationMs)} ${total}`;
+}
+
+/** Human audio-format string from a track's AudioInfo: "opus · 160 kbps · 48 kHz". */
+function fmtAudio(
+  audio: { codec: string; bitrateKbps: number; sampleRateHz: number } | null,
+): string | null {
+  if (!audio) return null;
+  const parts: string[] = [audio.codec];
+  if (audio.bitrateKbps > 0) parts.push(`${audio.bitrateKbps} kbps`);
+  if (audio.sampleRateHz > 0) parts.push(`${Math.round(audio.sampleRateHz / 1000)} kHz`);
+  return parts.join(" · ");
+}
+
+/** Short human label for a repeat mode (used on the embed field + the repeat button). */
+function repeatLabel(repeat: "off" | "one" | "all"): string {
+  switch (repeat) {
+    case "one":
+      return "one";
+    case "all":
+      return "all";
+    default:
+      return "off";
+  }
+}
+
+/** Emoji glyph for the current repeat mode (off vs one vs all). */
+function repeatEmoji(repeat: "off" | "one" | "all"): string {
+  return repeat === "one" ? "🔂" : "🔁";
+}
+
+/**
+ * Row 1 — primary transport controls (pause/resume, skip, stop, shuffle). `paused` flips
+ * the first button between ⏸ Pause and ▶ Resume.
+ */
+function transportRow(paused: boolean): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId(encodeNpAction("pauseresume"))
@@ -86,35 +161,91 @@ function buttonRow(paused: boolean): ActionRowBuilder<ButtonBuilder> {
   );
 }
 
+/**
+ * Row 2 — secondary controls (repeat, auto-discover, vol-, vol+). Discord allows max 5
+ * buttons per row, so these live on their own row. The repeat button's label reflects the
+ * current mode (off/one/all); the auto-discover button shows on/off and switches its style
+ * (Success when on, Secondary when off) so the live state is visible at a glance.
+ */
+function controlsRow(
+  repeat: "off" | "one" | "all",
+  autoplay: boolean,
+): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(encodeNpAction("repeat"))
+      .setEmoji(repeatEmoji(repeat))
+      .setLabel(`Repeat: ${repeatLabel(repeat)}`)
+      .setStyle(repeat === "off" ? ButtonStyle.Secondary : ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(encodeNpAction("autodiscover"))
+      .setEmoji("🔮")
+      .setLabel(`Auto-discover: ${autoplay ? "on" : "off"}`)
+      .setStyle(autoplay ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(encodeNpAction("voldown"))
+      .setEmoji("🔉")
+      .setLabel("Vol −")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(encodeNpAction("volup"))
+      .setEmoji("🔊")
+      .setLabel("Vol +")
+      .setStyle(ButtonStyle.Secondary),
+  );
+}
+
 function serializeRow(row: ActionRowBuilder<ButtonBuilder>): ApiButtonRow {
   return row.toJSON();
 }
 
 /**
- * Build the LIVE now-playing payload (embed + control buttons) for a snapshot that has a
- * current track. Title, thumbnail, requester, and duration come from the current item; the
- * pause/resume button reflects `snapshot.paused`.
+ * Build the LIVE now-playing dashboard payload (rich embed + two control-button rows) for a
+ * snapshot that has a current track. The embed carries: the title + channel + thumbnail; the
+ * requester; the real audio format (when the track has been downloaded); a static progress
+ * line (elapsed / duration + a text bar reflecting positionMs/durationMs AT EDIT TIME — there
+ * is deliberately NO live refresh timer); the queue length; an "Up next: <title>" line; and
+ * small fields for the current volume / repeat / auto-discover state. The transport row's
+ * pause/resume button reflects `snapshot.paused`; the controls row's repeat + auto-discover
+ * buttons reflect the live settings.
  */
 export function buildNowPlayingPayload(snapshot: ControllerSnapshot): NpPayload {
   const cur = snapshot.current!;
-  const upcoming = snapshot.upcoming.length;
+  const queueLen = snapshot.upcoming.length;
+  const upNext = snapshot.upcoming[0]?.meta.title ?? "—";
+  const stateGlyph = snapshot.paused ? "⏸️" : "▶️";
+
   const embed = new EmbedBuilder()
     .setColor(snapshot.paused ? 0x9b9b9b : 0x1db954)
-    .setAuthor({ name: snapshot.paused ? "Paused" : "Now Playing" })
-    .setTitle(cur.meta.title)
-    .addFields(
-      { name: "Requested by", value: cur.requester.displayName || "—", inline: true },
-      { name: "Duration", value: fmtDuration(cur.meta.durationSec), inline: true },
-      {
-        name: "Up next",
-        value: upcoming > 0 ? `${upcoming} track${upcoming === 1 ? "" : "s"}` : "—",
-        inline: true,
-      },
-    );
+    .setAuthor({ name: `${stateGlyph} ${snapshot.paused ? "Paused" : "Now Playing"}` })
+    .setTitle(cur.meta.title);
+  if (cur.meta.channel) embed.setDescription(cur.meta.channel);
+
+  embed.addFields(
+    { name: "Requested by", value: cur.requester.displayName || "—", inline: true },
+    { name: "Queue", value: String(queueLen), inline: true },
+    { name: "Up next", value: upNext, inline: true },
+    {
+      name: "Progress",
+      value: progressLine(cur.positionMs, cur.durationMs),
+      inline: false,
+    },
+    { name: "Volume", value: `${snapshot.volume}%`, inline: true },
+    { name: "Repeat", value: repeatLabel(snapshot.repeat), inline: true },
+    { name: "Auto-discover", value: snapshot.autoplay ? "on" : "off", inline: true },
+  );
+
+  const audio = fmtAudio(cur.audio);
+  if (audio) embed.addFields({ name: "Format", value: audio, inline: false });
+
   if (cur.meta.thumbnailUrl) embed.setThumbnail(cur.meta.thumbnailUrl);
+
   return {
     embeds: [embed.toJSON()],
-    components: [serializeRow(buttonRow(snapshot.paused))],
+    components: [
+      serializeRow(transportRow(snapshot.paused)),
+      serializeRow(controlsRow(snapshot.repeat, snapshot.autoplay)),
+    ],
   };
 }
 
@@ -218,14 +349,44 @@ interface GuildState {
   timer: ReturnType<typeof setTimeout> | null;
   /** Serializes send/edit so two debounced flushes can't race a double-post. */
   flushing: Promise<void>;
+  /**
+   * True while a flush's Discord I/O is in flight (between the moment the timer fires and the
+   * edit settling). The schedule-time throttle treats an in-flight edit as if it "just
+   * happened" so a `changed` event that lands mid-flush waits the full minEditIntervalMs from
+   * the in-flight edit's completion, rather than measuring against the stale pre-flush
+   * lastEditAt (which would let edits separate by only debounceMs, violating the rate limit).
+   */
+  flushInProgress: boolean;
+  /** Epoch ms of the last completed send/edit, for the min-edit-interval throttle. */
+  lastEditAt: number;
+  /** The newest snapshot waiting to be rendered when the throttle window opens. */
+  pending: ControllerSnapshot | null;
 }
 
 export interface NowPlayingManagerOpts {
   gateway: NpGateway;
   /** Resolve the live text channel to post in for a guild (the last `?`-command channel). */
   channelFor: (guildId: string) => string | null;
+  /**
+   * Resolve the guild's CONFIGURED command channel (the per-guild single-channel
+   * restriction), or null when unrestricted. When this returns a channel id it takes
+   * precedence over `channelFor` — the now-playing card posts in the restricted channel.
+   * Optional: omit to always use the last-command channel (the original behavior).
+   */
+  commandChannelFor?: (guildId: string) => string | null;
   /** Debounce window for coalescing rapid `changed` bursts (ms). Default 400. */
   debounceMs?: number;
+  /**
+   * Minimum wall-clock interval between two consecutive send/edit calls for a guild (ms).
+   * On top of the debounce, this RATE-LIMITS the message edits so a burst of rapid control
+   * changes (pause→repeat→volume→…) can never hammer the Discord API: edits are coalesced and
+   * the newest state is flushed once the window reopens. This is purely reactive — there is
+   * NO periodic/per-second refresh; an edit only ever happens in response to a `changed`
+   * event. Default 1500 ms.
+   */
+  minEditIntervalMs?: number;
+  /** Injectable clock for tests (defaults to Date.now). */
+  now?: () => number;
   /** Best-effort failure sink (logging only). */
   onError?: (err: unknown) => void;
 }
@@ -239,9 +400,13 @@ export class NowPlayingManager {
   private readonly states = new Map<string, GuildState>();
   private readonly attached = new Set<string>();
   private readonly debounceMs: number;
+  private readonly minEditIntervalMs: number;
+  private readonly now: () => number;
 
   constructor(private readonly opts: NowPlayingManagerOpts) {
     this.debounceMs = opts.debounceMs ?? 400;
+    this.minEditIntervalMs = opts.minEditIntervalMs ?? 1500;
+    this.now = opts.now ?? (() => Date.now());
   }
 
   /** Wire a guild's controller so playback changes drive its live message. Idempotent. */
@@ -261,20 +426,39 @@ export class NowPlayingManager {
         finalized: false,
         timer: null,
         flushing: Promise.resolve(),
+        flushInProgress: false,
+        lastEditAt: -Infinity,
+        pending: null,
       };
       this.states.set(guildId, s);
     }
     return s;
   }
 
-  /** Debounce an update from the latest snapshot. Safe to call from any "changed" burst. */
+  /**
+   * Schedule an update from the LATEST snapshot of a `changed` burst. Two gates apply:
+   *   1. debounce — coalesce a same-tick burst into one render (waits `debounceMs`),
+   *   2. min-edit interval — never edit more often than `minEditIntervalMs`; when the window
+   *      hasn't reopened yet, the timer is pushed out so the burst's newest state lands once.
+   * The pending snapshot is always overwritten with the newest one, so an old state can never
+   * win a race. This is the ONLY thing that triggers a render — there is no periodic timer.
+   */
   private scheduleUpdate(guildId: string, snapshot: ControllerSnapshot): void {
     const s = this.state(guildId);
-    if (s.timer) clearTimeout(s.timer);
+    s.pending = snapshot; // always render the freshest state
+    if (s.timer) return; // a flush is already scheduled; it will pick up the new pending
+    // An edit currently in flight hasn't stamped lastEditAt yet. Treat it as if it just
+    // happened (sinceLast = 0) so the next flush waits the FULL minEditIntervalMs from the
+    // in-flight edit, instead of the stale pre-flush lastEditAt that would collapse `wait`
+    // down to debounceMs and let edits fire faster than the documented rate limit.
+    const sinceLast = s.flushInProgress ? 0 : this.now() - s.lastEditAt;
+    const wait = Math.max(this.debounceMs, this.minEditIntervalMs - sinceLast);
     s.timer = setTimeout(() => {
       s.timer = null;
-      void this.flush(guildId, snapshot);
-    }, this.debounceMs);
+      const next = s.pending;
+      s.pending = null;
+      if (next) void this.flush(guildId, next);
+    }, wait);
   }
 
   /**
@@ -283,17 +467,30 @@ export class NowPlayingManager {
    */
   private flush(guildId: string, snapshot: ControllerSnapshot): Promise<void> {
     const s = this.state(guildId);
+    // Mark the edit as in flight up front so a `changed` event that arrives DURING this flush's
+    // Discord I/O is throttled against the in-flight edit (scheduleUpdate reads flushInProgress)
+    // rather than the stale pre-flush lastEditAt.
+    s.flushInProgress = true;
     s.flushing = s.flushing
       .then(() => this.render(guildId, snapshot))
       .catch((err) => {
         this.opts.onError?.(err);
+      })
+      // Stamp the throttle clock AFTER the I/O settles (success or failure) so the min-edit
+      // interval is measured from the actual edit, gating the next burst's flush, and clear
+      // the in-flight flag in the same step.
+      .finally(() => {
+        s.lastEditAt = this.now();
+        s.flushInProgress = false;
       });
     return s.flushing;
   }
 
   private async render(guildId: string, snapshot: ControllerSnapshot): Promise<void> {
     const s = this.state(guildId);
-    const channelId = this.opts.channelFor(guildId);
+    // A configured single-channel restriction wins: post in THAT channel. Otherwise fall
+    // back to the last `?`-command channel (the original behavior).
+    const channelId = this.opts.commandChannelFor?.(guildId) ?? this.opts.channelFor(guildId);
     if (!channelId) return; // no known command channel yet — post nothing
 
     // Playback active → live card. Otherwise → finalize ("Stopped").

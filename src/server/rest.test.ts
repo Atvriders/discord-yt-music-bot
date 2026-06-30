@@ -42,6 +42,7 @@ function build(sessionUserId: string | null, depOverrides: Record<string, unknow
       repeat: "off" as const,
       volume: 100,
       fx: "none" as const,
+      commandChannelId: null as string | null,
     },
     updateSettings: vi.fn((patch: Record<string, unknown>) => ({
       idleTimeoutSec: 300,
@@ -64,8 +65,26 @@ function build(sessionUserId: string | null, depOverrides: Record<string, unknow
     members: { fetch: vi.fn(async (id: string) => ({ id })) },
     channels: {
       cache: new Map([
-        ["VC1", { id: "VC1", name: "General Voice", type: 2, isVoiceBased: () => true }],
-        ["TC1", { id: "TC1", name: "general", type: 0, isVoiceBased: () => false }],
+        [
+          "VC1",
+          {
+            id: "VC1",
+            name: "General Voice",
+            type: 2,
+            isVoiceBased: () => true,
+            isTextBased: () => true,
+          },
+        ],
+        [
+          "TC1",
+          {
+            id: "TC1",
+            name: "general",
+            type: 0,
+            isVoiceBased: () => false,
+            isTextBased: () => true,
+          },
+        ],
       ]),
     },
   };
@@ -133,6 +152,22 @@ describe("REST actions", () => {
     expect(h.controller.ensureConnected).toHaveBeenCalledWith("C1");
     const [, requester] = h.controller.enqueue.mock.calls[0]!;
     expect(requester).toMatchObject({ discordUserId: USER, source: "web" });
+  });
+  it("play with a query that makes youtube.search throw a YtError returns 400 with the kind", async () => {
+    const { app, controller, deps } = build(USER);
+    controller.connectedChannelId = "C1";
+    (deps.youtube.search as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      throw new YtError(YtErrorKind.RateLimited, "yt-dlp: HTTP Error 429 …raw stderr…");
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/play`,
+      payload: { input: "daft punk" },
+    });
+    expect(res.statusCode).toBe(400);
+    // The KIND is returned, never the raw yt-dlp stderr message.
+    expect(res.json().error).toBe(YtErrorKind.RateLimited);
+    expect(JSON.stringify(res.json())).not.toContain("raw stderr");
   });
   it("play with a query returns candidates (no enqueue)", async () => {
     const res = await h.app.inject({
@@ -241,6 +276,22 @@ describe("REST actions", () => {
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toBe("Too long — max 4h");
+  });
+  it("enqueue throwing a non-YtError returns a sanitised 500 (no raw message leak)", async () => {
+    const { app, controller } = build(USER);
+    controller.connectedChannelId = "C1";
+    controller.enqueue = vi.fn(async () => {
+      throw new Error("disk full at /data/cache/xyz");
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/play`,
+      payload: { input: "https://youtu.be/aaaaaaaaaaa" },
+    });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toBe("enqueue_failed");
+    // The raw error message (with the filesystem path) must NOT reach the client.
+    expect(JSON.stringify(res.json())).not.toContain("disk full");
   });
   it("resolve throwing a YtError returns 400 with the error kind", async () => {
     const { app } = build(USER, {
@@ -561,6 +612,26 @@ describe("REST actions", () => {
     expect(res.json().settings).toMatchObject({ volume: 150, fx: "bassboost" });
   });
 
+  it("POST /api/guilds/:id/settings forwards a commandChannelId patch (set and clear)", async () => {
+    const set = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/settings`,
+      payload: { commandChannelId: "TC1" },
+    });
+    expect(set.statusCode).toBe(200);
+    expect(h.controller.updateSettings).toHaveBeenCalledWith({ commandChannelId: "TC1" });
+    expect(set.json().settings).toMatchObject({ commandChannelId: "TC1" });
+
+    const clear = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/settings`,
+      payload: { commandChannelId: null },
+    });
+    expect(clear.statusCode).toBe(200);
+    expect(h.controller.updateSettings).toHaveBeenCalledWith({ commandChannelId: null });
+    expect(clear.json().settings).toMatchObject({ commandChannelId: null });
+  });
+
   it("POST /api/guilds/:id/settings forwards an idle-timeout patch (clamping is the controller's job)", async () => {
     const res = await h.app.inject({
       method: "POST",
@@ -646,6 +717,49 @@ describe("REST actions", () => {
     const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/voice-channels` });
     expect(res.statusCode).toBe(403);
   });
+
+  it("GET /api/guilds/:id/text-channels returns only text (non-voice) channels for a member", async () => {
+    const res = await h.app.inject({ method: "GET", url: `/api/guilds/${GUILD}/text-channels` });
+    expect(res.statusCode).toBe(200);
+    const { channels } = res.json() as { channels: { id: string; name: string }[] };
+    // The voice channel (VC1) is text-based too in v14, but it is excluded — only TC1.
+    expect(channels).toHaveLength(1);
+    expect(channels[0]).toMatchObject({ id: "TC1", name: "general" });
+  });
+
+  it("GET /api/guilds/:id/text-channels returns 403 for a non-member", async () => {
+    const guild = {
+      name: "Test Guild",
+      members: {
+        fetch: vi.fn(async () => {
+          throw new Error("Unknown Member");
+        }),
+      },
+      channels: {
+        cache: new Map([
+          [
+            "TC1",
+            {
+              id: "TC1",
+              name: "general",
+              type: 0,
+              isVoiceBased: () => false,
+              isTextBased: () => true,
+            },
+          ],
+        ]),
+      },
+    };
+    const { app } = build(USER, { client: { guilds: { cache: new Map([[GUILD, guild]]) } } });
+    const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/text-channels` });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("GET /api/guilds/:id/text-channels returns 401 when not logged in", async () => {
+    const { app } = build(null);
+    const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/text-channels` });
+    expect(res.statusCode).toBe(401);
+  });
 });
 
 describe("REST playlists", () => {
@@ -703,6 +817,21 @@ describe("REST playlists", () => {
     expect(res.json().error).toBe("cannot save an empty playlist");
   });
 
+  it("POST /playlists maps an I/O error to a sanitised 500 (no fs path leak)", async () => {
+    h.controller.savePlaylist = vi.fn(async () => {
+      throw new Error("ENOSPC: no space left on device, write '/data/cache/playlists.json.tmp'");
+    });
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/playlists`,
+      payload: { name: "road trip" },
+    });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toBe("could not save playlist");
+    // The raw fs error (with the server filesystem path) must NOT reach the client.
+    expect(JSON.stringify(res.json())).not.toContain("/data/cache");
+  });
+
   it("POST /playlists/:name/load connects to the given channel, then enqueues + reports the count", async () => {
     const res = await h.app.inject({
       method: "POST",
@@ -717,6 +846,30 @@ describe("REST playlists", () => {
     const [name, requester] = h.controller.loadPlaylist.mock.calls[0]!;
     expect(name).toBe("road trip"); // URL-decoded
     expect(requester).toMatchObject({ discordUserId: USER, source: "web" });
+  });
+
+  it("POST /playlists/:name/load handles a name containing a literal '%' (no double-decode 500)", async () => {
+    // "50% off" is URL-encoded by the client as "50%25off"; find-my-way decodes it once to
+    // "50%off". A second decodeURIComponent('50%off') would throw URIError -> 500. Assert we
+    // pass the once-decoded name straight through and the request succeeds.
+    const { app, controller } = build(USER);
+    controller.connectedChannelId = "C1";
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/playlists/50%25off/load`,
+    });
+    expect(res.statusCode).toBe(200);
+    const [name] = controller.loadPlaylist.mock.calls[0]!;
+    expect(name).toBe("50%off");
+  });
+
+  it("DELETE /playlists/:name handles a name containing a literal '%' (no double-decode 500)", async () => {
+    const res = await h.app.inject({
+      method: "DELETE",
+      url: `/api/guilds/${GUILD}/playlists/50%25off`,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(h.controller.deletePlaylist).toHaveBeenCalledWith("50%off");
   });
 
   it("POST /playlists/:name/load 404s when the playlist doesn't exist (count 0)", async () => {

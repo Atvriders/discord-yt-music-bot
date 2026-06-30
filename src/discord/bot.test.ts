@@ -229,14 +229,28 @@ describe("createBot — InteractionCreate", () => {
 });
 
 describe("applyNpAction — customId -> controller action mapping", () => {
-  function npController() {
+  function npController(
+    over: Partial<{
+      repeat: "off" | "one" | "all";
+      autoplay: boolean;
+      volume: number;
+    }> = {},
+  ) {
+    const settings = {
+      repeat: over.repeat ?? "off",
+      autoplay: over.autoplay ?? false,
+      volume: over.volume ?? 100,
+    };
     return {
       isPaused: false,
+      settings,
       pause: vi.fn(),
       resume: vi.fn(),
       skip: vi.fn(),
       stop: vi.fn(async () => {}),
       shuffle: vi.fn(async () => {}),
+      updateSettings: vi.fn((patch: Record<string, unknown>) => ({ ...settings, ...patch })),
+      setVolume: vi.fn((v: number) => ({ ...settings, volume: v })),
     };
   }
 
@@ -261,26 +275,86 @@ describe("applyNpAction — customId -> controller action mapping", () => {
     expect(c.stop).toHaveBeenCalledOnce();
     expect(c.shuffle).toHaveBeenCalledOnce();
   });
+
+  it("repeat cycles off → one → all → off via updateSettings({ repeat })", async () => {
+    const off = npController({ repeat: "off" });
+    await applyNpAction(off as never, "repeat");
+    expect(off.updateSettings).toHaveBeenCalledWith({ repeat: "one" });
+
+    const one = npController({ repeat: "one" });
+    await applyNpAction(one as never, "repeat");
+    expect(one.updateSettings).toHaveBeenCalledWith({ repeat: "all" });
+
+    const all = npController({ repeat: "all" });
+    await applyNpAction(all as never, "repeat");
+    expect(all.updateSettings).toHaveBeenCalledWith({ repeat: "off" });
+  });
+
+  it("autodiscover toggles autoplay on/off via updateSettings({ autoplay })", async () => {
+    const offC = npController({ autoplay: false });
+    await applyNpAction(offC as never, "autodiscover");
+    expect(offC.updateSettings).toHaveBeenCalledWith({ autoplay: true });
+
+    const onC = npController({ autoplay: true });
+    await applyNpAction(onC as never, "autodiscover");
+    expect(onC.updateSettings).toHaveBeenCalledWith({ autoplay: false });
+  });
+
+  it("voldown / volup step volume by 10% via setVolume", async () => {
+    const c = npController({ volume: 100 });
+    await applyNpAction(c as never, "volup");
+    expect(c.setVolume).toHaveBeenCalledWith(110);
+
+    const d = npController({ volume: 100 });
+    await applyNpAction(d as never, "voldown");
+    expect(d.setVolume).toHaveBeenCalledWith(90);
+  });
+
+  it("volume buttons clamp to 0–200", async () => {
+    const high = npController({ volume: 195 });
+    await applyNpAction(high as never, "volup");
+    expect(high.setVolume).toHaveBeenCalledWith(200); // clamped at the ceiling
+
+    const low = npController({ volume: 5 });
+    await applyNpAction(low as never, "voldown");
+    expect(low.setVolume).toHaveBeenCalledWith(0); // clamped at the floor
+  });
 });
 
 describe("createBot — now-playing control buttons (InteractionCreate)", () => {
   interface NpMockController {
     isPaused: boolean;
+    settings: { repeat: "off" | "one" | "all"; autoplay: boolean; volume: number };
     pause: ReturnType<typeof vi.fn>;
     resume: ReturnType<typeof vi.fn>;
     skip: ReturnType<typeof vi.fn>;
     stop: ReturnType<typeof vi.fn>;
     shuffle: ReturnType<typeof vi.fn>;
+    updateSettings: ReturnType<typeof vi.fn>;
+    setVolume: ReturnType<typeof vi.fn>;
   }
 
   function npDeps(): { deps: BotDeps; controller: NpMockController } {
+    const settings: NpMockController["settings"] = { repeat: "off", autoplay: false, volume: 100 };
     const controller: NpMockController = {
       isPaused: false,
+      settings,
       pause: vi.fn(),
       resume: vi.fn(),
       skip: vi.fn(),
       stop: vi.fn(async () => {}),
       shuffle: vi.fn(async () => {}),
+      // Honor the real GuildController contract: updateSettings/setVolume mutate the live
+      // settings IN PLACE (the real impl writes this._settings = applySettingsPatch(...)), so
+      // npConfirmation's read of controller.settings AFTER applyNpAction reflects the new state.
+      updateSettings: vi.fn((patch: Record<string, unknown>) => {
+        Object.assign(settings, patch);
+        return { ...settings };
+      }),
+      setVolume: vi.fn((v: number) => {
+        settings.volume = v;
+        return { ...settings };
+      }),
     };
     const deps: BotDeps = {
       hub: { get: vi.fn(() => controller) } as never,
@@ -327,6 +401,43 @@ describe("createBot — now-playing control buttons (InteractionCreate)", () => 
     });
   }
 
+  it("acks (deferUpdate) BEFORE running the auth member-fetch, so the 3s token can't expire on a slow fetch", async () => {
+    const { deps, controller } = npDeps();
+    const client = createBot(deps);
+    // A member fetch that never resolves models a slow/cold-cache guild. If the handler awaited
+    // canControl() before deferring, the token would expire; ack-first must defer regardless.
+    const guild = { members: { fetch: vi.fn(() => new Promise<never>(() => {})) } };
+    Object.defineProperty(client, "guilds", {
+      value: { cache: new Map([["100000000000000000", guild]]) },
+      configurable: true,
+    });
+    const { interaction, deferUpdate } = npInteraction("skip");
+
+    client.emit(Events.InteractionCreate, interaction as never);
+    // The defer happens up front even though canControl() is still pending on the hung fetch.
+    await vi.waitFor(() => expect(deferUpdate).toHaveBeenCalledOnce());
+    // Auth is still in flight → the controller action hasn't run yet.
+    expect(controller.skip).not.toHaveBeenCalled();
+  });
+
+  it("logs and bails when deferUpdate itself rejects (button stuck case is diagnosable)", async () => {
+    const { deps, controller } = npDeps();
+    const client = createBot(deps);
+    stubGuildCache(client, { member: true });
+    const { interaction, deferUpdate, followUp } = npInteraction("skip");
+    deferUpdate.mockRejectedValueOnce(new Error("Unknown interaction"));
+
+    client.emit(Events.InteractionCreate, interaction as never);
+    await vi.waitFor(() => expect(deps.log.warn).toHaveBeenCalled());
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // After a failed defer the handler bails: no controller action, no followUp, no crash.
+    expect(controller.skip).not.toHaveBeenCalled();
+    expect(followUp).not.toHaveBeenCalled();
+    expect(deps.log.error).not.toHaveBeenCalled();
+  });
+
   it("ALLOWED (guild member): defers and routes skip to the controller", async () => {
     const { deps, controller } = npDeps();
     const client = createBot(deps);
@@ -352,19 +463,22 @@ describe("createBot — now-playing control buttons (InteractionCreate)", () => 
     expect(deferUpdate).toHaveBeenCalledOnce();
   });
 
-  it("FORBIDDEN: replies ephemerally and never defers or touches the controller", async () => {
+  it("FORBIDDEN: defers (ack-first), denies via followUp, and never touches the controller", async () => {
     const { deps, controller } = npDeps();
     const client = createBot(deps);
     stubGuildCache(client, { member: false });
-    const { interaction, reply, deferUpdate } = npInteraction("stop");
+    const { interaction, deferUpdate, followUp } = npInteraction("stop");
 
     client.emit(Events.InteractionCreate, interaction as never);
-    await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+    await vi.waitFor(() => expect(followUp).toHaveBeenCalled());
 
-    expect(reply).toHaveBeenCalledWith(
+    // Ack-first discipline: the token is consumed up front, independent of the (slow) auth
+    // member fetch, so the button can never get stuck. The denial is surfaced via followUp
+    // (reply is unusable after deferUpdate).
+    expect(deferUpdate).toHaveBeenCalledOnce();
+    expect(followUp).toHaveBeenCalledWith(
       expect.objectContaining({ ephemeral: true, content: expect.stringContaining("permission") }),
     );
-    expect(deferUpdate).not.toHaveBeenCalled();
     expect(controller.stop).not.toHaveBeenCalled();
   });
 
@@ -383,10 +497,92 @@ describe("createBot — now-playing control buttons (InteractionCreate)", () => 
     await vi.waitFor(() => expect(controller.resume).toHaveBeenCalled());
   });
 
+  it("ALLOWED: repeat button routes to updateSettings({ repeat }) and confirms ephemerally", async () => {
+    const { deps, controller } = npDeps();
+    const client = createBot(deps);
+    stubGuildCache(client, { member: true });
+    const { interaction, deferUpdate, followUp } = npInteraction("repeat");
+
+    client.emit(Events.InteractionCreate, interaction as never);
+    await vi.waitFor(() => expect(controller.updateSettings).toHaveBeenCalled());
+
+    expect(controller.updateSettings).toHaveBeenCalledWith({ repeat: "one" });
+    expect(deferUpdate).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(followUp).toHaveBeenCalled());
+    // npConfirmation reads controller.settings AFTER applyNpAction; with the in-place-mutation
+    // mock this is the RESULTING state, not the stale pre-action "off".
+    expect(followUp).toHaveBeenCalledWith(
+      expect.objectContaining({ content: "🔁 Repeat: **one**.", ephemeral: true }),
+    );
+  });
+
+  it("ALLOWED: autodiscover button toggles autoplay via updateSettings({ autoplay }) and confirms on", async () => {
+    const { deps, controller } = npDeps();
+    const client = createBot(deps);
+    stubGuildCache(client, { member: true });
+    const { interaction, followUp } = npInteraction("autodiscover");
+
+    client.emit(Events.InteractionCreate, interaction as never);
+    await vi.waitFor(() => expect(controller.updateSettings).toHaveBeenCalled());
+    expect(controller.updateSettings).toHaveBeenCalledWith({ autoplay: true });
+    await vi.waitFor(() => expect(followUp).toHaveBeenCalled());
+    expect(followUp).toHaveBeenCalledWith(
+      expect.objectContaining({ content: "🔮 Auto-discover: **on**.", ephemeral: true }),
+    );
+  });
+
+  it("ALLOWED: volup button steps volume up via setVolume and confirms the resulting value", async () => {
+    const { deps, controller } = npDeps();
+    const client = createBot(deps);
+    stubGuildCache(client, { member: true });
+    const { interaction, followUp } = npInteraction("volup");
+
+    client.emit(Events.InteractionCreate, interaction as never);
+    await vi.waitFor(() => expect(controller.setVolume).toHaveBeenCalled());
+    expect(controller.setVolume).toHaveBeenCalledWith(110);
+    await vi.waitFor(() => expect(followUp).toHaveBeenCalled());
+    // With the in-place-mutation mock, npConfirmation reads the post-action volume (110).
+    expect(followUp).toHaveBeenCalledWith(
+      expect.objectContaining({ content: "🔊 Volume: **110%**.", ephemeral: true }),
+    );
+  });
+
+  it("ALLOWED: voldown button steps volume down via setVolume and confirms the resulting value", async () => {
+    const { deps, controller } = npDeps();
+    const client = createBot(deps);
+    stubGuildCache(client, { member: true });
+    const { interaction, followUp } = npInteraction("voldown");
+
+    client.emit(Events.InteractionCreate, interaction as never);
+    await vi.waitFor(() => expect(controller.setVolume).toHaveBeenCalled());
+    expect(controller.setVolume).toHaveBeenCalledWith(90);
+    await vi.waitFor(() => expect(followUp).toHaveBeenCalled());
+    expect(followUp).toHaveBeenCalledWith(
+      expect.objectContaining({ content: "🔊 Volume: **90%**.", ephemeral: true }),
+    );
+  });
+
+  it("FORBIDDEN: a new button (repeat) denies via followUp and never touches the controller", async () => {
+    const { deps, controller } = npDeps();
+    const client = createBot(deps);
+    stubGuildCache(client, { member: false });
+    const { interaction, deferUpdate, followUp } = npInteraction("repeat");
+
+    client.emit(Events.InteractionCreate, interaction as never);
+    await vi.waitFor(() => expect(followUp).toHaveBeenCalled());
+
+    expect(deferUpdate).toHaveBeenCalledOnce();
+    expect(followUp).toHaveBeenCalledWith(
+      expect.objectContaining({ ephemeral: true, content: expect.stringContaining("permission") }),
+    );
+    expect(controller.updateSettings).not.toHaveBeenCalled();
+  });
+
   it("records the command's text channel via onCommandChannel when a command runs", async () => {
     const controller = {
       skip: vi.fn(),
       snapshot: vi.fn(() => ({ current: null, upcoming: [], history: [] })),
+      settings: { commandChannelId: null },
     };
     const onCommandChannel = vi.fn();
     const deps: BotDeps = {
@@ -532,5 +728,103 @@ describe("createBot — ClientReady sets the About Me", () => {
 
     // The failure must not surface as an "interaction/message handler crashed" error.
     expect(deps.log.error).not.toHaveBeenCalled();
+  });
+});
+
+describe("createBot — command channel restriction (MessageCreate)", () => {
+  // A controller mock that carries a configurable commandChannelId restriction plus the
+  // surface handleCommand touches for the commands exercised here (?skip and ?channel).
+  function restrictedDeps(commandChannelId: string | null) {
+    const controller = {
+      skip: vi.fn(),
+      snapshot: vi.fn(() => ({ current: null, upcoming: [], history: [] })),
+      settings: { commandChannelId },
+      updateSettings: vi.fn((patch: Record<string, unknown>) => ({
+        commandChannelId,
+        ...patch,
+      })),
+    };
+    const deps: BotDeps = {
+      hub: { get: vi.fn(() => controller) } as never,
+      youtube: { resolve: vi.fn(), search: vi.fn() } as never,
+      prefix: "?",
+      searchLimit: 5,
+      adminUserIds: new Set<string>(["u1"]),
+      log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    };
+    return { deps, controller };
+  }
+
+  function msg(content: string, channelId: string) {
+    const reply = vi.fn(async () => {});
+    return {
+      reply,
+      message: {
+        author: { bot: false, id: "u1", username: "u", displayAvatarURL: () => "a" },
+        inGuild: () => true,
+        guildId: "g1",
+        channelId,
+        content,
+        member: { displayName: "U", voice: { channelId: null } },
+        guild: { members: { me: { voice: { channelId: null } } } },
+        reply,
+      },
+    };
+  }
+
+  it("ignores a command sent in the WRONG channel when a restriction is set", async () => {
+    const { deps, controller } = restrictedDeps("allowed-chan");
+    const client = createBot(deps);
+    const { message, reply } = msg("?skip", "other-chan");
+
+    client.emit(Events.MessageCreate, message as never);
+    // Give the async handler a few microtasks to run.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(controller.skip).not.toHaveBeenCalled();
+    expect(reply).not.toHaveBeenCalled();
+  });
+
+  it("accepts a command sent in the CONFIGURED channel when a restriction is set", async () => {
+    const { deps, controller } = restrictedDeps("allowed-chan");
+    const client = createBot(deps);
+    const { message, reply } = msg("?skip", "allowed-chan");
+
+    client.emit(Events.MessageCreate, message as never);
+    await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+    expect(controller.skip).toHaveBeenCalled();
+  });
+
+  it("accepts a command in ANY channel when no restriction is set (default)", async () => {
+    const { deps, controller } = restrictedDeps(null);
+    const client = createBot(deps);
+    const { message, reply } = msg("?skip", "wherever");
+
+    client.emit(Events.MessageCreate, message as never);
+    await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+    expect(controller.skip).toHaveBeenCalled();
+  });
+
+  it("ALWAYS allows `?channel` even from a non-configured channel (admin can't lock out)", async () => {
+    const { deps, controller } = restrictedDeps("allowed-chan");
+    const client = createBot(deps);
+    const { message, reply } = msg("?channel", "other-chan");
+
+    client.emit(Events.MessageCreate, message as never);
+    await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+    // The admin re-points the restriction to the channel they're in.
+    expect(controller.updateSettings).toHaveBeenCalledWith({ commandChannelId: "other-chan" });
+  });
+
+  it("ALWAYS allows `?channel off` from anywhere to clear the restriction", async () => {
+    const { deps, controller } = restrictedDeps("allowed-chan");
+    const client = createBot(deps);
+    const { message, reply } = msg("?channel off", "other-chan");
+
+    client.emit(Events.MessageCreate, message as never);
+    await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+    expect(controller.updateSettings).toHaveBeenCalledWith({ commandChannelId: null });
   });
 });

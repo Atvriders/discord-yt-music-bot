@@ -17,7 +17,8 @@ const item = (videoId: string, title = videoId): QueueItem => ({
 describe("History", () => {
   it("renders an empty state when nothing has played", () => {
     render(<History history={[]} onRequeue={vi.fn()} />);
-    expect(screen.getByText(/nothing has played/i)).toBeTruthy();
+    // getByText throws when absent, so the query is itself the assertion.
+    screen.getByText(/nothing has played/i);
   });
 
   it("lists tracks most-recent first (history is oldest-first) and caps at 10", () => {
@@ -27,10 +28,10 @@ describe("History", () => {
     const rows = screen.getAllByRole("listitem");
     expect(rows).toHaveLength(10);
     // Most recent (Track 11) is first; the two oldest (0,1) are dropped by the cap.
-    expect(within(rows[0]!).getByText("Track 11")).toBeTruthy();
+    within(rows[0]!).getByText("Track 11");
     expect(screen.queryByText("Track 0")).toBeNull();
     expect(screen.queryByText("Track 1")).toBeNull();
-    expect(screen.getByText("Track 2")).toBeTruthy();
+    screen.getByText("Track 2");
   });
 
   it("re-queues a track by its videoId on click", () => {

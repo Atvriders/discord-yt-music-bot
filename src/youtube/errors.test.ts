@@ -33,6 +33,12 @@ describe("classifyYtdlpError", () => {
       "ERROR: This content isn't available, rate-limited by YouTube for up to an hour",
       YtErrorKind.RateLimited,
     ],
+    // yt-dlp's plain HTTP-level rate limit (429) must classify as RateLimited too, not Unknown.
+    [
+      "ERROR: Unable to download webpage: HTTP Error 429: Too Many Requests",
+      YtErrorKind.RateLimited,
+    ],
+    ["ERROR: Too many requests, please try again later", YtErrorKind.RateLimited],
   ])("classifies %s", (stderr, kind) => {
     expect(classifyYtdlpError(stderr, 1).kind).toBe(kind);
   });

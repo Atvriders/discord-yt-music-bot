@@ -123,6 +123,82 @@ describe("api client", () => {
     expect(r.currentChannelId).toBe("C1");
   });
 
+  it("textChannels GETs the route and returns the channel list", async () => {
+    const fn = mockOnce(true, { channels: [{ id: "T1", name: "general" }] });
+    const r = await api.textChannels("G1");
+    const [url] = fn.mock.calls[0]!;
+    expect(url).toBe("/api/guilds/G1/text-channels");
+    expect(r.channels).toEqual([{ id: "T1", name: "general" }]);
+  });
+
+  it("shuffle is a bodyless POST (no body / no JSON content-type — avoids Fastify empty-body 400)", async () => {
+    const fn = mockOnce(true, { ok: true });
+    await api.shuffle("G1");
+    const [url, init] = fn.mock.calls[0]!;
+    expect(url).toBe("/api/guilds/G1/shuffle");
+    const i = init as RequestInit;
+    expect(i.method).toBe("POST");
+    expect(i.body).toBeUndefined();
+    expect(i.headers).toBeUndefined();
+  });
+
+  it("jump POSTs the itemId", async () => {
+    const fn = mockOnce(true, { ok: true });
+    await api.jump("G1", "item-7");
+    const [url, init] = fn.mock.calls[0]!;
+    expect(url).toBe("/api/guilds/G1/jump");
+    expect((init as RequestInit).method).toBe("POST");
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({ itemId: "item-7" });
+  });
+
+  it("lyrics GETs the route and surfaces the null (no-lyrics) branch", async () => {
+    const fn = mockOnce(true, { lyrics: null, source: "lyrics.ovh" });
+    const r = await api.lyrics("G1");
+    const [url, init] = fn.mock.calls[0]!;
+    expect(url).toBe("/api/guilds/G1/lyrics");
+    expect((init as RequestInit).method).toBeUndefined(); // GET
+    expect(r.lyrics).toBeNull();
+    expect(r.source).toBe("lyrics.ovh");
+  });
+
+  it("listPlaylists GETs the route and returns the playlists", async () => {
+    const fn = mockOnce(true, { playlists: [{ name: "chill", trackCount: 3, savedAt: 1 }] });
+    const r = await api.listPlaylists("G1");
+    const [url, init] = fn.mock.calls[0]!;
+    expect(url).toBe("/api/guilds/G1/playlists");
+    expect((init as RequestInit).method).toBeUndefined(); // GET
+    expect(r.playlists).toEqual([{ name: "chill", trackCount: 3, savedAt: 1 }]);
+  });
+
+  it("savePlaylist POSTs the name", async () => {
+    const fn = mockOnce(true, { ok: true, playlists: [] });
+    await api.savePlaylist("G1", "road trip");
+    const [url, init] = fn.mock.calls[0]!;
+    expect(url).toBe("/api/guilds/G1/playlists");
+    expect((init as RequestInit).method).toBe("POST");
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({ name: "road trip" });
+  });
+
+  it("deletePlaylist uses HTTP DELETE and path-encodes the name", async () => {
+    const fn = mockOnce(true, { ok: true, playlists: [] });
+    await api.deletePlaylist("G1", "road trip");
+    const [url, init] = fn.mock.calls[0]!;
+    // The only DELETE verb in the module + correct percent-encoding of the space.
+    expect(url).toBe("/api/guilds/G1/playlists/road%20trip");
+    expect((init as RequestInit).method).toBe("DELETE");
+  });
+
+  it("play/pick without a voiceChannelId send the field as undefined (not omitted)", async () => {
+    const fn1 = mockOnce(true, { queued: { id: "i1", title: "X" } });
+    await api.play("G1", "https://youtu.be/x");
+    expect(JSON.parse(String((fn1.mock.calls[0]![1] as RequestInit).body)))
+      .toEqual({ input: "https://youtu.be/x", voiceChannelId: undefined });
+    const fn2 = mockOnce(true, { queued: { id: "i1", title: "X" } });
+    await api.pick("G1", "vvvvvvvvvvv");
+    expect(JSON.parse(String((fn2.mock.calls[0]![1] as RequestInit).body)))
+      .toEqual({ videoId: "vvvvvvvvvvv", voiceChannelId: undefined });
+  });
+
   it("throws ApiError with the status AND the body's error message on non-OK", async () => {
     mockOnce(false, { error: "forbidden" }, 403);
     await expect(api.state("G1")).rejects.toMatchObject({ status: 403, message: "forbidden" });

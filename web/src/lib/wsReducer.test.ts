@@ -19,6 +19,7 @@ const snap: Snapshot = {
   maxTrackDurationSec: 0,
   volume: 100,
   fx: "none",
+  commandChannelId: null,
   preparing: null,
 };
 
@@ -39,8 +40,14 @@ describe("applyWsMessage", () => {
   it("marks forbidden on revoked", () => {
     expect(applyWsMessage(initialWsState, JSON.stringify({ type: "revoked" })).status).toBe("forbidden");
   });
-  it("ignores malformed frames", () => {
-    expect(applyWsMessage({ ...initialWsState, status: "live" }, "not json")).toMatchObject({ status: "live" });
+  it("ignores malformed frames by returning the SAME state reference (no field clobbering)", () => {
+    const prev = { ...initialWsState, status: "live" as const };
+    // toBe (identity) catches any new-object/mutation regression that toMatchObject misses.
+    expect(applyWsMessage(prev, "not json")).toBe(prev);
+  });
+  it("returns the same state reference for an unrecognized frame type (fall-through)", () => {
+    const prev = { ...initialWsState, status: "live" as const };
+    expect(applyWsMessage(prev, JSON.stringify({ type: "noop" }))).toBe(prev);
   });
   it("sets lastError on a trackError frame and increments seq", () => {
     const s1 = applyWsMessage(initialWsState, JSON.stringify({ type: "trackError", title: "X", reason: "po_token_sabr" }));

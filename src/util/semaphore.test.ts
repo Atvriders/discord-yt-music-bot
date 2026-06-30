@@ -24,6 +24,20 @@ describe("Semaphore", () => {
     await expect(sem.run(() => Promise.resolve(7))).resolves.toBe(7);
   });
 
+  it("promotes a queued waiter after a task throws (release -> next path)", async () => {
+    // Launch both tasks together on a max=1 semaphore: the second run() must queue as a
+    // waiter BEFORE the first settles, so the throw -> finally -> release() -> next()
+    // promotion branch is exercised (not the no-waiter `active--` branch). A bug there
+    // would deadlock the second task instead of resolving it.
+    const sem = new Semaphore(1);
+    const [r1, r2] = await Promise.allSettled([
+      sem.run(() => Promise.reject(new Error("boom"))),
+      sem.run(() => Promise.resolve(7)),
+    ]);
+    expect(r1.status).toBe("rejected");
+    expect(r2).toEqual({ status: "fulfilled", value: 7 });
+  });
+
   it("throws on a non-positive max instead of deadlocking", () => {
     expect(() => new Semaphore(0)).toThrow(/>= 1/);
     expect(() => new Semaphore(-1)).toThrow(/>= 1/);

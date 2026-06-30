@@ -13,7 +13,7 @@ import { createVoiceSession, createPassthroughResource } from "./voice/connect.j
 import type { Client } from "discord.js";
 import { buildApp } from "./server/app.js";
 import { GuildBroadcaster } from "./server/ws.js";
-import { createLogger } from "./util/logger.js";
+import { createLogger, setRootLogger } from "./util/logger.js";
 import { installCrashHandlers, installSignalHandlers } from "./lifecycle.js";
 import { startupCanary } from "./canary.js";
 import {
@@ -27,7 +27,15 @@ async function main(): Promise<void> {
   const media = loadMediaConfig();
   const bot = loadBotConfig();
   const log = createLogger(bot.logLevel);
+  // Publish as the process-wide root so module-scope consumers (e.g. voice/connect.ts) log
+  // at the configured LOG_LEVEL instead of their own hardcoded-"info" instance.
+  setRootLogger(log);
   installCrashHandlers(log);
+
+  // The Fastify app is built only after login (it needs the gateway client). Hoist it as a
+  // nullable so the shutdown tasks registered below — BEFORE login — can close it if it
+  // already exists, and no-op if a signal arrives mid-startup.
+  let app: Awaited<ReturnType<typeof buildApp>> | null = null;
 
   const youtube = new YouTubeService(media);
   const cache = new AudioCache(media.cacheDir, media.cacheMaxBytes);
@@ -136,6 +144,11 @@ async function main(): Promise<void> {
   nowPlaying = new NowPlayingManager({
     gateway: makeClientNpGateway(client),
     channelFor: (guildId) => lastTextChannelId.get(guildId) ?? null,
+    // When a guild has a single-channel restriction configured, post the now-playing card
+    // in THAT channel (takes precedence over the last-command channel). Read from the live
+    // controller settings; `has` avoids creating a controller just to look this up.
+    commandChannelFor: (guildId) =>
+      hub.has(guildId) ? hub.get(guildId).settings.commandChannelId : null,
     onError: (err) => log.warn({ err }, "[np] now-playing message update failed"),
   });
 
@@ -146,9 +159,45 @@ async function main(): Promise<void> {
   client.once("ready", () => presence?.applyDefault());
 
   client.on("error", (err) => log.error({ err }, "[client error]"));
+
+  // Register signal handlers BEFORE login (and before app.listen/canary/restore) so a
+  // SIGTERM/SIGINT arriving anywhere in the startup window still flushes the snapshot and
+  // tears down whatever is already up. `app` is null until built (line below), and the
+  // controllers()/client teardown are no-ops if nothing is running yet — every task is
+  // guarded so it is safe to run at any point during startup.
+  installSignalHandlers(
+    [
+      async () => {
+        if (snapshotTimer) {
+          clearTimeout(snapshotTimer);
+          snapshotTimer = null;
+        }
+        await writeSnapshot(media.cacheDir, collectSnapshot(hub, Date.now()));
+      },
+      async () => {
+        for (const c of hub.controllers()) await c.stop();
+      },
+      // Cancel any pending now-playing edit timers (debounced) so they don't fire mid-teardown.
+      () => {
+        nowPlaying?.dispose();
+      },
+      async () => {
+        if (app) await app.close();
+      },
+      // Cleanly close the Discord gateway so the bot disconnects from voice / goes offline
+      // promptly on restart instead of lingering until the socket times out. Ordered after
+      // controller-stop so trackEnd/idle handlers don't fire against a destroyed gateway.
+      async () => {
+        await client.destroy();
+      },
+    ],
+    { graceMs: 8000 },
+    log,
+  );
+
   await client.login(bot.discordToken);
   log.info("discord-yt-music-bot is online");
-  const app = await buildApp({
+  app = await buildApp({
     cfg: web,
     hub,
     youtube,
@@ -170,27 +219,21 @@ async function main(): Promise<void> {
   }
   const snap = await readSnapshot(media.cacheDir);
   if (snap) await restoreSnapshot(snap, hub, log);
-
-  // Graceful shutdown: flush snapshot, leave voice sessions, close HTTP server.
-  installSignalHandlers(
-    [
-      async () => {
-        if (snapshotTimer) {
-          clearTimeout(snapshotTimer);
-          snapshotTimer = null;
-        }
-        await writeSnapshot(media.cacheDir, collectSnapshot(hub, Date.now()));
-      },
-      async () => {
-        for (const c of hub.controllers()) await c.stop();
-      },
-      async () => {
-        await app.close();
-      },
-    ],
-    { graceMs: 8000 },
-    log,
-  );
+  // Signal handlers were registered before login (above) so the entire startup window is
+  // covered; nothing more to wire here.
 }
 
-void main();
+// A fatal startup rejection (bad config / missing DISCORD_TOKEN, failed Discord login,
+// EADDRINUSE on app.listen, …) must crash-and-exit non-zero so a supervisor restarts or
+// alerts — NOT get silently swallowed by installCrashHandlers' deliberately-lenient
+// unhandledRejection policy. We log through pino when possible (some failures, like a bad
+// env var thrown out of loadMediaConfig/loadBotConfig, happen before the logger exists, so
+// fall back to console.error), then exit(1).
+main().catch((err) => {
+  try {
+    createLogger().fatal({ err }, "startup failed");
+  } catch {
+    console.error("startup failed", err);
+  }
+  process.exit(1);
+});

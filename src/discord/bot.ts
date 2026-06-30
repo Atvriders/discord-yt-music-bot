@@ -15,6 +15,7 @@ import { decodeNpAction, type NpAction } from "./np-message.js";
 import { selectVoiceChannel } from "../orchestrator/voice-selection.js";
 import { canControl } from "../auth/authz.js";
 import { YtError, YtErrorKind } from "../youtube/errors.js";
+import { VOLUME_MAX, type RepeatMode } from "../orchestrator/settings.js";
 import type { GuildHub } from "../orchestrator/hub.js";
 import type { GuildController } from "../orchestrator/index.js";
 import type { YouTubeService } from "../youtube/index.js";
@@ -46,10 +47,36 @@ export interface BotDeps {
   onCommandChannel?: (guildId: string, channelId: string) => void;
 }
 
+/** Volume step (percent) applied by the now-playing 🔉/🔊 buttons; clamped to 0–VOLUME_MAX. */
+const NP_VOLUME_STEP = 10;
+
+/** Next repeat mode in the off → one → all → off cycle (the 🔁 button). */
+function nextRepeat(repeat: RepeatMode): RepeatMode {
+  switch (repeat) {
+    case "off":
+      return "one";
+    case "one":
+      return "all";
+    default:
+      return "off";
+  }
+}
+
 /** Apply a now-playing control-button action to a guild controller. Shared by the button
  * router so the mapping customId -> action -> controller method lives in one place. */
 export async function applyNpAction(
-  controller: Pick<GuildController, "isPaused" | "pause" | "resume" | "skip" | "stop" | "shuffle">,
+  controller: Pick<
+    GuildController,
+    | "isPaused"
+    | "pause"
+    | "resume"
+    | "skip"
+    | "stop"
+    | "shuffle"
+    | "settings"
+    | "updateSettings"
+    | "setVolume"
+  >,
   action: NpAction,
 ): Promise<void> {
   switch (action) {
@@ -66,6 +93,48 @@ export async function applyNpAction(
     case "shuffle":
       await controller.shuffle();
       return;
+    case "repeat":
+      controller.updateSettings({ repeat: nextRepeat(controller.settings.repeat) });
+      return;
+    case "autodiscover":
+      controller.updateSettings({ autoplay: !controller.settings.autoplay });
+      return;
+    case "voldown":
+      controller.setVolume(clampVolume(controller.settings.volume - NP_VOLUME_STEP));
+      return;
+    case "volup":
+      controller.setVolume(clampVolume(controller.settings.volume + NP_VOLUME_STEP));
+      return;
+  }
+}
+
+/** Clamp a volume percentage into the allowed 0–VOLUME_MAX range. */
+function clampVolume(pct: number): number {
+  return Math.max(0, Math.min(VOLUME_MAX, pct));
+}
+
+/**
+ * Ephemeral confirmation text for a now-playing button, reflecting the RESULTING state read
+ * back from the controller AFTER applyNpAction. Returns null for the transport buttons
+ * (pause/resume/skip/stop/shuffle) whose effect is already obvious from the edited card, so
+ * we don't spam a confirmation for them. The secondary controls (repeat/auto-discover/volume)
+ * confirm the new value since it's a discrete toggle/step the user may want feedback on.
+ */
+function npConfirmation(
+  action: NpAction,
+  controller: Pick<GuildController, "settings">,
+): string | null {
+  const s = controller.settings;
+  switch (action) {
+    case "repeat":
+      return `🔁 Repeat: **${s.repeat}**.`;
+    case "autodiscover":
+      return `🔮 Auto-discover: **${s.autoplay ? "on" : "off"}**.`;
+    case "voldown":
+    case "volup":
+      return `🔊 Volume: **${s.volume}%**.`;
+    default:
+      return null;
   }
 }
 
@@ -114,18 +183,30 @@ export function createBot(deps: BotDeps): Client {
     const cmd = parseCommand(message.content, deps.prefix);
     if (cmd.kind === "none") return;
 
+    const controller = deps.hub.get(message.guildId);
+
+    // Single-channel restriction: when a command channel is configured, only accept
+    // commands sent in THAT channel. EXCEPTION: `?channel` is always allowed (so an admin
+    // can re-point or clear the restriction from anywhere and never lock themselves out).
+    // Silent ignore — we don't reply in other channels to avoid spamming them.
+    const commandChannelId = controller.settings.commandChannelId;
+    if (commandChannelId && message.channelId !== commandChannelId && cmd.kind !== "channel") {
+      return;
+    }
+
     // Remember the text channel of the most recent command for this guild so the live
-    // now-playing message can be posted there. Best-effort; the host swallows failures.
+    // now-playing message can be posted there (the fallback when no command channel is
+    // configured). Best-effort; the host swallows failures.
     deps.onCommandChannel?.(message.guildId, message.channelId);
 
     try {
-      const controller = deps.hub.get(message.guildId);
       const result = await handleCommand(cmd, {
         controller,
         youtube: deps.youtube,
         requester: requesterOf(message),
         requesterChannelId: message.member?.voice.channelId ?? null,
         botChannelId: message.guild.members.me?.voice.channelId ?? null,
+        channelId: message.channelId,
         isAdmin: deps.adminUserIds.has(message.author.id),
         searchLimit: deps.searchLimit,
       });
@@ -157,6 +238,18 @@ export function createBot(deps: BotDeps): Client {
     // controller action and reflected in the message.
     const npAction = decodeNpAction(interaction.customId);
     if (npAction && interaction.inGuild()) {
+      // Acknowledge FIRST, before any async work. A Discord interaction token expires in 3s,
+      // and canControl() below awaits guild.members.fetch() (a REST call that can consume the
+      // whole window on a large/cold-cache guild). Deferring up front makes the ack
+      // latency-independent so the button can never get stuck on a slow member fetch. Log the
+      // (rare) defer failure instead of swallowing it silently, so stuck-button cases are
+      // diagnosable; after a failed defer every later reply/followUp would also reject, so bail.
+      try {
+        await interaction.deferUpdate();
+      } catch (err) {
+        deps.log.warn({ err }, "[bot] now-playing button deferUpdate failed");
+        return;
+      }
       const allowed = await canControl(
         client as never,
         interaction.user.id,
@@ -164,8 +257,9 @@ export function createBot(deps: BotDeps): Client {
         deps.adminUserIds,
       ).catch(() => false);
       if (!allowed) {
+        // Already deferred — must use followUp (not reply) to surface the denial ephemerally.
         await interaction
-          .reply({
+          .followUp({
             content: "❌ You don't have permission to control playback here.",
             ephemeral: true,
           })
@@ -173,15 +267,16 @@ export function createBot(deps: BotDeps): Client {
         return;
       }
       try {
-        await interaction.deferUpdate();
-      } catch {
-        return;
-      }
-      try {
         const controller = deps.hub.get(interaction.guildId);
         await applyNpAction(controller, npAction);
         // The controller emits "changed", which the now-playing manager debounces into an
-        // edit of this very message — so we don't edit it here ourselves.
+        // edit of this very message — so we don't re-edit it here. We DO surface a small
+        // ephemeral confirmation reflecting the resulting state (only the requester sees it),
+        // best-effort: a failed confirmation must never escape the handler.
+        const confirmation = npConfirmation(npAction, controller);
+        if (confirmation) {
+          await interaction.followUp({ content: confirmation, ephemeral: true }).catch(() => {});
+        }
       } catch (err) {
         deps.log.error({ err }, "[bot] now-playing control failed");
         await interaction

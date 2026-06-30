@@ -31,6 +31,9 @@ describe("parseCommand", () => {
   });
   it("parses remove with a 1-based index", () => {
     expect(parseCommand("?remove 3")).toEqual({ kind: "remove", index: 3 });
+    expect(parseCommand("?remove 1")).toEqual({ kind: "remove", index: 1 }); // minimum valid 1-based index
+    expect(parseCommand("?remove 0")).toEqual({ kind: "help" }); // lower-bound rejection (n >= 1)
+    expect(parseCommand("?remove -1")).toEqual({ kind: "help" }); // negative rejected too
     expect(parseCommand("?remove")).toEqual({ kind: "help" });
     expect(parseCommand("?remove abc")).toEqual({ kind: "help" });
   });
@@ -52,6 +55,19 @@ describe("parseCommand", () => {
     expect(parseCommand("?")).toEqual({ kind: "help" });
     expect(parseCommand("?play")).toEqual({ kind: "help" });
   });
+  it("parses `?channel` (no arg) as set-restriction-to-this-channel", () => {
+    expect(parseCommand("?channel")).toEqual({ kind: "channel", mode: "set" });
+  });
+  it("parses `?channel off|none|clear` (any case) as remove-restriction", () => {
+    expect(parseCommand("?channel off")).toEqual({ kind: "channel", mode: "off" });
+    expect(parseCommand("?channel none")).toEqual({ kind: "channel", mode: "off" });
+    expect(parseCommand("?channel clear")).toEqual({ kind: "channel", mode: "off" });
+    expect(parseCommand("?channel OFF")).toEqual({ kind: "channel", mode: "off" });
+  });
+  it("treats `?channel <other arg>` as set (ignores stray args)", () => {
+    expect(parseCommand("?channel here")).toEqual({ kind: "channel", mode: "set" });
+  });
+
   it("respects a custom prefix", () => {
     expect(parseCommand("!skip", "!")).toEqual({ kind: "skip" });
     expect(parseCommand("?skip", "!")).toEqual({ kind: "none" });

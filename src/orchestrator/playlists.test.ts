@@ -116,6 +116,25 @@ describe("PlaylistStore", () => {
     }
   });
 
+  it("get()/delete() find a playlist saved under an over-80-char name (key clamp matches save)", async () => {
+    // save() stores under the name clamped to MAX_NAME_LEN (80); get()/delete() previously used
+    // only .trim() with no clamp, so a >80-char name was stored under its truncated key but
+    // looked up under the full string — an unconditional miss (unreachable, undeletable).
+    const dir = await mkdtemp(join(tmpdir(), "pl-"));
+    try {
+      const store = new PlaylistStore(dir);
+      await store.init();
+      const longName = "x".repeat(81); // exceeds MAX_NAME_LEN (80)
+      await store.save("G1", longName, [meta("aaaaaaaaaaa")]);
+      // Looking up with the SAME raw 81-char string must succeed (both sides clamp identically).
+      expect(store.get("G1", longName)?.map((m) => m.videoId)).toEqual(["aaaaaaaaaaa"]);
+      expect(await store.delete("G1", longName)).toBe(true);
+      expect(store.list("G1")).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects saving an empty track list", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pl-"));
     try {

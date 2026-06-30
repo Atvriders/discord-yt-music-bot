@@ -10,6 +10,13 @@ describe("loadMediaConfig", () => {
     expect(c.playerClients).toBe("android_vr,web_embedded,tv");
     expect(c.maxTrackDurationSec).toBeNull();
     expect(c.sponsorblockRemove).toBeNull();
+    // Pin the remaining defaults so an accidental change to any of them is caught.
+    expect(c.historyMaxItems).toBe(100);
+    expect(c.ytdlpTimeoutMs).toBe(60000);
+    expect(c.ytProxy).toBeNull();
+    expect(c.ytCookiesFile).toBeNull();
+    expect(c.poTokenProviderUrl).toBeNull();
+    expect(c.normalizeLoudness).toBe(false);
   });
 
   it("parses overrides from env", () => {
@@ -35,6 +42,13 @@ describe("loadMediaConfig", () => {
 
   it("throws on a float CACHE_MAX_MB", () => {
     expect(() => loadMediaConfig({ CACHE_MAX_MB: "1.5" })).toThrow(/CACHE_MAX_MB/);
+  });
+
+  it("rejects CACHE_MAX_MB below the minimum (0 or negative)", () => {
+    // 0/negative are plausible operator misconfigs (e.g. 0 meant as "no limit"); the
+    // { min: 1 } guard must reject them rather than building a zero/negative cache cap.
+    expect(() => loadMediaConfig({ CACHE_MAX_MB: "0" })).toThrow(/CACHE_MAX_MB/);
+    expect(() => loadMediaConfig({ CACHE_MAX_MB: "-512" })).toThrow(/CACHE_MAX_MB/);
   });
 
   it("reads NORMALIZE_LOUDNESS as a boolean seed (default false)", () => {

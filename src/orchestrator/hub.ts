@@ -13,6 +13,11 @@ export class GuildHub {
     return c;
   }
 
+  /** Whether a controller for this guild already exists (without creating one). */
+  has(guildId: string): boolean {
+    return this.registry.has(guildId);
+  }
+
   guildIds(): string[] {
     return [...this.registry.keys()];
   }

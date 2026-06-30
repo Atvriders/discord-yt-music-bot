@@ -102,6 +102,11 @@ export function Discover({
       // link-queue, or an empty search), so the preset doesn't stay aria-pressed with
       // no picker shown — consistent with the post-queue reset in onQueued.
       if (!c || c.length === 0) setActiveQuery(null);
+    } catch {
+      // A rejected onSearch must not leave the pressed preset stuck aria-pressed with no
+      // picker and no error. The parent surfaces the error banner; here we just clear the
+      // active highlight so the UI doesn't lock in a permanently-engaged state.
+      setActiveQuery((q) => (q === p.query ? null : q));
     } finally {
       setLoading(false);
     }

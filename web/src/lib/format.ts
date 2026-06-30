@@ -18,9 +18,11 @@ export function fmtAudio(audio: AudioInfo | null): string | null {
   if (audio.codec) parts.push(audio.codec);
   if (audio.bitrateKbps > 0) parts.push(`${Math.round(audio.bitrateKbps)} kbps`);
   if (audio.sampleRateHz > 0) {
-    parts.push(
-      `${(audio.sampleRateHz / 1000).toFixed(audio.sampleRateHz % 1000 === 0 ? 0 : 1)} kHz`,
-    );
+    // Render up to 3 decimals and strip trailing zeros so standard sub-44.1k rates read
+    // accurately: 48000 -> "48", 44100 -> "44.1", 22050 -> "22.05", 11025 -> "11.025"
+    // (the old fixed 0-or-1 decimal misrepresented 22050 as "22.1" and 11025 as "11.0").
+    const khz = parseFloat((audio.sampleRateHz / 1000).toFixed(3));
+    parts.push(`${khz} kHz`);
   }
   return parts.length > 0 ? parts.join(" · ") : null;
 }

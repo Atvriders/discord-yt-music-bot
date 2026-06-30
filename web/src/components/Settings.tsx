@@ -3,17 +3,19 @@
 // the server clamps/validates. Styled as a Late-Night Studio console "settings strip":
 // a machined faceplate of engraved labels, carved-in selects, VU faders and toggle lamps.
 import { useEffect, useState } from "react";
-import type { AutoplaySource, FxPreset, RepeatMode } from "../types.js";
+import type { AutoplaySource, FxPreset, RepeatMode, TextChannel } from "../types.js";
 
-// Idle-timeout presets in seconds. The max (3600 = 1h) is surfaced as a "Never" option
-// so the bot effectively stays until it is removed.
+// Idle-timeout presets in seconds. The backend has no "stay forever" sentinel on this
+// select's path (it always arms setTimeout(idleTimeoutMs)), so 3600 really means a 1-hour
+// idle cutoff — label it honestly as "1 hour" rather than promising a "Never" the bot can't
+// actually honor (it would still disconnect after exactly an hour of idle).
 const PRESETS: { sec: number; label: string }[] = [
   { sec: 60, label: "1 minute" },
   { sec: 300, label: "5 minutes" },
   { sec: 600, label: "10 minutes" },
   { sec: 900, label: "15 minutes" },
   { sec: 1800, label: "30 minutes" },
-  { sec: 3600, label: "Never (stay until removed)" },
+  { sec: 3600, label: "1 hour" },
 ];
 
 const DEFAULT_SEC = 300; // 5 minutes
@@ -68,9 +70,13 @@ export interface SettingsProps {
   volume?: number;
   /** Audio FX preset. */
   fx?: FxPreset;
+  /** The single text channel the bot is restricted to, or null = any channel (default). */
+  commandChannelId?: string | null;
+  /** The guild's text channels (for the command-channel picker). */
+  textChannels?: TextChannel[];
   disabled?: boolean;
   onChange: (sec: number) => void;
-  /** Persist a partial audio-settings patch (crossfade / normalize / repeat / autoplay / volume / fx). */
+  /** Persist a partial audio-settings patch (crossfade / normalize / repeat / autoplay / volume / fx / command channel). */
   onAudioChange?: (patch: {
     crossfadeSec?: number;
     normalizeLoudness?: boolean;
@@ -80,6 +86,7 @@ export interface SettingsProps {
     maxTrackDurationSec?: number;
     volume?: number;
     fx?: FxPreset;
+    commandChannelId?: string | null;
   }) => void;
 }
 
@@ -93,6 +100,8 @@ export function Settings({
   maxTrackDurationSec = 0,
   volume = 100,
   fx = "none",
+  commandChannelId = null,
+  textChannels = [],
   disabled,
   onChange,
   onAudioChange,
@@ -120,6 +129,12 @@ export function Settings({
   // custom MAX_TRACK_DURATION_SEC) would render the <select> blank; surface it as a
   // synthetic option so the current value is always visible and selected.
   const maxLenIsPreset = MAX_LEN_PRESETS.some((p) => p.sec === maxTrackDurationSec);
+
+  // A configured command channel that isn't in the fetched text-channel list (e.g. set via
+  // the bot's `?channel`, or a channel the panel couldn't enumerate) would render the
+  // <select> blank; surface it as a synthetic option so the current value stays visible.
+  const commandChannelMissing =
+    commandChannelId != null && !textChannels.some((c) => c.id === commandChannelId);
 
   const crossfadeOn = crossfadeSec > 0;
   const [lastCrossfadeSec, setLastCrossfadeSec] = useState(
@@ -326,6 +341,38 @@ export function Settings({
             {MAX_LEN_PRESETS.map((p) => (
               <option key={p.sec} value={String(p.sec)} style={optStyle}>
                 {p.label}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        {/* Command channel — restrict the bot to a single text channel. Any = unrestricted. */}
+        <label
+          className="flex flex-col gap-1.5"
+          title="Restrict the bot to ONE text channel: it only accepts ? commands there and posts its now-playing card / replies there. Any channel = unrestricted (the default). You can also set this from Discord with ?channel."
+        >
+          <span className="eyebrow">Command channel</span>
+          <select
+            aria-label="Command channel"
+            value={commandChannelId ?? ""}
+            disabled={disabled}
+            onChange={(e) =>
+              audio({ commandChannelId: e.target.value === "" ? null : e.target.value })
+            }
+            className={selectClass}
+            style={inputStyle}
+          >
+            <option value="" style={optStyle}>
+              Any channel
+            </option>
+            {commandChannelMissing && (
+              <option value={commandChannelId!} style={optStyle}>
+                {commandChannelId} (current)
+              </option>
+            )}
+            {textChannels.map((c) => (
+              <option key={c.id} value={c.id} style={optStyle}>
+                #{c.name}
               </option>
             ))}
           </select>

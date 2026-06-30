@@ -6,10 +6,17 @@ import type { FxPreset } from "../orchestrator/settings.js";
  * to no fragment. nightcore/vaporwave resample-then-retime to shift pitch+speed; the
  * others are single in-place filters.
  */
+// nightcore/vaporwave include an `aresample`. When a preceding filter (notably `loudnorm`)
+// emits a non-standard internal channel-layout annotation, `aresample` cannot negotiate a
+// downstream format and ffmpeg fails hard ("Unknown channel layouts not supported ... Failed
+// to inject frame into filter network"), which closes ffmpeg's stdout → an empty stream → a
+// silently-failed track. Inserting an explicit `aformat=channel_layouts=stereo` before the
+// resample pins a concrete layout so the fragment is self-contained regardless of what runs
+// before it in the `-af` chain. (Verified on ffmpeg 4.4.2.)
 const FX_FILTERS: Record<Exclude<FxPreset, "none">, string> = {
   bassboost: "bass=g=15",
-  nightcore: "aresample=48000,asetrate=48000*1.25",
-  vaporwave: "asetrate=48000*0.8,aresample=48000",
+  nightcore: "aformat=channel_layouts=stereo,aresample=48000,asetrate=48000*1.25",
+  vaporwave: "asetrate=48000*0.8,aformat=channel_layouts=stereo,aresample=48000",
   eightd: "apulsator=hz=0.09",
   treble: "treble=g=10",
   karaoke: "stereotools=mlev=0.015",

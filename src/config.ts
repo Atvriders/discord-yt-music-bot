@@ -1,4 +1,6 @@
 import type { MediaConfig, BotConfig, WebConfig } from "./types/config-types.js";
+import { parseAdminIds } from "./auth/authz.js";
+import { LEVELS, isValidLevel } from "./util/logger.js";
 
 export type { MediaConfig, BotConfig, WebConfig } from "./types/config-types.js";
 
@@ -53,8 +55,6 @@ export function loadMediaConfig(env: Env = process.env): MediaConfig {
   };
 }
 
-const SNOWFLAKE = /^\d{17,20}$/;
-
 export function loadBotConfig(env: Env = process.env): BotConfig {
   const token = strEnv(env, "DISCORD_TOKEN");
   if (token === null) throw new Error("DISCORD_TOKEN is required");
@@ -65,12 +65,27 @@ export function loadBotConfig(env: Env = process.env): BotConfig {
     prefetchDepth: intEnv(env, "PREFETCH_DEPTH", 1, { min: 0 }),
     // Must be >= 1: a Semaphore(0) deadlocks (no download ever acquires a slot).
     maxConcurrentDownloads: intEnv(env, "MAX_TRANSCODE_JOBS", 2, { min: 1 }),
-    adminUserIds: (strEnv(env, "ADMIN_USER_IDS") ?? "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter((s) => SNOWFLAKE.test(s)),
-    logLevel: strEnv(env, "LOG_LEVEL") ?? "info",
+    // Single source of truth: parseAdminIds (auth/authz.ts) owns the snowflake format and
+    // split/trim/filter pipeline. BotConfig.adminUserIds is a string[]; index.ts wraps it in
+    // a Set, so spread the parsed Set back to an array here.
+    adminUserIds: [...parseAdminIds(env)],
+    logLevel: parseLogLevel(strEnv(env, "LOG_LEVEL")),
   };
+}
+
+/**
+ * Validate LOG_LEVEL against the SAME level set the logger uses (imported, never duplicated)
+ * and fail fast on an unrecognized value — consistent with how intEnv/PORT/SESSION_SECRET
+ * reject bad config in this file. Without this, a typo (LOG_LEVEL=verbose) was silently
+ * demoted to "info" by createLogger with no signal to the operator. Case is normalized so a
+ * valid level in any case (e.g. "WARN" from docker-compose/CI) is accepted, not rejected.
+ */
+function parseLogLevel(raw: string | null): string {
+  if (raw === null) return "info";
+  if (!isValidLevel(raw)) {
+    throw new Error(`Invalid LOG_LEVEL: got "${raw}" (expected one of ${LEVELS.join(", ")})`);
+  }
+  return raw.toLowerCase();
 }
 
 export function loadWebConfig(env: Env = process.env): WebConfig {
