@@ -320,9 +320,10 @@ describe("GuildController", () => {
   });
 
   it("advances exactly once when a stream error fires both error and trackEnd", async () => {
-    // Real @discordjs/voice emits BOTH an `error` event AND a Playing->Idle stateChange
-    // (which surfaces as `trackEnd`) for a single stream error. Recovery must flow solely
-    // through trackEnd; advancing from the error handler too would skip a track every time.
+    // Real @discordjs/voice typically emits BOTH an `error` event AND a Playing->Idle
+    // stateChange (surfacing as `trackEnd`) for a single stream error. We advance on EITHER
+    // signal (so an error-only end still progresses), but the per-track guard makes a same
+    // -track error+trackEnd pair advance exactly once — never a double-skip.
     const { ctrl, session } = makeController();
     await ctrl.ensureConnected("C1");
     await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
@@ -339,6 +340,64 @@ describe("GuildController", () => {
     // Exactly ONE advance: we land on B, not C (which a double-advance would skip to).
     expect(ctrl.snapshot().current?.meta.videoId).toBe("bbbbbbbbbbb");
     expect(ctrl.snapshot().upcoming.map((i) => i.meta.videoId)).toEqual(["ccccccccccc"]);
+  });
+
+  it("advances on a terminal error alone (no trackEnd) — track is NOT left stuck", async () => {
+    // The bug report: a track ended emitting ONLY a player `error` (a stream/ffmpeg/EOF
+    // failure that never produced a clean Playing->Idle transition), so no `trackEnd` fired.
+    // The finishing track must still advance to the next queued song without a manual Skip.
+    const { ctrl, session } = makeController();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+
+    session.emit("error", new Error("ffmpeg died at EOF")); // ONLY error, never trackEnd
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("bbbbbbbbbbb");
+  });
+
+  it("advances exactly once when trackEnd and error fire together for the same track", async () => {
+    // The same finishing-track pair in the opposite emit order (trackEnd then a same-tick
+    // error, both queued behind the advance lock): the per-track guard is claimed
+    // synchronously by the first signal, so the second is a no-op — exactly one advance.
+    const { ctrl, session } = makeController();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
+    await ctrl.enqueue(meta("ccccccccccc"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+
+    // Both signals for the same finished track, emitted before the async advance runs.
+    session.emit("trackEnd");
+    session.emit("error", new Error("same-track straggling error"));
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Exactly ONE advance: land on B, not C.
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("bbbbbbbbbbb");
+    expect(ctrl.snapshot().upcoming.map((i) => i.meta.videoId)).toEqual(["ccccccccccc"]);
+  });
+
+  it("error mid-track skips to the next track (each track's error advances once)", async () => {
+    // A genuine per-track error in the middle of playback still advances — and because each
+    // newly-started track opens a fresh advance generation, B's error advances to C.
+    const { ctrl, session } = makeController();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
+    await ctrl.enqueue(meta("ccccccccccc"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+
+    session.emit("error", new Error("a blew up mid-track"));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("bbbbbbbbbbb");
+
+    session.emit("error", new Error("b blew up mid-track too"));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("ccccccccccc");
   });
 });
 
@@ -932,8 +991,9 @@ describe("GuildController settings", () => {
 
     it("idles when related() returns only already-seen ids (no new candidate to play)", async () => {
       // related() always returns ONLY ids that have already been played. After the seed
-      // track, the first radio pull yields nothing new, so autoplay stops (idle) after a
-      // SINGLE related() call — this is the seen-id de-dup path, not the chain cap.
+      // track, every radio pull yields nothing new, so the seen-id de-dup keeps autoplay
+      // from ever queueing a track and the queue idles — even though the proactive
+      // low-water path also consults related() while upcoming is empty.
       const played = new Set<string>();
       const { ctrl, session, related } = makeController({
         settings: { autoplay: true },
@@ -947,10 +1007,12 @@ describe("GuildController settings", () => {
       session.emit("trackEnd");
       await new Promise((r) => setTimeout(r, 0));
 
-      // Nothing new to play -> idle, and related was consulted exactly once.
+      // Nothing new to play -> idle. related() was consulted (de-dup filtered every id), but
+      // a BOUNDED number of times — the seen-id de-dup + chain cap stop it spinning.
       expect(ctrl.snapshot().current).toBeNull();
       expect(session.startIdleTimer).toHaveBeenCalled();
-      expect(related.mock.calls.length).toBe(1);
+      expect(related.mock.calls.length).toBeGreaterThanOrEqual(1);
+      expect(related.mock.calls.length).toBeLessThanOrEqual(AUTOPLAY_MAX_CHAIN + 1);
     });
 
     it("caps consecutive autoplay enqueues at AUTOPLAY_MAX_CHAIN even when fresh ids keep arriving", async () => {
@@ -1022,6 +1084,94 @@ describe("GuildController settings", () => {
       expect(related).not.toHaveBeenCalled();
       expect(ctrl.snapshot().current?.meta.videoId).toBe("zzzzzzzzzzz");
       expect(ctrl.snapshot().current?.requester.source).toBe("autoplay");
+    });
+
+    it("PROACTIVE: tops up the queue when upcoming runs LOW (<=1) without waiting for empty", async () => {
+      // Two user tracks queued; once the FIRST starts playing, upcoming has just one
+      // track left (<=1) — that should already trigger a best-effort autoplay top-up so
+      // there's no gap when the user queue drains.
+      const { ctrl, related } = makeController({
+        settings: { autoplay: true },
+        relatedFn: async () => [meta("rrrrrrrrrrr")],
+      });
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+      await ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
+      await new Promise((r) => setTimeout(r, 0));
+
+      // a is current, b is the single upcoming track -> LOW -> top-up fired.
+      expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+      await new Promise((r) => setTimeout(r, 0));
+      expect(related).toHaveBeenCalledWith("aaaaaaaaaaa");
+      // The autoplay top-up appended a related track to upcoming (no advance/skip).
+      expect(ctrl.snapshot().upcoming.map((i) => i.meta.videoId)).toContain("rrrrrrrrrrr");
+    });
+
+    it("PROACTIVE: does NOT top up when upcoming is low but autoplay is OFF", async () => {
+      const { ctrl, related } = makeController({
+        settings: { autoplay: false },
+        relatedFn: async () => [meta("rrrrrrrrrrr")],
+      });
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+      await ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(related).not.toHaveBeenCalled();
+      // Only the two user tracks: a current, b upcoming. Nothing appended.
+      expect(ctrl.snapshot().upcoming.map((i) => i.meta.videoId)).toEqual(["bbbbbbbbbbb"]);
+    });
+
+    it("PROACTIVE: the low-water top-up still honors the seen-id de-dup", async () => {
+      // related echoes the already-playing id + a fresh one; the played id must be filtered
+      // out of the proactive top-up just like the empty-queue path.
+      const { ctrl } = makeController({
+        settings: { autoplay: true },
+        relatedFn: async () => [meta("aaaaaaaaaaa"), meta("rrrrrrrrrrr")],
+      });
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+      await ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
+      await new Promise((r) => setTimeout(r, 0));
+
+      const up = ctrl.snapshot().upcoming.map((i) => i.meta.videoId);
+      // The seed id is NOT re-appended; only the fresh related id is.
+      expect(up).toContain("rrrrrrrrrrr");
+      expect(up.filter((id) => id === "aaaaaaaaaaa")).toHaveLength(0);
+    });
+
+    it("PROACTIVE: a real user enqueue resets the autoplay chain so a fresh cap applies", async () => {
+      // Drive autoplay (via trackEnd) until the chain caps and the queue idles, then prove a
+      // real user enqueue resets autoplayChain to 0 so autoplay can resume from a clean cap.
+      let n = 0;
+      const freshId = () => `auto${String(n++).padStart(7, "0")}`;
+      const { ctrl, session, related } = makeController({
+        settings: { autoplay: true },
+        relatedFn: async () => [meta(freshId())],
+      });
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+      await new Promise((r) => setTimeout(r, 0));
+
+      // Skip through tracks until autoplay caps out and the queue idles (current === null).
+      for (let i = 0; i < AUTOPLAY_MAX_CHAIN + 10; i++) {
+        if (ctrl.snapshot().current === null) break;
+        session.emit("trackEnd");
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      expect(ctrl.snapshot().current).toBeNull(); // chain cap reached -> idled
+      const cappedCalls = related.mock.calls.length;
+
+      // A real user enqueue resets the chain budget (autoplayChain -> 0) AND starts playing.
+      await ctrl.enqueue(meta("ccccccccccc"), requester);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(ctrl.snapshot().current?.meta.videoId).toBe("ccccccccccc");
+
+      // With the chain reset, autoplay tops up again off the user track — more related()
+      // pulls happen that the prior cap would otherwise have forbidden.
+      await new Promise((r) => setTimeout(r, 0));
+      expect(related.mock.calls.length).toBeGreaterThan(cappedCalls);
+      expect(ctrl.snapshot().upcoming.length).toBeGreaterThan(0); // fresh top-up landed
     });
 
     it("artist source reuses the same seen-id de-dup + idle fallback", async () => {

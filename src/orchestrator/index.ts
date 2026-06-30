@@ -68,6 +68,15 @@ const AUTOPLAY_REQUESTER: Requester = {
  */
 export const AUTOPLAY_MAX_CHAIN = 50;
 
+/**
+ * Low-water mark for PROACTIVE autoplay: when the number of UPCOMING tracks falls to this
+ * many or fewer (and autoplay is on), the controller tops the queue up ahead of time so
+ * there is no silent gap when the user-supplied queue drains. 1 means "top up once only
+ * one track is left on deck". The reactive empty-queue path (tryAutoplayLocked) still
+ * covers the case where the queue genuinely hits zero.
+ */
+export const AUTOPLAY_LOW_WATER = 1;
+
 /** Audio post-processing options handed to the resource factory for a single track. */
 export interface AudioOptions {
   /** Pseudo-crossfade seconds (fade-out at end / fade-in at start). 0 = off. */
@@ -215,6 +224,21 @@ export class GuildController extends EventEmitter {
   // Guard against re-entrant autoplay attempts while one is already resolving.
   private autoplayInFlight = false;
 
+  // ── End-of-track advance guard ────────────────────────────────────────────────────
+  // A track finishing can surface as a clean `trackEnd` (player Playing->Idle), as a
+  // player `error` (a stream/ffmpeg/transcode failure or EOF that never produces a clean
+  // Idle transition), or as BOTH for the same track. We must advance on EITHER signal so a
+  // track that ends via error alone still progresses (no "stuck at the end"), but advance
+  // EXACTLY ONCE per track so an error-then-trackEnd pair doesn't double-skip.
+  //
+  // `playGeneration` increments every time a NEW resource starts playing (one per track
+  // attempt). `advancedGeneration` records the generation whose end has already claimed an
+  // advance. An end-of-track signal advances only if it hasn't been claimed for the current
+  // generation; claiming is done synchronously (before the async lock) so a same-tick
+  // error+trackEnd pair can't both slip through.
+  private playGeneration = 0;
+  private advancedGeneration = -1;
+
   // The resource currently playing, kept so a live volume change can re-apply inline
   // volume WITHOUT re-creating the stream (the fast path for setVolume). Null when
   // nothing is playing or the current resource has no inline volume (volume === 100,
@@ -258,6 +282,12 @@ export class GuildController extends EventEmitter {
     });
     this.queue.on("changed", () => {
       void this.maybeStart();
+      // PROACTIVE autoplay: every queue mutation (advance/remove/enqueue) is a chance for the
+      // upcoming runway to have dropped to the low-water mark. When it has — and a track is
+      // still playing with autoplay on — top the queue up ahead of time so a draining queue
+      // never becomes a silent gap. Best-effort + guarded (in-flight + chain cap) so it can't
+      // spin; a real user enqueue resets the chain via enqueue(), as before.
+      this.maybeTopUpAutoplay();
       // Re-broadcast to the panel on every queue mutation (add/remove/reorder/advance).
       this.emit("changed");
     });
@@ -434,6 +464,11 @@ export class GuildController extends EventEmitter {
     const resource = (await this.deps.makeResource(path, item, opts)) as InlineVolumeResource;
     this.applyInlineVolume(resource);
     this.currentResource = resource;
+    // A fresh resource is now the live track: open a new advance "generation" so the next
+    // end-of-track signal (trackEnd OR error) is eligible to advance exactly once. (Seek /
+    // re-resource go through here too; they replace the live stream, so re-arming the guard
+    // is correct — the previous resource's end is no longer something we should advance on.)
+    this.playGeneration += 1;
     session.play(resource);
   }
 
@@ -500,15 +535,20 @@ export class GuildController extends EventEmitter {
   // Inline session create + listener wiring (shared by ensureConnected and moveTo; NOT locked itself).
   private async connectSessionLocked(channelId: string): Promise<void> {
     const session = await this.deps.createSession(channelId, this.idleTimeoutMs);
+    // A finishing track advances on EITHER a clean `trackEnd` (player Playing->Idle) OR a
+    // terminal player `error` — many stream/ffmpeg/EOF failures surface only as `error`
+    // without a clean Idle transition, so relying on `trackEnd` alone leaves the track
+    // STUCK at the end. `advanceOnTrackEnd` claims a per-track guard so when BOTH fire for
+    // the same track (the common error-then-Idle case) the queue still advances exactly
+    // once (no double-skip).
     session.on("trackEnd", () => {
-      if (this.session === session) void this.playNext();
+      if (this.session === session) this.advanceOnTrackEnd(session);
     });
-    // A stream error always also drives the player Playing->Idle, which fires `trackEnd`
-    // (see VoiceSession.onStateChange). Advancing here too would double-advance and skip a
-    // track on every error. So we ONLY log/observe the error and let the single trackEnd
-    // path advance exactly once.
     session.on("error", (err: unknown) => {
-      if (this.session === session) this.deps.onSessionError?.(err);
+      if (this.session !== session) return;
+      // Observability first (logging only — never throws), then drive recovery.
+      this.deps.onSessionError?.(err);
+      this.advanceOnTrackEnd(session);
     });
     // Idle teardown must run under the same Mutex as the playback paths, or it can destroy
     // the session mid-download (while playNextLocked yields on ensureDownloaded), causing
@@ -727,6 +767,25 @@ export class GuildController extends EventEmitter {
     });
   }
 
+  /**
+   * Handle an end-of-track signal (a clean `trackEnd` OR a terminal player `error`) by
+   * advancing the queue EXACTLY ONCE per track. Both signals can fire for the same track
+   * (a stream error typically also drives the player to Idle), so we claim a per-track
+   * guard SYNCHRONOUSLY here — before yielding to the async lock — so a same-tick
+   * error+trackEnd pair can't both advance and double-skip. The first signal for a given
+   * play generation claims the advance; any later signal for that same generation is a
+   * no-op until a new track starts playing (which opens the next generation).
+   */
+  private advanceOnTrackEnd(session: VoiceSession): void {
+    if (this.advancedGeneration === this.playGeneration) return; // already advanced this track
+    this.advancedGeneration = this.playGeneration;
+    void this.lock.runExclusive(async () => {
+      // The session may have been torn down/replaced while this was queued behind the lock.
+      if (this.session !== session) return;
+      await this.playNextLocked();
+    });
+  }
+
   private async playNext(): Promise<void> {
     return this.lock.runExclusive(() => this.playNextLocked());
   }
@@ -824,48 +883,63 @@ export class GuildController extends EventEmitter {
   }
 
   /**
-   * Autoplay: when the queue is empty and `settings.autoplay` is on, fetch candidate
-   * tracks for the last-played track and play the first NEW one (not already played/seen
-   * this session). The SOURCE of the candidates depends on `settings.autoplaySource`:
-   *   "radio"  → youtube.related(lastId)        — YouTube's Mix/radio for the last video.
-   *   "artist" → youtube.artistTracks(lastMeta) — a search for the last track's artist.
-   * Only the candidate fetch branches; the seen-id de-dup, the AUTOPLAY_MAX_CHAIN cap,
-   * and the best-effort idle fallback are shared across both sources.
+   * Resolve the next NEW autoplay candidate (a track not already played/seen this session)
+   * for the current source, applying ALL the shared autoplay bookkeeping exactly once:
+   *   - guards: autoplay off / no seed / already in-flight / chain cap reached → null,
+   *   - source branch: "radio" → youtube.related(id); "artist" → youtube.artistTracks(meta),
+   *   - seen-id de-dup (skips ids we've already played/queued, incl. the seed),
+   *   - on a hit: marks the id seen up-front and bumps autoplayChain so a play failure can't
+   *     re-pick it and the chain stays bounded.
    *
-   * HONESTY: neither source is a precise genre classifier or session-wide taste
-   * matching — "radio" is YouTube's related feed, "artist" is a name-based search, both
-   * keyed on the single last track.
+   * Best-effort: a fetch that throws or yields nothing new resolves to null. The CALLER owns
+   * the in-flight flag (it must wrap the whole add+play, not just this lookup) — this helper
+   * only reads it as a guard. Returns the candidate meta, or null to fall back to idle.
    *
-   * Best-effort: any failure (the source fetch throws, returns nothing new, or download
-   * fails) resolves to `false`, letting the caller idle exactly as it does today.
+   * HONESTY: neither source is a precise genre classifier — "radio" is YouTube's related
+   * feed, "artist" a name-based search, both keyed on the single last track.
+   */
+  private async nextAutoplayCandidate(): Promise<TrackMeta | null> {
+    if (!this._settings.autoplay) return null;
+    const seed = this.lastPlayedMeta;
+    if (seed === null) return null;
+    if (this.autoplayChain >= AUTOPLAY_MAX_CHAIN) return null;
+
+    let candidates: TrackMeta[];
+    try {
+      // Branch the SOURCE only; the de-dup + chain bookkeeping below is shared.
+      candidates =
+        this._settings.autoplaySource === "artist"
+          ? await this.deps.youtube.artistTracks(seed)
+          : await this.deps.youtube.related(seed.videoId);
+    } catch {
+      return null; // source lookup failed — fall back to idle
+    }
+    const next = candidates.find(
+      (c) => c.videoId && !c.isLive && !this.autoplaySeen.has(c.videoId),
+    );
+    if (!next) return null;
+
+    // Mark seen up-front so a play failure doesn't re-pick the same id on retry, and count
+    // it against the chain cap (shared with the empty-queue path).
+    this.autoplaySeen.add(next.videoId);
+    this.autoplayChain += 1;
+    return next;
+  }
+
+  /**
+   * Autoplay (REACTIVE, empty-queue): the queue ran dry and `settings.autoplay` is on, so
+   * fetch the next NEW candidate, promote it to current, and play it. Reuses the shared
+   * candidate helper (source branch + seen-id de-dup + chain cap) and the in-flight guard.
+   *
+   * Best-effort: any failure (no new candidate, or the download/play fails) resolves to
+   * `false`, letting the caller idle exactly as it does today.
    */
   private async tryAutoplayLocked(): Promise<boolean> {
-    if (!this._settings.autoplay) return false;
-    const seed = this.lastPlayedMeta;
-    if (seed === null) return false;
     if (this.autoplayInFlight) return false;
-    if (this.autoplayChain >= AUTOPLAY_MAX_CHAIN) return false;
-
     this.autoplayInFlight = true;
     try {
-      let candidates: TrackMeta[];
-      try {
-        // Branch the SOURCE only; everything below is shared.
-        candidates =
-          this._settings.autoplaySource === "artist"
-            ? await this.deps.youtube.artistTracks(seed)
-            : await this.deps.youtube.related(seed.videoId);
-      } catch {
-        return false; // source lookup failed — fall back to idle
-      }
-      const next = candidates.find(
-        (c) => c.videoId && !c.isLive && !this.autoplaySeen.has(c.videoId),
-      );
+      const next = await this.nextAutoplayCandidate();
       if (!next) return false;
-
-      // Mark seen up-front so a play failure doesn't re-pick the same id on retry.
-      this.autoplaySeen.add(next.videoId);
-      this.autoplayChain += 1;
       await this.queue.add(next, AUTOPLAY_REQUESTER);
       // advance() promotes the freshly-added upcoming item to current, then play it.
       const promoted = await this.queue.advance();
@@ -875,6 +949,48 @@ export class GuildController extends EventEmitter {
     } finally {
       this.autoplayInFlight = false;
     }
+  }
+
+  /**
+   * Autoplay (PROACTIVE, low-water top-up): when UPCOMING has fallen to AUTOPLAY_LOW_WATER
+   * or fewer tracks while something is still playing and `settings.autoplay` is on, APPEND
+   * one fresh candidate to the END of the queue so the user-supplied queue draining never
+   * leaves a silent gap. Unlike tryAutoplayLocked this does NOT advance/skip — the current
+   * track keeps playing; the appended track simply becomes the next "up next".
+   *
+   * Reuses the EXACT same bookkeeping (source branch, seen-id de-dup, chain cap, in-flight
+   * guard) via nextAutoplayCandidate — only the queue mutation differs (add, no advance).
+   * Best-effort: a no-candidate / fetch failure is a silent no-op; the reactive empty-queue
+   * path still covers a true drain.
+   */
+  private async topUpAutoplayLocked(): Promise<void> {
+    if (!this.session) return;
+    if (!this._settings.autoplay) return;
+    // Only top up while a track is actually playing and the runway is LOW. An empty/idle
+    // queue is the reactive path's job (tryAutoplayLocked), not the top-up's.
+    if (!this.queue.current) return;
+    if (this.queue.snapshot().upcoming.length > AUTOPLAY_LOW_WATER) return;
+    if (this.autoplayInFlight) return;
+
+    this.autoplayInFlight = true;
+    try {
+      const next = await this.nextAutoplayCandidate();
+      if (!next) return;
+      // Append only — the current track keeps playing; this becomes the next "up next".
+      await this.queue.add(next, AUTOPLAY_REQUESTER);
+    } finally {
+      this.autoplayInFlight = false;
+    }
+  }
+
+  /**
+   * Fire-and-forget proactive top-up off the queue "changed" stream. Serializes under the
+   * playback lock (so it can't interleave with an advance/teardown) and is fully
+   * best-effort — any failure is swallowed and the queue simply idles via the reactive path.
+   */
+  private maybeTopUpAutoplay(): void {
+    if (!this._settings.autoplay) return;
+    void this.lock.runExclusive(() => this.topUpAutoplayLocked());
   }
 
   /**

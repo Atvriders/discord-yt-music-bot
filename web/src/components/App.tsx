@@ -580,7 +580,7 @@ export function App() {
               <Discover onSearch={onPlay} onQueueAll={onQueueAll} busy={noVoiceTarget} />
             </div>
             <div className="reveal" style={{ animationDelay: "260ms" }}>
-              <Queue items={snap?.upcoming ?? []} current={snap?.current ?? null} onRemove={onRemove} onReorder={onReorder} onShuffle={onShuffle} onPlayNext={onPlayNext} onJump={onJump} />
+              <Queue items={snap?.upcoming ?? []} current={snap?.current ?? null} onRemove={onRemove} onReorder={onReorder} onShuffle={onShuffle} onPlayNext={onPlayNext} onJump={onJump} autoplay={snap?.autoplay ?? false} autoplaySource={snap?.autoplaySource ?? "radio"} onToggleAutoplay={onPatchSettings} />
             </div>
             <div className="reveal" style={{ animationDelay: "300ms" }}>
               <History history={snap?.history ?? []} onRequeue={onRequeue} disabled={noVoiceTarget} />

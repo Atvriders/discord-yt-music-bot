@@ -131,3 +131,136 @@ describe("Queue power tools", () => {
     expect(totalText()).toBe("1:00");
   });
 });
+
+describe("Queue auto-discover toggle", () => {
+  it("reflects the autoplay setting as OFF on the switch", () => {
+    render(
+      <Queue
+        items={[item("a", 60)]}
+        current={null}
+        onRemove={noop}
+        onReorder={noop}
+        onShuffle={noop}
+        onPlayNext={noop}
+        onJump={noop}
+        autoplay={false}
+        autoplaySource="radio"
+        onToggleAutoplay={noop}
+      />,
+    );
+    const sw = screen.getByRole("switch", { name: /auto-discover/i });
+    expect(sw.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("reflects the autoplay setting as ON on the switch", () => {
+    render(
+      <Queue
+        items={[item("a", 60)]}
+        current={null}
+        onRemove={noop}
+        onReorder={noop}
+        onShuffle={noop}
+        onPlayNext={noop}
+        onJump={noop}
+        autoplay={true}
+        autoplaySource="radio"
+        onToggleAutoplay={noop}
+      />,
+    );
+    const sw = screen.getByRole("switch", { name: /auto-discover/i });
+    expect(sw.getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("flips the setting ON when the switch is clicked while OFF", () => {
+    const onToggle = vi.fn();
+    render(
+      <Queue
+        items={[item("a", 60)]}
+        current={null}
+        onRemove={noop}
+        onReorder={noop}
+        onShuffle={noop}
+        onPlayNext={noop}
+        onJump={noop}
+        autoplay={false}
+        autoplaySource="radio"
+        onToggleAutoplay={onToggle}
+      />,
+    );
+    fireEvent.click(screen.getByRole("switch", { name: /auto-discover/i }));
+    expect(onToggle).toHaveBeenCalledWith({ autoplay: true });
+  });
+
+  it("flips the setting OFF when the switch is clicked while ON", () => {
+    const onToggle = vi.fn();
+    render(
+      <Queue
+        items={[item("a", 60)]}
+        current={null}
+        onRemove={noop}
+        onReorder={noop}
+        onShuffle={noop}
+        onPlayNext={noop}
+        onJump={noop}
+        autoplay={true}
+        autoplaySource="radio"
+        onToggleAutoplay={onToggle}
+      />,
+    );
+    fireEvent.click(screen.getByRole("switch", { name: /auto-discover/i }));
+    expect(onToggle).toHaveBeenCalledWith({ autoplay: false });
+  });
+
+  it("shows the source picker only when auto-discover is ON and posts a source change", () => {
+    const onToggle = vi.fn();
+    const { rerender } = render(
+      <Queue
+        items={[item("a", 60)]}
+        current={null}
+        onRemove={noop}
+        onReorder={noop}
+        onShuffle={noop}
+        onPlayNext={noop}
+        onJump={noop}
+        autoplay={false}
+        autoplaySource="radio"
+        onToggleAutoplay={onToggle}
+      />,
+    );
+    // Hidden while off.
+    expect(screen.queryByRole("combobox", { name: /auto-discover source/i })).toBeNull();
+    rerender(
+      <Queue
+        items={[item("a", 60)]}
+        current={null}
+        onRemove={noop}
+        onReorder={noop}
+        onShuffle={noop}
+        onPlayNext={noop}
+        onJump={noop}
+        autoplay={true}
+        autoplaySource="radio"
+        onToggleAutoplay={onToggle}
+      />,
+    );
+    const src = screen.getByRole("combobox", { name: /auto-discover source/i });
+    expect((src as HTMLSelectElement).value).toBe("radio");
+    fireEvent.change(src, { target: { value: "artist" } });
+    expect(onToggle).toHaveBeenCalledWith({ autoplaySource: "artist" });
+  });
+
+  it("renders without the toggle when no autoplay props are provided (backwards compatible)", () => {
+    render(
+      <Queue
+        items={[item("a", 60)]}
+        current={null}
+        onRemove={noop}
+        onReorder={noop}
+        onShuffle={noop}
+        onPlayNext={noop}
+        onJump={noop}
+      />,
+    );
+    expect(screen.queryByRole("switch", { name: /auto-discover/i })).toBeNull();
+  });
+});
