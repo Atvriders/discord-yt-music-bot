@@ -548,7 +548,12 @@ export class GuildController extends EventEmitter {
       if (this.session !== session) return;
       // Observability first (logging only — never throws), then drive recovery.
       this.deps.onSessionError?.(err);
-      this.advanceOnTrackEnd(session);
+      // A player `error` means this track FAILED (its resource errored — a demux/ffmpeg/EOF
+      // failure), as opposed to a clean Playing->Idle `trackEnd` which means it played and
+      // finished. A failure must SURFACE ("✕ Couldn't play …") and be skipped WITHOUT being
+      // archived to history as a normally-played song (otherwise it silently lands in
+      // history and Replay just re-adds a song that re-fails). Distinct path from trackEnd.
+      this.failCurrentTrack(session, err);
     });
     // Idle teardown must run under the same Mutex as the playback paths, or it can destroy
     // the session mid-download (while playNextLocked yields on ensureDownloaded), causing
@@ -786,6 +791,39 @@ export class GuildController extends EventEmitter {
     });
   }
 
+  /**
+   * Handle a player `error` for the CURRENT track: a play-time FAILURE (the audio resource
+   * errored — demux/ffmpeg/EOF), NOT a clean finish. Claims the SAME per-track advance guard
+   * as `advanceOnTrackEnd` (synchronously, before yielding to the async lock) so an
+   * error+trackEnd pair for one track still advances exactly once and can't double-skip.
+   *
+   * Unlike a clean `trackEnd` (which archives the played track to history via the normal
+   * advance), a failure SURFACES `onTrackError` so the panel shows "✕ Couldn't play —
+   * <reason>", and the failed track is DISCARDED (dropped, not historied) before playing the
+   * next — a song that never played must not be recorded as a completed play (which would
+   * make Replay re-add a track that silently re-fails). The stuck-at-end fix is preserved:
+   * an error still drives the queue forward, never leaving the track stuck.
+   */
+  private failCurrentTrack(session: VoiceSession, err: unknown): void {
+    if (this.advancedGeneration === this.playGeneration) return; // already advanced this track
+    this.advancedGeneration = this.playGeneration;
+    // Capture the failed track's identity + reason BEFORE the async advance mutates `current`.
+    const failed = this.queue.current;
+    const reason = err instanceof Error ? err.message : "playback_failed";
+    if (failed) {
+      this.deps.onTrackError?.({
+        videoId: failed.meta.videoId,
+        title: failed.meta.title,
+        reason,
+      });
+    }
+    void this.lock.runExclusive(async () => {
+      // The session may have been torn down/replaced while this was queued behind the lock.
+      if (this.session !== session) return;
+      await this.discardAndPlayNextLocked();
+    });
+  }
+
   private async playNext(): Promise<void> {
     return this.lock.runExclusive(() => this.playNextLocked());
   }
@@ -852,6 +890,32 @@ export class GuildController extends EventEmitter {
       });
       return false;
     }
+  }
+
+  /**
+   * Advance past a FAILED current track: DISCARD it (drop without archiving to history —
+   * it never played), promote the head of upcoming, and play it; on a further failure keep
+   * skipping (each via the normal historying advance, since those are real advances of
+   * tracks we attempted). Falls back to autoplay/idle exactly like playNextLocked when the
+   * queue empties.
+   *
+   * `repeat="one"` is deliberately NOT honored for a failed track — replaying a track that
+   * just errored would loop the failure forever. The discard moves us off it. Subsequent
+   * clean ends resume normal repeat behavior.
+   */
+  private async discardAndPlayNextLocked(): Promise<void> {
+    const session = this.session;
+    if (!session) return;
+    // Drop the failed current (no history), promote the next, and play it.
+    let item = await this.queue.discardCurrent();
+    while (item) {
+      if (await this.playItemLocked(item)) return;
+      // A subsequent download/play failure for the promoted track skips it the normal way.
+      item = await this.queue.advance();
+    }
+    if (await this.tryAutoplayLocked()) return;
+    this.currentResource = null;
+    session.startIdleTimer();
   }
 
   private async playNextLocked(): Promise<void> {

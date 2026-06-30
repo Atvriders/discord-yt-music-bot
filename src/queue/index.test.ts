@@ -57,6 +57,32 @@ describe("GuildQueue", () => {
     expect(q.current).toBeNull();
   });
 
+  it("discardCurrent() promotes the head WITHOUT archiving the dropped track to history", async () => {
+    const q = newQueue();
+    await q.add(meta("aaaaaaaaaaa"), requester);
+    await q.add(meta("bbbbbbbbbbb"), requester);
+
+    const first = await q.advance();
+    expect(first?.meta.videoId).toBe("aaaaaaaaaaa");
+
+    // The current (failed) track is dropped, not historied; the head is promoted.
+    const next = await q.discardCurrent();
+    expect(next?.meta.videoId).toBe("bbbbbbbbbbb");
+    expect(q.current?.meta.videoId).toBe("bbbbbbbbbbb");
+    // The discarded track must NOT appear in history (it never played cleanly).
+    expect(q.snapshot().history).toEqual([]);
+  });
+
+  it("discardCurrent() with an empty upcoming clears current (and still doesn't history it)", async () => {
+    const q = newQueue();
+    await q.add(meta("aaaaaaaaaaa"), requester);
+    await q.advance();
+    const next = await q.discardCurrent();
+    expect(next).toBeNull();
+    expect(q.current).toBeNull();
+    expect(q.snapshot().history).toEqual([]);
+  });
+
   it("bounds history to historyMax (ring buffer)", async () => {
     const q = newQueue(); // historyMax 2
     for (const v of ["aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc", "ddddddddddd"]) {

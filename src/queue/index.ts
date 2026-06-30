@@ -72,6 +72,22 @@ export class GuildQueue extends EventEmitter {
     });
   }
 
+  /**
+   * Drop the current track WITHOUT archiving it to history, then promote the head of
+   * upcoming to current. Used when a track FAILED to play (a player/resource error) rather
+   * than finishing cleanly: a failed track never actually played, so recording it in
+   * history (as a normal `advance()` would) is wrong — it would let "Replay" re-add a song
+   * that just silently re-fails. Returns the newly-promoted current (or null when the queue
+   * is empty). Distinct from `advance()`, which DOES history the finished track.
+   */
+  discardCurrent(): Promise<QueueItem | null> {
+    return this.mutex.runExclusive(() => {
+      this._current = this._upcoming.shift() ?? null;
+      this.emitChange();
+      return this._current;
+    });
+  }
+
   remove(itemId: string): Promise<boolean> {
     return this.mutex.runExclusive(() => {
       const idx = this._upcoming.findIndex((i) => i.id === itemId);

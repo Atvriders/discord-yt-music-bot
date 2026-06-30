@@ -94,8 +94,19 @@ export async function createPassthroughResource(
   if (seekMs > 0 || filter || inlineVolume) {
     return createTranscodedResource(filePath, metadata, seekMs, filter, inlineVolume);
   }
-  const { stream, type } = await demuxProbe(createReadStream(filePath));
-  return createAudioResource(stream, { inputType: type, inlineVolume: false, metadata });
+  // FAST PATH: probe the container and pass the Opus stream straight through. demuxProbe
+  // only classifies Ogg/Opus and WebM/Opus — a downloaded file in any OTHER container
+  // (e.g. m4a/AAC when YouTube served no opus format, or anything demuxProbe can't
+  // classify) makes the probe throw. Before, that propagated as a resource that errored on
+  // play → the track was silently skipped. Fall back to an ffmpeg transcode (→ Ogg/Opus)
+  // so the track still plays instead of failing the format check.
+  try {
+    const { stream, type } = await demuxProbe(createReadStream(filePath));
+    return createAudioResource(stream, { inputType: type, inlineVolume: false, metadata });
+  } catch (err) {
+    log.warn({ err, filePath }, "demuxProbe failed; falling back to ffmpeg transcode");
+    return createTranscodedResource(filePath, metadata, 0, null, false);
+  }
 }
 
 /**

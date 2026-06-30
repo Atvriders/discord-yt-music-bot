@@ -399,6 +399,80 @@ describe("GuildController", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(ctrl.snapshot().current?.meta.videoId).toBe("ccccccccccc");
   });
+
+  it("a session error SURFACES onTrackError (Couldn't play feedback) and skips to the next", async () => {
+    // The regression: a track whose audio resource errors at play start was silently
+    // advanced as if it had finished — no "✕ Couldn't play" feedback. A play-time failure
+    // must surface via onTrackError (just like a download failure) and then skip.
+    const onTrackError = vi.fn();
+    const { ctrl, session } = makeController({ onTrackError });
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+
+    session.emit("error", new Error("Cannot demux: not an Ogg/WebM stream"));
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Feedback surfaced for the FAILED track, then skipped to the next.
+    expect(onTrackError).toHaveBeenCalledWith(
+      expect.objectContaining({ videoId: "aaaaaaaaaaa", title: "aaaaaaaaaaa" }),
+    );
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("bbbbbbbbbbb");
+  });
+
+  it("a FAILED (errored) track is NOT recorded in history as a played song", async () => {
+    // A track that errored at play time never actually played, so it must not be archived
+    // into history (which would let Replay re-add a song that just silently re-fails).
+    const onTrackError = vi.fn();
+    const { ctrl, session } = makeController({ onTrackError });
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+
+    session.emit("error", new Error("resource failed before playing"));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("bbbbbbbbbbb");
+    // The errored track 'aaaaaaaaaaa' must NOT be in history.
+    expect(ctrl.snapshot().history.map((i) => i.meta.videoId)).not.toContain("aaaaaaaaaaa");
+  });
+
+  it("a clean trackEnd STILL advances AND records the played track in history", async () => {
+    // The auto-advance + history behavior for a normally-finished track is preserved: a
+    // clean Playing->Idle (trackEnd) means the song actually played, so it goes to history.
+    const { ctrl, session } = makeController();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+
+    session.emit("trackEnd");
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("bbbbbbbbbbb");
+    // A cleanly-finished song IS recorded in history.
+    expect(ctrl.snapshot().history.map((i) => i.meta.videoId)).toContain("aaaaaaaaaaa");
+  });
+
+  it("error reason from a session error is forwarded to onTrackError", async () => {
+    // The error's message becomes the human-facing reason on the panel banner.
+    const onTrackError = vi.fn();
+    const { ctrl, session } = makeController({ onTrackError });
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+
+    session.emit("error", new Error("ffmpeg exited 1"));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(onTrackError).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: expect.stringContaining("ffmpeg exited 1") }),
+    );
+  });
 });
 
 describe("GuildController playback position + paused", () => {
