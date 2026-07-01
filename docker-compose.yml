@@ -84,14 +84,16 @@ services:
       # cookies.txt LOCALLY") in a private window on an 18+ account, then EITHER:
       #  (a) mount the file and give its path here:
       YT_COOKIES: "" # e.g. "/data/cookies.txt" — and add  - ./cookies.txt:/data/cookies.txt:ro  under volumes:
-      #  (b) OR paste the cookies.txt CONTENTS inline (no file to mount) as a YAML block. Keep the
-      #      2-space indent on every line; the fields inside each line are TAB-separated (as
-      #      exported). Leave it commented/unset to disable.
+      #  (b) OR paste cookies inline (no file to mount) as a YAML block — accepts EITHER an
+      #      exported cookies.txt (tab-separated) OR a one-line browser "Cookie:" header copied
+      #      from DevTools (name=value; name=value; …), which is auto-converted. Keep the 2-space
+      #      indent on every line. Leave it commented/unset to disable.
       # YT_COOKIES_TEXT: |
+      #   # exported cookies.txt (TAB-separated):
       #   # Netscape HTTP Cookie File
       #   .youtube.com	TRUE	/	TRUE	1799999999	SID	<paste-value>
-      #   .youtube.com	TRUE	/	TRUE	1799999999	HSID	<paste-value>
-      #   # …paste every line from your exported cookies.txt here…
+      #   # …or just one line: the whole browser Cookie header:
+      #   # YSC=<v>; __Secure-1PSID=<v>; HSID=<v>; SID=<v>; …
       # Zero-PO-token clients — reliable on most hosts. Only use "web,mweb" if you also run the
       # bgutil PO-token sidecar (`--profile pot`) and set PO_TOKEN_PROVIDER_URL below; otherwise
       # those clients silently fail to extract audio. (The bgutil yt-dlp plugin ships in the image.)

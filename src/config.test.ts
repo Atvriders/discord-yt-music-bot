@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadMediaConfig, materializeCookies } from "./config.js";
+import { loadMediaConfig, materializeCookies, toNetscapeCookies } from "./config.js";
 
 describe("loadMediaConfig", () => {
   it("applies defaults when env is empty", () => {
@@ -127,5 +127,31 @@ describe("materializeCookies", () => {
     const path = await materializeCookies({ ...base, cacheDir: dir, ytCookiesText: text });
     const written = await readFile(path!, "utf8");
     expect(written.match(/# Netscape HTTP Cookie File/g)).toHaveLength(1);
+  });
+
+  it("converts a raw browser 'Cookie:' header into Netscape lines", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ck-"));
+    // A DevTools-style Cookie header (with an optional leading "cookie:" label).
+    const header = "cookie: YSC=abc123; __Secure-1PSID=g.aXYZ; HSID=Hval";
+    const path = await materializeCookies({ ...base, cacheDir: dir, ytCookiesText: header });
+    const written = await readFile(path!, "utf8");
+    expect(written.startsWith("# Netscape HTTP Cookie File\n")).toBe(true);
+    // Each name=value → a .youtube.com Secure Netscape line.
+    expect(written).toContain(".youtube.com\tTRUE\t/\tTRUE\t2000000000\tYSC\tabc123");
+    expect(written).toContain("\t__Secure-1PSID\tg.aXYZ");
+    expect(written).toContain("\tHSID\tHval");
+  });
+});
+
+describe("toNetscapeCookies (format detection)", () => {
+  it("passes Netscape input through, header prepended if missing", () => {
+    const line = ".youtube.com\tTRUE\t/\tTRUE\t1\tSID\tx";
+    expect(toNetscapeCookies(line)).toBe(`# Netscape HTTP Cookie File\n${line}\n`);
+  });
+  it("converts a name=value; header (no tabs) to Netscape", () => {
+    const out = toNetscapeCookies("A=1; B=2");
+    expect(out.split("\n")[0]).toBe("# Netscape HTTP Cookie File");
+    expect(out).toContain(".youtube.com\tTRUE\t/\tTRUE\t2000000000\tA\t1");
+    expect(out).toContain(".youtube.com\tTRUE\t/\tTRUE\t2000000000\tB\t2");
   });
 });

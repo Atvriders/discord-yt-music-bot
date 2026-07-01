@@ -69,16 +69,48 @@ export function loadMediaConfig(env: Env = process.env): MediaConfig {
  * still works), and the file is written 0600 since these are auth cookies. Returns null when
  * neither is configured. Called once at startup before the YouTubeService is used.
  */
+/**
+ * Normalize pasted cookie text to Netscape cookies.txt (what yt-dlp's --cookies wants). Accepts
+ * BOTH forms so a paste "just works":
+ *  - an exported cookies.txt (tab-separated Netscape lines; the "# Netscape HTTP Cookie File"
+ *    header is added if missing), OR
+ *  - a raw browser "Cookie:" REQUEST HEADER ("name=value; name=value; …" on one line, e.g. copied
+ *    from DevTools → Network → a youtube.com request). The header form is converted, assuming the
+ *    youtube.com origin (domain ".youtube.com", path "/", Secure). Header cookies carry no expiry,
+ *    so a far-future one is stamped in.
+ */
+export function toNetscapeCookies(text: string): string {
+  const t = text.trim().replace(/^cookie:\s*/i, "");
+  // Already Netscape: tab-separated fields or the file header present → use as-is (+ header).
+  if (t.includes("\t") || /^#\s*(netscape|http\s+cookie)/i.test(t)) {
+    const withHeader = /^#\s*(netscape|http\s+cookie)/i.test(t)
+      ? t
+      : `# Netscape HTTP Cookie File\n${t}`;
+    return withHeader.endsWith("\n") ? withHeader : `${withHeader}\n`;
+  }
+  // Otherwise treat it as a "Cookie:" request header and convert each name=value pair.
+  const EXPIRY = "2000000000"; // ~2033; a browser Cookie header has no per-cookie expiry
+  const out = ["# Netscape HTTP Cookie File"];
+  for (const pair of t.split(";")) {
+    const eq = pair.indexOf("=");
+    if (eq === -1) continue;
+    const name = pair.slice(0, eq).trim();
+    const value = pair.slice(eq + 1).trim();
+    if (!name) continue;
+    // Secure=TRUE is correct for YouTube's https-only auth cookies (and required for the
+    // __Secure-/__Host- prefixed ones) so yt-dlp sends them.
+    out.push([".youtube.com", "TRUE", "/", "TRUE", EXPIRY, name, value].join("\t"));
+  }
+  return `${out.join("\n")}\n`;
+}
+
 export async function materializeCookies(media: MediaConfig): Promise<string | null> {
   if (media.ytCookiesFile) return media.ytCookiesFile;
   const text = media.ytCookiesText?.trim();
   if (!text) return null;
-  const body = /^#\s*(netscape|http\s+cookie)/i.test(text)
-    ? text
-    : `# Netscape HTTP Cookie File\n${text}`;
   await mkdir(media.cacheDir, { recursive: true });
   const path = join(media.cacheDir, "yt-cookies.txt");
-  await writeFile(path, body.endsWith("\n") ? body : `${body}\n`, { mode: 0o600 });
+  await writeFile(path, toNetscapeCookies(text), { mode: 0o600 });
   return path;
 }
 
