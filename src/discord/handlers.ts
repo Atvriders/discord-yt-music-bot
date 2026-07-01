@@ -4,7 +4,7 @@ import { parseInput } from "../youtube/url-parser.js";
 import { resolveSpotifyQuery } from "../youtube/spotify.js";
 import { buildPicker } from "./picker.js";
 import { selectVoiceChannel } from "../orchestrator/voice-selection.js";
-import { YtError } from "../youtube/errors.js";
+import { YtError, YtErrorKind } from "../youtube/errors.js";
 import type { GuildController } from "../orchestrator/index.js";
 import type { Requester, TrackMeta } from "../types/index.js";
 
@@ -60,6 +60,22 @@ const HELP = [
 
 function msg(content: string): HandlerResult {
   return { type: "message", content };
+}
+
+/**
+ * Friendly message for a resolve/resolveUrl failure. Age-restricted gets a specific,
+ * actionable hint: the ladder's no-login bypass clients (tv_embedded/mediaconnect) handle
+ * embeddable age-restricted videos automatically, so a persistent age_restricted error means
+ * an embedding-disabled video that genuinely needs an 18+ account's cookies (YT_COOKIES).
+ */
+function resolveErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof YtError) {
+    if (err.kind === YtErrorKind.AgeRestricted) {
+      return "❌ That video is age-restricted and has embedding disabled — the host can add an 18+ account's cookies (YT_COOKIES) to play these.";
+    }
+    return `❌ Can't play that (${err.kind}).`;
+  }
+  return fallback;
 }
 
 export async function handleCommand(cmd: Command, ctx: HandlerContext): Promise<HandlerResult> {
@@ -157,11 +173,7 @@ async function handlePlay(input: string, ctx: HandlerContext): Promise<HandlerRe
     try {
       meta = await ctx.youtube.resolveUrl(parsed.url);
     } catch (err) {
-      return msg(
-        err instanceof YtError
-          ? `❌ Can't play that (${err.kind}).`
-          : "❌ Failed to load that link.",
-      );
+      return msg(resolveErrorMessage(err, "❌ Failed to load that link."));
     }
     return enqueueResolved(meta, ctx, "SoundCloud");
   }
@@ -171,11 +183,7 @@ async function handlePlay(input: string, ctx: HandlerContext): Promise<HandlerRe
   try {
     meta = await ctx.youtube.resolve(parsed.videoId);
   } catch (err) {
-    return msg(
-      err instanceof YtError
-        ? `❌ Can't play that (${err.kind}).`
-        : "❌ Failed to load that video.",
-    );
+    return msg(resolveErrorMessage(err, "❌ Failed to load that video."));
   }
   return enqueueResolved(meta, ctx);
 }

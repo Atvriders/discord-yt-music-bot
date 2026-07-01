@@ -23,6 +23,22 @@ function ok(stdout: string) {
   return { stdout, stderr: "", code: 0 };
 }
 
+describe("buildClientLadder", () => {
+  it("includes the no-login age-gate bypass clients so age-restricted videos can play", () => {
+    // tv_embedded + mediaconnect serve embeddable age-restricted content without an account;
+    // age-restricted errors are retryable, so the ladder must reach these to bypass the gate.
+    const ladder = buildClientLadder("android_vr");
+    expect(ladder).toContain("tv_embedded");
+    expect(ladder).toContain("mediaconnect");
+  });
+
+  it("keeps the configured client(s) first, then the fallbacks, de-duplicated", () => {
+    expect(buildClientLadder("android_vr,web_embedded")[0]).toBe("android_vr");
+    // A configured client already present in the fallbacks isn't duplicated.
+    expect(buildClientLadder("tv_embedded").filter((c) => c === "tv_embedded")).toHaveLength(1);
+  });
+});
+
 describe("YouTubeService.resolve", () => {
   beforeEach(() => runMock.mockReset());
 

@@ -67,7 +67,11 @@ services:
 
       # YouTube configuration
       YT_PROXY: "" # optional residential/SOCKS proxy if your IP gets blocked by YouTube
-      YT_COOKIES: "" # optional path to a mounted cookies.txt (helps on flagged/datacenter IPs)
+      # Optional path to a mounted cookies.txt. Most age-restricted videos already play without
+      # this (the extraction ladder falls through to the tv_embedded/mediaconnect bypass clients).
+      # Provide cookies exported from an 18+ account ONLY for age-restricted videos whose uploader
+      # disabled embedding; also helps on flagged/datacenter IPs.
+      YT_COOKIES: ""
       # Zero-PO-token clients — reliable on most hosts. Only use "web,mweb" if you also run the
       # bgutil PO-token sidecar (`--profile pot`) and set PO_TOKEN_PROVIDER_URL below; otherwise
       # those clients silently fail to extract audio. (The bgutil yt-dlp plugin ships in the image.)

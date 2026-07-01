@@ -15,8 +15,22 @@ const VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
  * are the clients that, in practice, most often recover when YouTube breaks the
  * first-choice client (extraction/PO-token/age-gate). Order = most→least reliable for
  * audio. Anything already in the configured list is skipped (deduped) by buildLadder.
+ *
+ * `tv_embedded` + `mediaconnect` are the no-login AGE-GATE bypass clients: when an earlier
+ * client trips YouTube's "sign in to confirm your age" wall (a retryable error, see
+ * errors.ts), the ladder falls through to these, which serve age-restricted content that
+ * ALLOWS embedding without any account. (Age-restricted videos whose uploader DISABLED
+ * embedding still need an 18+ account's cookies via YT_COOKIES — no client can bypass those.)
  */
-const FALLBACK_CLIENTS = ["android_vr", "web_embedded", "tv", "web_safari", "mweb"] as const;
+const FALLBACK_CLIENTS = [
+  "android_vr",
+  "web_embedded",
+  "tv",
+  "tv_embedded",
+  "mediaconnect",
+  "web_safari",
+  "mweb",
+] as const;
 
 /**
  * Build the ordered, de-duplicated list of player_client values to try: the operator's

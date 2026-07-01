@@ -74,8 +74,9 @@ const TERMINAL_KINDS: ReadonlySet<YtErrorKind> = new Set([
 
 /**
  * True when retrying the same request under a *different* yt-dlp player_client could
- * plausibly succeed. AgeRestricted is intentionally retryable: several clients
- * (web_embedded, tv, android_vr) routinely bypass age-gates the default client trips on.
+ * plausibly succeed. AgeRestricted is intentionally retryable: the no-login bypass clients
+ * (tv_embedded, mediaconnect, web_embedded) routinely serve age-restricted content that the
+ * default client trips on, so the ladder must fall through to them rather than stop.
  */
 export function isRetryableAcrossClients(err: unknown): boolean {
   if (!(err instanceof YtError)) return true; // unknown/transport error — give other clients a shot
