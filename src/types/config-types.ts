@@ -13,9 +13,21 @@ export interface MediaConfig {
   ytdlpTimeoutMs: number;
 }
 
-export interface BotConfig {
-  discordToken: string;
+/**
+ * One Discord bot in the multi-bot list. The whole app runs a LIST of these so two+ bots can
+ * each play a DIFFERENT song in different voice channels (each gets its own discord.js Client +
+ * GuildHub), while sharing one YouTubeService/AudioCache/downloads-Semaphore/playlists/Fastify.
+ * id is "1","2","3",... (the string of the 1-based index).
+ */
+export interface BotInstance {
+  id: string;
+  token: string;
   commandPrefix: string;
+  name: string;
+}
+
+export interface BotConfig {
+  bots: BotInstance[];
   idleTimeoutMs: number;
   prefetchDepth: number;
   maxConcurrentDownloads: number;

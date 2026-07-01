@@ -7,7 +7,10 @@ interface CacheEntry {
   filePath: string;
   sizeBytes: number;
   lastUsed: number;
-  pinned: boolean;
+  // Reference count of active holders (was a boolean). Multiple bots can play the SAME track
+  // and each pins its file; the entry stays eviction-immune until EVERY holder unpins, so one
+  // bot's unpin can no longer clear the pin out from under another bot mid-playback.
+  pinCount: number;
   audio: AudioInfo | null;
 }
 
@@ -69,7 +72,7 @@ export class AudioCache {
     while (this.totalBytes() + size > this.maxBytes) {
       let victim: CacheEntry | null = null;
       for (const e of this.entries.values()) {
-        if (e.pinned) continue;
+        if (e.pinCount > 0) continue;
         if (victim === null || e.lastUsed < victim.lastUsed) victim = e;
       }
       if (victim === null) break; // Can't evict anymore, will exceed limit but can't help it
@@ -87,29 +90,36 @@ export class AudioCache {
       filePath,
       sizeBytes: size,
       lastUsed: ++this.clock,
-      pinned: oldEntry?.pinned ?? false,
+      pinCount: oldEntry?.pinCount ?? 0,
       audio: audio ?? oldEntry?.audio ?? null,
     });
   }
 
   pin(videoId: string): void {
     const e = this.entries.get(videoId);
-    if (e) e.pinned = true;
+    if (e) e.pinCount += 1;
   }
 
   unpin(videoId: string): void {
     const e = this.entries.get(videoId);
-    if (e) e.pinned = false;
+    // Floor at 0 so a stray/duplicate unpin can never drive the count negative (which would
+    // make the entry un-evictable forever).
+    if (e) e.pinCount = Math.max(0, e.pinCount - 1);
   }
 
   /**
    * Drop a cache entry and delete its file. Used when a track FAILS to play from its cached
    * file (a truncated/corrupt download that slipped through), so the next request re-downloads
    * a clean copy instead of serving the poisoned entry forever. No-op if not cached.
+   *
+   * Refcount-aware: while pinCount > 0 another holder (another bot) is still using the file, so
+   * this is a no-op — deleting the file out from under them would break their playback. Once the
+   * last holder has unpinned (pinCount 0) it deletes the entry + file as normal.
    */
   evict(videoId: string): void {
     const e = this.entries.get(videoId);
     if (!e) return;
+    if (e.pinCount > 0) return;
     this.entries.delete(videoId);
     try {
       rmSync(e.filePath, { force: true });

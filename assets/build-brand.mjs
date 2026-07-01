@@ -4,6 +4,7 @@
 //   bot2-avatar.png      1024x1024  (bot 2 icon — carries a red "2" badge)
 //   bot2-banner.png       680x240   (bot 2 banner — "2" badge + "No. 2")
 // Run: node assets/build-brand.mjs
+/* global console, Buffer */
 import sharp from "sharp";
 import { writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";

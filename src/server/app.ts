@@ -76,9 +76,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   registerAuthRoutes(app, deps.cfg);
   registerRest(app, deps);
   registerWebsocket(app, {
+    // The REST-narrowed registry type exposes the controller as the REST surface (no `on`);
+    // the WS surface needs `on`/`snapshot`. The real GuildController has both, so this cast
+    // just reconciles the two structural views of the same registry.
     broadcaster: deps.broadcaster ?? new GuildBroadcaster(),
-    hub: deps.hub as never,
-    client: deps.client,
+    registry: deps.registry as never,
     adminIds: deps.adminIds,
     allowedOrigins: deps.cfg.allowedWsOrigins,
   });

@@ -1,7 +1,20 @@
-import type { Me } from "../types.js";
+import type { Guild, Me } from "../types.js";
+import { BotPicker } from "./BotPicker.js";
+import type { Bot } from "../types.js";
 
-export function ServerSelector({ me, activeGuildId, onSelect, onLogout }: {
-  me: Me; activeGuildId: string | null; onSelect: (id: string) => void; onLogout: () => void;
+export function ServerSelector({ me, guilds, bots, activeBotId, onSelectBot, playingBotIds, activeGuildId, onSelect, onLogout }: {
+  me: Me;
+  /** The active bot's controllable guilds — the server bank is scoped to these. */
+  guilds: Guild[];
+  /** The full fleet, for the bot bank. */
+  bots: Bot[];
+  activeBotId: string | null;
+  onSelectBot: (id: string) => void;
+  /** Ids of bots currently playing — surfaced as a small live jewel in the bot bank. */
+  playingBotIds?: ReadonlySet<string>;
+  activeGuildId: string | null;
+  onSelect: (id: string) => void;
+  onLogout: () => void;
 }) {
   return (
     <header
@@ -38,23 +51,38 @@ export function ServerSelector({ me, activeGuildId, onSelect, onLogout }: {
           </span>
         </div>
 
-        {/* Vertical seam separating the brand plate from the server bank. */}
+        {/* Vertical seam separating the brand plate from the bot bank. */}
         <span
           aria-hidden="true"
           className="hidden sm:block"
           style={{ width: 1, height: "1.6rem", background: "var(--color-line)", flex: "0 0 auto" }}
         />
 
-        {/* Server bank: tactile console keys, the active one lit red. */}
+        {/* Bot bank: pick which bot in the fleet to drive (collapses to a quiet label
+            for single-bot deployments, so the pre-fleet layout is unchanged). */}
+        <BotPicker bots={bots} activeBotId={activeBotId} playingBotIds={playingBotIds} onSelect={onSelectBot} />
+
+        {/* Seam between the bot bank and the server bank — only when there's a visible
+            bot bank (>1 bot) to separate from, to avoid a stray divider in single-bot mode. */}
+        {bots.length > 1 && (
+          <span
+            aria-hidden="true"
+            className="hidden sm:block"
+            style={{ width: 1, height: "1.6rem", background: "var(--color-line)", flex: "0 0 auto" }}
+          />
+        )}
+
+        {/* Server bank: tactile console keys, the active one lit red. Scoped to the
+            active bot's controllable guilds. */}
         <div className="flex flex-col gap-1.5 min-w-0">
           <span className="eyebrow">Server</span>
           <div className="flex flex-wrap items-center gap-1.5">
-            {me.guilds.length === 0 && (
+            {guilds.length === 0 && (
               <span className="font-mono text-xs" style={{ color: "var(--color-ink-faint)" }}>
                 No shared servers.
               </span>
             )}
-            {me.guilds.map((g) => (
+            {guilds.map((g) => (
               <button
                 key={g.id}
                 onClick={() => onSelect(g.id)}

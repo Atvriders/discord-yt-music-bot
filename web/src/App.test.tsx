@@ -28,7 +28,7 @@ describe("App", () => {
     }
     vi.stubGlobal("WebSocket", FakeWS as unknown as typeof WebSocket);
     vi.stubGlobal("fetch", vi.fn((url: string) => {
-      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "Booth" }] }) });
+      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, bots: [{ id: "B1", name: "Fleet Bot", guilds: [{ id: "G1", name: "Booth" }] }] }) });
       if (url.includes("/voice-channels")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [], currentChannelId: null }) });
       return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: [], history: [], paused: false }) });
     }));
@@ -88,12 +88,12 @@ describe("App", () => {
     let pauseCalls = 0;
     vi.stubGlobal("fetch", vi.fn((url: string) => {
       if (url.includes("/api/me")) {
-        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "The Booth" }] }) });
+        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, bots: [{ id: "B1", name: "Fleet Bot", guilds: [{ id: "G1", name: "The Booth" }] }] }) });
       }
-      if (url.includes("/api/guilds/G1/voice-channels")) {
+      if (url.includes("/api/bots/B1/guilds/G1/voice-channels")) {
         return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [] }) });
       }
-      if (url.endsWith("/api/guilds/G1/pause")) {
+      if (url.endsWith("/api/bots/B1/guilds/G1/pause")) {
         pauseCalls++;
         return Promise.resolve({ ok: false, status: 403, headers: { get: () => null }, json: async () => ({ error: "forbidden" }) });
       }
@@ -121,9 +121,9 @@ describe("App", () => {
     localStorage.setItem("ytbot.guildId", "G2");
     vi.stubGlobal("fetch", vi.fn((url: string) => {
       if (url.includes("/api/me")) {
-        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "First Room" }, { id: "G2", name: "Second Room" }] }) });
+        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, bots: [{ id: "B1", name: "Fleet Bot", guilds: [{ id: "G1", name: "First Room" }, { id: "G2", name: "Second Room" }] }] }) });
       }
-      if (url.includes("/api/guilds/G2/voice-channels")) {
+      if (url.includes("/api/bots/B1/guilds/G2/voice-channels")) {
         return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [], currentChannelId: null }) });
       }
       return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [], currentChannelId: null, current: null, upcoming: [], history: [], paused: false }) });
@@ -131,31 +131,31 @@ describe("App", () => {
     render(<App />);
     // The stored guild G2 should be the active selection (its voice-channels are fetched).
     await waitFor(() =>
-      expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some((c: unknown[]) => String(c[0]).includes("/api/guilds/G2/voice-channels"))).toBe(true),
+      expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some((c: unknown[]) => String(c[0]).includes("/api/bots/B1/guilds/G2/voice-channels"))).toBe(true),
     );
-    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some((c: unknown[]) => String(c[0]).includes("/api/guilds/G1/voice-channels"))).toBe(false);
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some((c: unknown[]) => String(c[0]).includes("/api/bots/B1/guilds/G1/voice-channels"))).toBe(false);
   });
 
   it("ITEM 1: ignores a stored guild the user can no longer control and falls back to the first", async () => {
     localStorage.setItem("ytbot.guildId", "GHOST");
     vi.stubGlobal("fetch", vi.fn((url: string) => {
       if (url.includes("/api/me")) {
-        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "First Room" }] }) });
+        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, bots: [{ id: "B1", name: "Fleet Bot", guilds: [{ id: "G1", name: "First Room" }] }] }) });
       }
       return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [], currentChannelId: null }) });
     }));
     render(<App />);
     await waitFor(() =>
-      expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some((c: unknown[]) => String(c[0]).includes("/api/guilds/G1/voice-channels"))).toBe(true),
+      expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some((c: unknown[]) => String(c[0]).includes("/api/bots/B1/guilds/G1/voice-channels"))).toBe(true),
     );
   });
 
   it("ITEM 2: auto-selects the voice channel the user is currently in", async () => {
     vi.stubGlobal("fetch", vi.fn((url: string) => {
       if (url.includes("/api/me")) {
-        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "The Booth" }] }) });
+        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, bots: [{ id: "B1", name: "Fleet Bot", guilds: [{ id: "G1", name: "The Booth" }] }] }) });
       }
-      if (url.includes("/api/guilds/G1/voice-channels")) {
+      if (url.includes("/api/bots/B1/guilds/G1/voice-channels")) {
         return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [{ id: "C1", name: "General" }, { id: "C2", name: "Lounge" }], currentChannelId: "C2" }) });
       }
       return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: [], history: [], paused: false }) });
@@ -171,13 +171,13 @@ describe("App", () => {
     const playPromise = new Promise((res) => { resolvePlay = res; });
     vi.stubGlobal("fetch", vi.fn((url: string) => {
       if (url.includes("/api/me")) {
-        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "The Booth" }] }) });
+        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, bots: [{ id: "B1", name: "Fleet Bot", guilds: [{ id: "G1", name: "The Booth" }] }] }) });
       }
-      if (url.includes("/api/guilds/G1/voice-channels")) {
+      if (url.includes("/api/bots/B1/guilds/G1/voice-channels")) {
         // A channel the user is in is auto-selected, so the add isn't short-circuited.
         return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [{ id: "C1", name: "General" }], currentChannelId: "C1" }) });
       }
-      if (url.endsWith("/api/guilds/G1/play")) {
+      if (url.endsWith("/api/bots/B1/guilds/G1/play")) {
         return playPromise.then(() => ({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ queued: { id: "q1", title: "My Song" } }) }));
       }
       return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: [], history: [], paused: false }) });
@@ -229,12 +229,12 @@ describe("App", () => {
     const settingsPosts: unknown[] = [];
     vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
       if (url.includes("/api/me")) {
-        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "The Booth" }] }) });
+        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, bots: [{ id: "B1", name: "Fleet Bot", guilds: [{ id: "G1", name: "The Booth" }] }] }) });
       }
-      if (url.includes("/api/guilds/G1/voice-channels")) {
+      if (url.includes("/api/bots/B1/guilds/G1/voice-channels")) {
         return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [], currentChannelId: null }) });
       }
-      if (url.endsWith("/api/guilds/G1/settings") && init?.method === "POST") {
+      if (url.endsWith("/api/bots/B1/guilds/G1/settings") && init?.method === "POST") {
         settingsPosts.push(JSON.parse(String(init.body)));
         return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ ok: true, idleTimeoutSec: 60 }) });
       }
@@ -274,15 +274,15 @@ describe("App", () => {
     const settingsPosts: unknown[] = [];
     vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
       if (url.includes("/api/me")) {
-        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "The Booth" }] }) });
+        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, bots: [{ id: "B1", name: "Fleet Bot", guilds: [{ id: "G1", name: "The Booth" }] }] }) });
       }
-      if (url.includes("/api/guilds/G1/voice-channels")) {
+      if (url.includes("/api/bots/B1/guilds/G1/voice-channels")) {
         return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [], currentChannelId: null }) });
       }
-      if (url.includes("/api/guilds/G1/text-channels")) {
+      if (url.includes("/api/bots/B1/guilds/G1/text-channels")) {
         return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [{ id: "T1", name: "general" }, { id: "T2", name: "music" }] }) });
       }
-      if (url.endsWith("/api/guilds/G1/settings") && init?.method === "POST") {
+      if (url.endsWith("/api/bots/B1/guilds/G1/settings") && init?.method === "POST") {
         settingsPosts.push(JSON.parse(String(init.body)));
         return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ settings: { commandChannelId: "T2" } }) });
       }
@@ -304,12 +304,12 @@ describe("App", () => {
   it("shows the panel + server selector when logged in", async () => {
     vi.stubGlobal("fetch", vi.fn((url: string) => {
       if (url.includes("/api/me")) {
-        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "The Booth" }] }) });
+        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, bots: [{ id: "B1", name: "Fleet Bot", guilds: [{ id: "G1", name: "The Booth" }] }] }) });
       }
-      if (url.includes("/api/guilds/G1/voice-channels")) {
+      if (url.includes("/api/bots/B1/guilds/G1/voice-channels")) {
         return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [{ id: "C1", name: "General" }] }) });
       }
-      if (url.includes("/api/guilds/G1/state")) {
+      if (url.includes("/api/bots/B1/guilds/G1/state")) {
         return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: [], history: [] }) });
       }
       return Promise.resolve({ ok: false, status: 404, headers: { get: () => null }, json: async () => ({ error: "not found" }) });
@@ -351,7 +351,7 @@ describe("App", () => {
       upcoming: [qItem("bbb", "Queued Song")], history: [], paused: false, idleTimeoutSec: 300,
     }, wsRef) as unknown as typeof WebSocket);
     vi.stubGlobal("fetch", vi.fn((url: string) => {
-      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "Booth" }] }) });
+      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, bots: [{ id: "B1", name: "Fleet Bot", guilds: [{ id: "G1", name: "Booth" }] }] }) });
       if (url.includes("/voice-channels")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [], currentChannelId: null }) });
       if (url.endsWith("/queue/remove")) return Promise.resolve({ ok: false, status: 403, headers: { get: () => null }, json: async () => ({ error: "forbidden" }) });
       return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: [], history: [], paused: false }) });
@@ -369,7 +369,7 @@ describe("App", () => {
       preparing: { videoId: "aaaaaaaaaaa", title: "Long Concert Set", phase: "downloading", percent: 45 },
     }, wsRef) as unknown as typeof WebSocket);
     vi.stubGlobal("fetch", vi.fn((url: string) => {
-      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "Booth" }] }) });
+      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, bots: [{ id: "B1", name: "Fleet Bot", guilds: [{ id: "G1", name: "Booth" }] }] }) });
       if (url.includes("/voice-channels")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [], currentChannelId: null }) });
       return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: [], history: [], paused: false }) });
     }));
@@ -408,10 +408,10 @@ describe("App", () => {
 
     let stateCalls = 0;
     vi.stubGlobal("fetch", vi.fn((url: string) => {
-      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "Booth" }] }) });
+      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, bots: [{ id: "B1", name: "Fleet Bot", guilds: [{ id: "G1", name: "Booth" }] }] }) });
       if (url.includes("/voice-channels")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [], currentChannelId: null }) });
       if (url.endsWith("/queue/remove")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ ok: true }) });
-      if (url.endsWith("/api/guilds/G1/state")) {
+      if (url.endsWith("/api/bots/B1/guilds/G1/state")) {
         stateCalls++;
         // Post-removal snapshot: empty queue.
         return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: [], history: [], paused: false, idleTimeoutSec: 300 }) });
@@ -435,9 +435,9 @@ describe("App", () => {
     vi.stubGlobal("WebSocket", makeFakeWS({ current: null, upcoming: [], history: [], paused: false, idleTimeoutSec: 300 }, wsRef) as unknown as typeof WebSocket);
     let playCalls = 0;
     vi.stubGlobal("fetch", vi.fn((url: string) => {
-      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "Booth" }] }) });
+      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, bots: [{ id: "B1", name: "Fleet Bot", guilds: [{ id: "G1", name: "Booth" }] }] }) });
       if (url.includes("/voice-channels")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [{ id: "C1", name: "General" }], currentChannelId: null }) });
-      if (url.endsWith("/api/guilds/G1/play")) { playCalls++; return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ queued: { id: "q1", title: "X" } }) }); }
+      if (url.endsWith("/api/bots/B1/guilds/G1/play")) { playCalls++; return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ queued: { id: "q1", title: "X" } }) }); }
       return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: [], history: [], paused: false }) });
     }));
     render(<App />);
@@ -462,9 +462,9 @@ describe("App", () => {
       upcoming: [], history: [], paused: false, idleTimeoutSec: 300,
     }, wsRef) as unknown as typeof WebSocket);
     vi.stubGlobal("fetch", vi.fn((url: string) => {
-      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "Booth" }] }) });
+      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, bots: [{ id: "B1", name: "Fleet Bot", guilds: [{ id: "G1", name: "Booth" }] }] }) });
       if (url.includes("/voice-channels")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [{ id: "C2", name: "Lounge" }], currentChannelId: "C2" }) });
-      if (url.endsWith("/api/guilds/G1/play")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ queued: { id: "q1", title: "My Song" }, moveSuppressed: { requested: "C2", actual: "C1" } }) });
+      if (url.endsWith("/api/bots/B1/guilds/G1/play")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ queued: { id: "q1", title: "My Song" }, moveSuppressed: { requested: "C2", actual: "C1" } }) });
       return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: [], history: [], paused: false }) });
     }));
     render(<App />);
@@ -480,9 +480,9 @@ describe("App", () => {
     vi.stubGlobal("WebSocket", makeFakeWS({ current: null, upcoming: [], history: [], paused: false, idleTimeoutSec: 300 }, wsRef) as unknown as typeof WebSocket);
     let loadBody: string | undefined;
     vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
-      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "Booth" }] }) });
+      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, bots: [{ id: "B1", name: "Fleet Bot", guilds: [{ id: "G1", name: "Booth" }] }] }) });
       if (url.includes("/voice-channels")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [{ id: "C1", name: "General" }], currentChannelId: "C1" }) });
-      if (url.endsWith("/api/guilds/G1/playlists")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ playlists: [{ name: "chill", trackCount: 3, savedAt: 1000 }] }) });
+      if (url.endsWith("/api/bots/B1/guilds/G1/playlists")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ playlists: [{ name: "chill", trackCount: 3, savedAt: 1000 }] }) });
       if (url.includes("/playlists/chill/load")) { loadBody = String(init?.body); return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ ok: true, queued: 3 }) }); }
       return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: [], history: [], paused: false }) });
     }));
@@ -498,11 +498,11 @@ describe("App", () => {
     const wsRef: { current: { deliver: (s: unknown) => void } | null } = { current: null };
     vi.stubGlobal("WebSocket", makeFakeWS({ current: null, upcoming: [], history: [], paused: false, idleTimeoutSec: 300 }, wsRef) as unknown as typeof WebSocket);
     vi.stubGlobal("fetch", vi.fn((url: string) => {
-      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "Booth" }] }) });
+      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, bots: [{ id: "B1", name: "Fleet Bot", guilds: [{ id: "G1", name: "Booth" }] }] }) });
       // No current channel and a channel list present, but the user never picks one, so the
       // panel's noVoiceTarget guard fires before any backend call (mirrors play/pick).
       if (url.includes("/voice-channels")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [{ id: "C1", name: "General" }], currentChannelId: null }) });
-      if (url.endsWith("/api/guilds/G1/playlists")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ playlists: [{ name: "chill", trackCount: 3, savedAt: 1000 }] }) });
+      if (url.endsWith("/api/bots/B1/guilds/G1/playlists")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ playlists: [{ name: "chill", trackCount: 3, savedAt: 1000 }] }) });
       return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: [], history: [], paused: false }) });
     }));
     render(<App />);
@@ -519,10 +519,10 @@ describe("App", () => {
     }, wsRef) as unknown as typeof WebSocket);
     const pickBodies: string[] = [];
     vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
-      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "Booth" }] }) });
+      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, bots: [{ id: "B1", name: "Fleet Bot", guilds: [{ id: "G1", name: "Booth" }] }] }) });
       if (url.includes("/voice-channels")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [{ id: "C1", name: "General" }], currentChannelId: "C1" }) });
-      if (url.includes("/api/guilds/G1/play")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ candidates: [{ videoId: "v1", title: "One", channel: "c", durationSec: 100, isLive: false, thumbnailUrl: null }, { videoId: "v2", title: "Two", channel: "c", durationSec: 100, isLive: false, thumbnailUrl: null }] }) });
-      if (url.endsWith("/api/guilds/G1/pick")) { pickBodies.push(String(init?.body)); return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ queued: { id: "q", title: "t" } }) }); }
+      if (url.includes("/api/bots/B1/guilds/G1/play")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ candidates: [{ videoId: "v1", title: "One", channel: "c", durationSec: 100, isLive: false, thumbnailUrl: null }, { videoId: "v2", title: "Two", channel: "c", durationSec: 100, isLive: false, thumbnailUrl: null }] }) });
+      if (url.endsWith("/api/bots/B1/guilds/G1/pick")) { pickBodies.push(String(init?.body)); return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ queued: { id: "q", title: "t" } }) }); }
       return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: [], history: [], paused: false }) });
     }));
     render(<App />);
@@ -545,7 +545,7 @@ describe("App", () => {
     const wsRef: { current: { deliver: (s: unknown) => void } | null } = { current: null };
     vi.stubGlobal("WebSocket", makeFakeWS({ current: null, upcoming: [], history: [], paused: false, idleTimeoutSec: 300 }, wsRef) as unknown as typeof WebSocket);
     vi.stubGlobal("fetch", vi.fn((url: string) => {
-      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, guilds: [{ id: "G1", name: "Booth" }] }) });
+      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, bots: [{ id: "B1", name: "Fleet Bot", guilds: [{ id: "G1", name: "Booth" }] }] }) });
       if (url.includes("/voice-channels")) return Promise.resolve({ ok: false, status: 500, headers: { get: () => null }, json: async () => ({ error: "boom" }) });
       return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: [], history: [], paused: false }) });
     }));
@@ -556,5 +556,83 @@ describe("App", () => {
     expect(select).toBeTruthy();
     screen.getByText(/couldn't load — retry/i);
     screen.getByRole("button", { name: /retry loading voice channels/i });
+  });
+
+  it("MULTI-BOT: auto-selects the first bot, scopes the server bank to it, and threads its botId into calls", async () => {
+    const wsRef: { current: { deliver: (s: unknown) => void } | null } = { current: null };
+    vi.stubGlobal("WebSocket", makeFakeWS({ current: null, upcoming: [], history: [], paused: false, idleTimeoutSec: 300 }, wsRef) as unknown as typeof WebSocket);
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({
+        user: { id: "1", username: "dj", avatarUrl: "" },
+        bots: [
+          { id: "B1", name: "Deck One", guilds: [{ id: "G1", name: "Alpha Server" }] },
+          { id: "B2", name: "Deck Two", guilds: [{ id: "G2", name: "Bravo Server" }] },
+        ],
+      }) });
+      return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [], currentChannelId: null, current: null, upcoming: [], history: [], paused: false }) });
+    }));
+    render(<App />);
+    // Both bot keys are shown; the first bot (B1) is auto-selected and its guild is fetched
+    // under the multi-bot path /api/bots/B1/guilds/G1/…
+    await screen.findByRole("button", { name: /Deck One/ });
+    await screen.findByRole("button", { name: /Deck Two/ });
+    await waitFor(() =>
+      expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some((c: unknown[]) => String(c[0]).includes("/api/bots/B1/guilds/G1/voice-channels"))).toBe(true),
+    );
+    // The active bot's server (Alpha) is shown; the OTHER bot's server (Bravo) is not in the bank yet.
+    expect(screen.getByText("Alpha Server")).toBeTruthy();
+    expect(screen.queryByText("Bravo Server")).toBeNull();
+    // B1 is the active key.
+    expect(screen.getByRole("button", { name: /Deck One/ }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("MULTI-BOT: selecting a different bot re-scopes the server bank, persists the bot id, and calls route through the new bot", async () => {
+    const wsRef: { current: { deliver: (s: unknown) => void } | null } = { current: null };
+    vi.stubGlobal("WebSocket", makeFakeWS({ current: null, upcoming: [], history: [], paused: false, idleTimeoutSec: 300 }, wsRef) as unknown as typeof WebSocket);
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({
+        user: { id: "1", username: "dj", avatarUrl: "" },
+        bots: [
+          { id: "B1", name: "Deck One", guilds: [{ id: "G1", name: "Alpha Server" }] },
+          { id: "B2", name: "Deck Two", guilds: [{ id: "G2", name: "Bravo Server" }] },
+        ],
+      }) });
+      return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [], currentChannelId: null, current: null, upcoming: [], history: [], paused: false }) });
+    }));
+    render(<App />);
+    const deckTwo = await screen.findByRole("button", { name: /Deck Two/ });
+    fireEvent.click(deckTwo);
+    // The server bank re-scopes to B2's guilds: Bravo appears, Alpha is gone.
+    await waitFor(() => expect(screen.getByText("Bravo Server")).toBeTruthy());
+    expect(screen.queryByText("Alpha Server")).toBeNull();
+    // Calls now route under /api/bots/B2/guilds/G2/…
+    await waitFor(() =>
+      expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some((c: unknown[]) => String(c[0]).includes("/api/bots/B2/guilds/G2/voice-channels"))).toBe(true),
+    );
+    // The selected bot id is persisted for next visit.
+    expect(localStorage.getItem("ytbot.botId")).toBe("B2");
+  });
+
+  it("MULTI-BOT: defaults to the stored bot on load when it still exists", async () => {
+    localStorage.setItem("ytbot.botId", "B2");
+    const wsRef: { current: { deliver: (s: unknown) => void } | null } = { current: null };
+    vi.stubGlobal("WebSocket", makeFakeWS({ current: null, upcoming: [], history: [], paused: false, idleTimeoutSec: 300 }, wsRef) as unknown as typeof WebSocket);
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({
+        user: { id: "1", username: "dj", avatarUrl: "" },
+        bots: [
+          { id: "B1", name: "Deck One", guilds: [{ id: "G1", name: "Alpha Server" }] },
+          { id: "B2", name: "Deck Two", guilds: [{ id: "G2", name: "Bravo Server" }] },
+        ],
+      }) });
+      return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [], currentChannelId: null, current: null, upcoming: [], history: [], paused: false }) });
+    }));
+    render(<App />);
+    // The stored bot B2 is active, so B2's server + its guild's calls are used first.
+    await waitFor(() =>
+      expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some((c: unknown[]) => String(c[0]).includes("/api/bots/B2/guilds/G2/voice-channels"))).toBe(true),
+    );
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some((c: unknown[]) => String(c[0]).includes("/api/bots/B1/guilds/G1/voice-channels"))).toBe(false);
+    expect(screen.getByRole("button", { name: /Deck Two/ }).getAttribute("aria-pressed")).toBe("true");
   });
 });

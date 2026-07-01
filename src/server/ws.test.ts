@@ -7,6 +7,7 @@ import { GuildBroadcaster, isAllowedOrigin, registerWebsocket, type WsDeps } fro
 
 const USER = "123456789012345678";
 const GUILD = "234567890123456789";
+const BOT = "1";
 const ORIGIN = "https://m";
 
 describe("isAllowedOrigin", () => {
@@ -19,43 +20,54 @@ describe("isAllowedOrigin", () => {
 });
 
 describe("GuildBroadcaster", () => {
-  it("broadcasts only to subscribers of a guild", () => {
+  it("broadcasts only to subscribers of a (bot, guild)", () => {
     const b = new GuildBroadcaster();
     const a = vi.fn(),
       c = vi.fn();
-    b.subscribe("G1", a);
-    b.subscribe("G2", c);
-    b.broadcast("G1", { type: "state", state: 1 });
+    b.subscribe(BOT, "G1", a);
+    b.subscribe(BOT, "G2", c);
+    b.broadcast(BOT, "G1", { type: "state", state: 1 });
     expect(a).toHaveBeenCalledWith({ type: "state", state: 1 });
     expect(c).not.toHaveBeenCalled();
   });
-  it("fans out to every subscriber of a guild (Set-based, not last-writer-wins)", () => {
+  it("keys subscriptions by (botId, guildId): botB/G1 is NOT delivered to a botA/G1 subscriber", () => {
+    const b = new GuildBroadcaster();
+    const a = vi.fn();
+    b.subscribe("botA", "G1", a);
+    // Same guild, different bot — a distinct composite key, so this must not reach `a`.
+    b.broadcast("botB", "G1", { type: "state", state: 1 });
+    expect(a).not.toHaveBeenCalled();
+    // The matching (botA, G1) broadcast still reaches it.
+    b.broadcast("botA", "G1", { type: "state", state: 2 });
+    expect(a).toHaveBeenCalledWith({ type: "state", state: 2 });
+  });
+  it("fans out to every subscriber of a (bot, guild) (Set-based, not last-writer-wins)", () => {
     const b = new GuildBroadcaster();
     const a = vi.fn(),
       b2 = vi.fn();
-    b.subscribe("G1", a);
-    b.subscribe("G1", b2);
-    b.broadcast("G1", { type: "state", state: 1 });
+    b.subscribe(BOT, "G1", a);
+    b.subscribe(BOT, "G1", b2);
+    b.broadcast(BOT, "G1", { type: "state", state: 1 });
     expect(a).toHaveBeenCalledWith({ type: "state", state: 1 });
     expect(b2).toHaveBeenCalledWith({ type: "state", state: 1 });
   });
   it("stops sending after unsubscribe", () => {
     const b = new GuildBroadcaster();
     const a = vi.fn();
-    b.subscribe("G1", a);
-    b.unsubscribe("G1", a);
-    b.broadcast("G1", { type: "state", state: 1 });
+    b.subscribe(BOT, "G1", a);
+    b.unsubscribe(BOT, "G1", a);
+    b.broadcast(BOT, "G1", { type: "state", state: 1 });
     expect(a).not.toHaveBeenCalled();
   });
-  it("attach wires controller 'changed' to a self-describing state broadcast (once per guild)", () => {
+  it("attach wires controller 'changed' to a self-describing state broadcast (once per bot+guild)", () => {
     const b = new GuildBroadcaster();
     const controller = Object.assign(new EventEmitter(), {
       snapshot: () => ({ current: null, upcoming: [], history: [], paused: false }),
     });
     const sub = vi.fn();
-    b.attach("G1", controller as never);
-    b.attach("G1", controller as never); // second attach must NOT double-wire
-    b.subscribe("G1", sub);
+    b.attach(BOT, "G1", controller as never);
+    b.attach(BOT, "G1", controller as never); // second attach must NOT double-wire
+    b.subscribe(BOT, "G1", sub);
     controller.emit("changed");
     expect(sub).toHaveBeenCalledTimes(1);
     // Pushed frames must carry guildId so a multi-guild socket can route them.
@@ -101,10 +113,15 @@ describe("registerWebsocket (integration)", () => {
     const controller = Object.assign(new EventEmitter(), {
       snapshot: () => ({ current: null, upcoming: [], history: [], paused: false }),
     });
+    // The socket resolves its hub + client from the registry by the query-string botId; only
+    // BOT is registered, so an unknown botId resolves to undefined (see the 1008 test below).
+    const registry = {
+      get: (id: string) =>
+        id === BOT ? { hub: { get: () => controller as never }, client } : undefined,
+    };
     const deps: WsDeps = {
       broadcaster: opts.broadcaster ?? new GuildBroadcaster(),
-      hub: { get: () => controller as never },
-      client,
+      registry,
       adminIds: new Set<string>(),
       allowedOrigins: [ORIGIN],
       revalidateMs: opts.revalidateMs,
@@ -120,7 +137,13 @@ describe("registerWebsocket (integration)", () => {
     await app.listen({ port: 0, host: "127.0.0.1" });
     const addr = app.server.address();
     const port = typeof addr === "object" && addr ? addr.port : 0;
-    return { url: `ws://127.0.0.1:${port}/ws`, deps, allow, controller };
+    // The socket is bot- and guild-scoped via the query string (/ws?botId=&guildId=).
+    return {
+      url: `ws://127.0.0.1:${port}/ws?botId=${BOT}&guildId=${GUILD}`,
+      deps,
+      allow,
+      controller,
+    };
   }
 
   // Reject on an unexpected close/error so a missing/wrong message fails fast with a
@@ -161,6 +184,33 @@ describe("registerWebsocket (integration)", () => {
     expect(code).toBe(1008);
   });
 
+  it("closes with 1008 when the botId query param is missing", async () => {
+    const { url } = await boot({});
+    // Strip botId (keep guildId) — the route requires BOTH from the query string.
+    const noBot = url.replace(/botId=[^&]*&/, "");
+    const ws = new WebSocket(noBot, { headers: { origin: ORIGIN } });
+    const code = await closed(ws);
+    expect(code).toBe(1008);
+  });
+
+  it("closes with 1008 when the guildId query param is missing", async () => {
+    const { url } = await boot({});
+    // Strip guildId (keep botId) — the route requires BOTH from the query string.
+    const noGuild = url.replace(/&guildId=[^&]*/, "");
+    const ws = new WebSocket(noGuild, { headers: { origin: ORIGIN } });
+    const code = await closed(ws);
+    expect(code).toBe(1008);
+  });
+
+  it("closes with 1008 when the botId is unknown to the registry", async () => {
+    const { url } = await boot({});
+    // registry.get() returns undefined for any botId other than BOT — an unroutable socket.
+    const unknownBot = url.replace(/botId=[^&]*/, "botId=999");
+    const ws = new WebSocket(unknownBot, { headers: { origin: ORIGIN } });
+    const code = await closed(ws);
+    expect(code).toBe(1008);
+  });
+
   it("a subscribe without permission yields a forbidden error and no broadcaster.subscribe", async () => {
     const broadcaster = new GuildBroadcaster();
     const subSpy = vi.spyOn(broadcaster, "subscribe");
@@ -183,7 +233,7 @@ describe("registerWebsocket (integration)", () => {
     ws.send(JSON.stringify({ subscribe: GUILD }));
     const msg = await nextMessage(ws);
     expect(msg).toMatchObject({ type: "state", guildId: GUILD });
-    expect(subSpy).toHaveBeenCalledWith(GUILD, expect.any(Function));
+    expect(subSpy).toHaveBeenCalledWith(BOT, GUILD, expect.any(Function));
     ws.close();
   });
 
@@ -211,7 +261,7 @@ describe("registerWebsocket (integration)", () => {
     ws.send(JSON.stringify({ unsubscribe: GUILD }));
     // Give the unsubscribe message a tick to be processed server-side.
     await new Promise((r) => setTimeout(r, 30));
-    expect(unsubSpy).toHaveBeenCalledWith(GUILD, expect.any(Function));
+    expect(unsubSpy).toHaveBeenCalledWith(BOT, GUILD, expect.any(Function));
     // After unsubscribe, a 'changed' must NOT deliver any further frame.
     let got = false;
     ws.on("message", () => (got = true));
@@ -262,6 +312,6 @@ describe("registerWebsocket (integration)", () => {
     await closed(ws);
     // Give the server-side close handler a tick to run.
     await new Promise((r) => setTimeout(r, 20));
-    expect(unsubSpy).toHaveBeenCalledWith(GUILD, expect.any(Function));
+    expect(unsubSpy).toHaveBeenCalledWith(BOT, GUILD, expect.any(Function));
   });
 });

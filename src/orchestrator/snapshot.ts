@@ -31,6 +31,15 @@ interface HubLike {
 
 const FILE = "session-snapshot.json";
 
+/**
+ * Snapshot filename for a bot. Bot "1" (and the legacy single-bot case, botId omitted) keeps the
+ * original `session-snapshot.json` so an existing deployment's saved sessions still restore;
+ * additional bots get a per-id file so their sessions never collide.
+ */
+function fileFor(botId?: string): string {
+  return botId && botId !== "1" ? `session-snapshot.${botId}.json` : FILE;
+}
+
 export function collectSnapshot(hub: HubLike, now: number): SnapshotFile {
   const guilds: GuildSnap[] = [];
   for (const guildId of hub.guildIds()) {
@@ -45,16 +54,21 @@ export function collectSnapshot(hub: HubLike, now: number): SnapshotFile {
   return { version: 1, savedAt: now, guilds };
 }
 
-export async function writeSnapshot(dir: string, file: SnapshotFile): Promise<void> {
+export async function writeSnapshot(
+  dir: string,
+  file: SnapshotFile,
+  botId?: string,
+): Promise<void> {
   await mkdir(dir, { recursive: true });
-  const tmp = join(dir, `${FILE}.tmp`);
+  const name = fileFor(botId);
+  const tmp = join(dir, `${name}.tmp`);
   await writeFile(tmp, JSON.stringify(file));
-  await rename(tmp, join(dir, FILE)); // atomic swap
+  await rename(tmp, join(dir, name)); // atomic swap
 }
 
-export async function readSnapshot(dir: string): Promise<SnapshotFile | null> {
+export async function readSnapshot(dir: string, botId?: string): Promise<SnapshotFile | null> {
   try {
-    const raw = await readFile(join(dir, FILE), "utf8");
+    const raw = await readFile(join(dir, fileFor(botId)), "utf8");
     const parsed = JSON.parse(raw) as SnapshotFile;
     return parsed.version === 1 && Array.isArray(parsed.guilds) ? parsed : null;
   } catch {

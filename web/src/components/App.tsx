@@ -26,9 +26,13 @@ import { Playlists } from "./Playlists.js";
 type BannerMsg = { kind: "success"; text: string } | { kind: "error"; text: string };
 
 const GUILD_STORAGE_KEY = "ytbot.guildId";
+const BOT_STORAGE_KEY = "ytbot.botId";
 
 function readStoredGuildId(): string | null {
   try { return localStorage.getItem(GUILD_STORAGE_KEY); } catch { return null; }
+}
+function readStoredBotId(): string | null {
+  try { return localStorage.getItem(BOT_STORAGE_KEY); } catch { return null; }
 }
 
 function StatusBanner({ msg, onDismiss }: { msg: BannerMsg; onDismiss: () => void }) {
@@ -70,6 +74,7 @@ function StatusBanner({ msg, onDismiss }: { msg: BannerMsg; onDismiss: () => voi
 export function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
+  const [botId, setBotId] = useState<string | null>(null);
   const [guildId, setGuildId] = useState<string | null>(null);
   const [paused, setPaused] = useState(false);
   const [channels, setChannels] = useState<VoiceChannel[]>([]);
@@ -83,7 +88,11 @@ export function App() {
   // True once the user manually picks a channel for this guild, so later channel
   // refreshes don't clobber their choice with the auto-detected current channel.
   const manualChannelRef = useRef(false);
-  const live = useGuildState(guildId);
+  // The bot currently being driven, and the guilds it can control. Every guild-scoped
+  // call/WS is addressed to (activeBot.id, guildId).
+  const activeBot = me?.bots.find((b) => b.id === botId) ?? null;
+  const activeGuilds = activeBot?.guilds ?? [];
+  const live = useGuildState(botId, guildId);
 
   // Status banner state: current message + which lastError.seq we've already shown.
   const [banner, setBanner] = useState<BannerMsg | null>(null);
@@ -116,10 +125,10 @@ export function App() {
     showBanner({ kind: "error", text: `Couldn't play ${e.title} — ${e.reason}` });
   }, [live.lastError, showBanner]);
 
-  // Clear banner on guild switch.
-  useEffect(() => { setBanner(null); shownSeqRef.current = 0; }, [guildId]);
+  // Clear banner on a bot OR guild switch.
+  useEffect(() => { setBanner(null); shownSeqRef.current = 0; }, [botId, guildId]);
 
-  useEffect(() => setPaused(false), [guildId]);
+  useEffect(() => setPaused(false), [botId, guildId]);
 
   // Reconcile the pause/resume label with server truth: the server now broadcasts
   // a fresh snapshot on every pause/resume, so the optimistic toggle is corrected
@@ -129,12 +138,12 @@ export function App() {
     if (typeof serverPaused === "boolean") setPaused(serverPaused);
   }, [serverPaused]);
 
-  // Reset manual-pick tracking when the active guild changes.
-  useEffect(() => { manualChannelRef.current = false; }, [guildId]);
+  // Reset manual-pick tracking when the active bot or guild changes.
+  useEffect(() => { manualChannelRef.current = false; }, [botId, guildId]);
 
-  const loadChannels = useCallback((g: string) => {
+  const loadChannels = useCallback((b: string, g: string) => {
     setChannelsLoadFailed(false);
-    api.voiceChannels(g).then((r) => {
+    api.voiceChannels(b, g).then((r) => {
       setChannels(r.channels);
       // ITEM 2: auto-select the voice channel the user is currently in, unless
       // they've already picked one manually (manual choice must win).
@@ -155,44 +164,58 @@ export function App() {
   }, [showBanner]);
 
   useEffect(() => {
-    if (!guildId) { setChannels([]); setVoiceChannelId(null); setChannelsLoadFailed(false); return; }
-    loadChannels(guildId);
-  }, [guildId, loadChannels]);
+    if (!botId || !guildId) { setChannels([]); setVoiceChannelId(null); setChannelsLoadFailed(false); return; }
+    loadChannels(botId, guildId);
+  }, [botId, guildId, loadChannels]);
 
   // Load the guild's text channels for the command-channel picker. Non-fatal on failure —
   // the picker simply shows just the "Any channel" option (plus the persisted value, if any).
   useEffect(() => {
-    if (!guildId) { setTextChannels([]); return; }
+    if (!botId || !guildId) { setTextChannels([]); return; }
     let cancelled = false;
     api
-      .textChannels(guildId)
+      .textChannels(botId, guildId)
       .then((r) => { if (!cancelled) setTextChannels(r.channels ?? []); })
       .catch(() => { if (!cancelled) setTextChannels([]); });
     return () => { cancelled = true; };
-  }, [guildId]);
+  }, [botId, guildId]);
 
   // Load this guild's saved playlists (and clear them on guild switch). A fetch failure
   // is non-fatal — the panel just shows an empty list.
-  const reloadPlaylists = useCallback((g: string) => {
-    api.listPlaylists(g).then((r) => setPlaylists(r.playlists ?? [])).catch(() => setPlaylists([]));
+  const reloadPlaylists = useCallback((b: string, g: string) => {
+    api.listPlaylists(b, g).then((r) => setPlaylists(r.playlists ?? [])).catch(() => setPlaylists([]));
   }, []);
   useEffect(() => {
-    if (!guildId) { setPlaylists([]); return; }
-    reloadPlaylists(guildId);
-  }, [guildId, reloadPlaylists]);
+    if (!botId || !guildId) { setPlaylists([]); return; }
+    reloadPlaylists(botId, guildId);
+  }, [botId, guildId, reloadPlaylists]);
 
   useEffect(() => {
     api.me().then((m) => {
       setMe(m);
-      // ITEM 1: prefer the last-selected guild (if still controllable), else the first.
+      // Prefer the last-selected bot (if still present), else the first bot.
+      const storedBot = readStoredBotId();
+      const bot =
+        (storedBot ? m.bots.find((b) => b.id === storedBot) : undefined) ??
+        m.bots[0] ??
+        null;
+      setBotId((prev) => prev ?? bot?.id ?? null);
+      // ITEM 1: within that bot, prefer the last-selected guild (if that bot still
+      // controls it), else the first of the bot's guilds.
       setGuildId((g) => {
         if (g) return g;
         const stored = readStoredGuildId();
-        if (stored && m.guilds.some((x) => x.id === stored)) return stored;
-        return m.guilds[0]?.id ?? null;
+        if (bot && stored && bot.guilds.some((x) => x.id === stored)) return stored;
+        return bot?.guilds[0]?.id ?? null;
       });
     }).catch(() => setMe(null)).finally(() => setAuthChecked(true));
   }, []);
+
+  // Persist the chosen bot so it is remembered next visit.
+  useEffect(() => {
+    if (!botId) return;
+    try { localStorage.setItem(BOT_STORAGE_KEY, botId); } catch { /* ignore */ }
+  }, [botId]);
 
   // ITEM 1: persist the chosen guild so it is remembered next visit.
   useEffect(() => {
@@ -200,13 +223,28 @@ export function App() {
     try { localStorage.setItem(GUILD_STORAGE_KEY, guildId); } catch { /* ignore */ }
   }, [guildId]);
 
+  // Selecting a bot re-scopes the server bank to that bot's guilds. Keep the current
+  // guild if the newly-selected bot also controls it (common when bots share a server);
+  // otherwise fall back to the stored guild (if valid for this bot) or the bot's first.
+  const onSelectBot = useCallback((id: string) => {
+    setBotId(id);
+    const bot = me?.bots.find((b) => b.id === id) ?? null;
+    if (!bot) return;
+    setGuildId((g) => {
+      if (g && bot.guilds.some((x) => x.id === g)) return g; // still valid — keep it
+      const stored = readStoredGuildId();
+      if (stored && bot.guilds.some((x) => x.id === stored)) return stored;
+      return bot.guilds[0]?.id ?? null;
+    });
+  }, [me]);
+
   const control = useCallback(async (a: ControlAction) => {
-    if (!guildId) return;
+    if (!botId || !guildId) return;
     // Optimistic toggle for the pause/resume label.
     if (a === "pause") setPaused(true);
     if (a === "resume") setPaused(false);
     try {
-      await api.control(guildId, a);
+      await api.control(botId, guildId, a);
     } catch (err) {
       // Revert the optimistic toggle and surface the failure — a swallowed error
       // made a failed pause look like it succeeded while audio kept playing.
@@ -215,27 +253,27 @@ export function App() {
       const reason = err instanceof ApiError ? err.message : "Something went wrong";
       showBanner({ kind: "error", text: `Couldn't ${a} — ${reason}` });
     }
-  }, [guildId, showBanner]);
+  }, [botId, guildId, showBanner]);
 
   // Returns a promise that REJECTS on failure so the ProgressBar can release its
   // optimistic hold (otherwise the bar stays pinned at the never-applied target with
   // a "seeking…" indicator forever, since a failed seek emits no confirming snapshot).
   const onSeek = useCallback((positionMs: number): Promise<void> => {
-    if (!guildId) return Promise.resolve();
-    return api.seek(guildId, positionMs).then(() => undefined).catch((err: unknown) => {
+    if (!botId || !guildId) return Promise.resolve();
+    return api.seek(botId, guildId, positionMs).then(() => undefined).catch((err: unknown) => {
       const msg = err instanceof ApiError ? err.message : "Couldn't seek";
       showBanner({ kind: "error", text: msg });
       throw err;
     });
-  }, [guildId, showBanner]);
+  }, [botId, guildId, showBanner]);
 
   // Persist any settings patch. The authoritative values come back via the next WS
   // state broadcast (the controller emits "changed" on update), so we don't store the
   // result locally — the snapshot is the single source of truth.
   const onPatchSettings = useCallback(async (patch: Partial<GuildSettings>) => {
-    if (!guildId) return;
+    if (!botId || !guildId) return;
     try {
-      const { settings } = await api.setSettings(guildId, patch);
+      const { settings } = await api.setSettings(botId, guildId, patch);
       // When the WS isn't live it won't deliver the "changed" frame, so the controlled
       // inputs would visually snap back to the stale snapshot value (looking like the
       // save failed). Merge the authoritative persisted settings into the snapshot so
@@ -247,7 +285,7 @@ export function App() {
       const reason = err instanceof ApiError ? err.message : "Something went wrong";
       showBanner({ kind: "error", text: `Couldn't update setting — ${reason}` });
     }
-  }, [guildId, showBanner, live]);
+  }, [botId, guildId, showBanner, live]);
   const onSetIdleTimeout = useCallback(
     (idleTimeoutSec: number) => onPatchSettings({ idleTimeoutSec }),
     [onPatchSettings],
@@ -271,20 +309,20 @@ export function App() {
   // Refetch the snapshot after a queue mutation when the WS isn't live to deliver
   // the update itself (otherwise the queue would look stale until the next event).
   const refreshIfNotLive = useCallback(async () => {
-    if (!guildId || live.status === "live") return;
+    if (!botId || !guildId || live.status === "live") return;
     try {
-      const snap = await api.state(guildId);
+      const snap = await api.state(botId, guildId);
       live.refresh(snap);
     } catch { /* a refetch failure is non-fatal; the mutation already succeeded */ }
-  }, [guildId, live]);
+  }, [botId, guildId, live]);
 
-  // Generation token: bumps on every guild switch. An in-flight resolve/pick that
-  // started under an older generation must not write its result into the new guild.
+  // Generation token: bumps on every bot/guild switch. An in-flight resolve/pick that
+  // started under an older generation must not write its result into the new (bot, guild).
   const genRef = useRef(0);
-  useEffect(() => { genRef.current += 1; }, [guildId]);
+  useEffect(() => { genRef.current += 1; }, [botId, guildId]);
 
   const onPlay = useCallback(async (input: string): Promise<{ candidates: TrackMeta[] | null; queuedTitle?: string }> => {
-    if (!guildId) return { candidates: null };
+    if (!botId || !guildId) return { candidates: null };
     if (noVoiceTarget) {
       showBanner({ kind: "error", text: "Pick a voice channel first" });
       return { candidates: null };
@@ -296,7 +334,7 @@ export function App() {
     // rather than handing the old guild's candidates/queue to the new one.
     const gen = genRef.current;
     try {
-      const r = await api.play(guildId, input, voiceChannelId ?? undefined);
+      const r = await api.play(botId, guildId, input, voiceChannelId ?? undefined);
       if (genRef.current !== gen) return { candidates: null }; // guild changed: drop stale result
       if (r.queued) {
         announceQueued(r);
@@ -312,18 +350,18 @@ export function App() {
       showBanner({ kind: "error", text: msg });
       return { candidates: null };
     }
-  }, [guildId, voiceChannelId, noVoiceTarget, showBanner, dismissBanner, announceQueued, refreshIfNotLive]);
+  }, [botId, guildId, voiceChannelId, noVoiceTarget, showBanner, dismissBanner, announceQueued, refreshIfNotLive]);
 
   // Queue a single video and report the outcome (instead of mutating banner state
   // internally). The bulk path below aggregates these into one summary banner so
   // queuing N tracks no longer stomps N-1 results onto a single banner.
   const pickOne = useCallback(
     async (videoId: string): Promise<{ ok: boolean; title?: string; reason?: string; moveSuppressed?: boolean }> => {
-      if (!guildId) return { ok: false, reason: "No server selected" };
+      if (!botId || !guildId) return { ok: false, reason: "No server selected" };
       if (noVoiceTarget) return { ok: false, reason: "Pick a voice channel first" };
       const gen = genRef.current;
       try {
-        const r = await api.pick(guildId, videoId, voiceChannelId ?? undefined);
+        const r = await api.pick(botId, guildId, videoId, voiceChannelId ?? undefined);
         // The guild changed while this pick was in flight — drop the stale result so
         // we never report (or refresh) into a now-different guild.
         if (genRef.current !== gen) return { ok: false, reason: "stale" };
@@ -333,7 +371,7 @@ export function App() {
         return { ok: false, reason };
       }
     },
-    [guildId, voiceChannelId, noVoiceTarget],
+    [botId, guildId, voiceChannelId, noVoiceTarget],
   );
 
   // Queue every selected candidate IN ORDER, serializing the picks so the server's
@@ -385,65 +423,65 @@ export function App() {
   );
 
   const onRemove = useCallback(async (itemId: string) => {
-    if (!guildId) return;
+    if (!botId || !guildId) return;
     try {
-      await api.remove(guildId, itemId);
+      await api.remove(botId, guildId, itemId);
       await refreshIfNotLive();
     } catch (err) {
       const reason = err instanceof ApiError ? err.message : "Something went wrong";
       showBanner({ kind: "error", text: `Couldn't remove — ${reason}` });
     }
-  }, [guildId, refreshIfNotLive, showBanner]);
+  }, [botId, guildId, refreshIfNotLive, showBanner]);
 
   const onReorder = useCallback(async (itemId: string, toIndex: number) => {
-    if (!guildId) return;
+    if (!botId || !guildId) return;
     try {
-      await api.reorder(guildId, itemId, toIndex);
+      await api.reorder(botId, guildId, itemId, toIndex);
       await refreshIfNotLive();
     } catch (err) {
       const reason = err instanceof ApiError ? err.message : "Something went wrong";
       showBanner({ kind: "error", text: `Couldn't move — ${reason}` });
     }
-  }, [guildId, refreshIfNotLive, showBanner]);
+  }, [botId, guildId, refreshIfNotLive, showBanner]);
 
   const onShuffle = useCallback(async () => {
-    if (!guildId) return;
+    if (!botId || !guildId) return;
     try {
-      await api.shuffle(guildId);
+      await api.shuffle(botId, guildId);
       await refreshIfNotLive();
     } catch (err) {
       const reason = err instanceof ApiError ? err.message : "Something went wrong";
       showBanner({ kind: "error", text: `Couldn't shuffle — ${reason}` });
     }
-  }, [guildId, refreshIfNotLive, showBanner]);
+  }, [botId, guildId, refreshIfNotLive, showBanner]);
 
   // "Play next" reuses the reorder endpoint, moving the item to the front of upcoming.
   const onPlayNext = useCallback(async (itemId: string) => {
-    if (!guildId) return;
+    if (!botId || !guildId) return;
     try {
-      await api.reorder(guildId, itemId, 0);
+      await api.reorder(botId, guildId, itemId, 0);
       await refreshIfNotLive();
     } catch (err) {
       const reason = err instanceof ApiError ? err.message : "Something went wrong";
       showBanner({ kind: "error", text: `Couldn't move — ${reason}` });
     }
-  }, [guildId, refreshIfNotLive, showBanner]);
+  }, [botId, guildId, refreshIfNotLive, showBanner]);
 
   const onJump = useCallback(async (itemId: string) => {
-    if (!guildId) return;
+    if (!botId || !guildId) return;
     try {
-      await api.jump(guildId, itemId);
+      await api.jump(botId, guildId, itemId);
       await refreshIfNotLive();
     } catch (err) {
       const reason = err instanceof ApiError ? err.message : "Something went wrong";
       showBanner({ kind: "error", text: `Couldn't jump — ${reason}` });
     }
-  }, [guildId, refreshIfNotLive, showBanner]);
+  }, [botId, guildId, refreshIfNotLive, showBanner]);
 
   // Re-queue a track from history by its videoId. Reuses the single-pick flow (which
   // resolves + enqueues into the current voice target), then surfaces the outcome.
   const onRequeue = useCallback(async (videoId: string) => {
-    if (!guildId) return;
+    if (!botId || !guildId) return;
     if (noVoiceTarget) {
       showBanner({ kind: "error", text: "Pick a voice channel first" });
       return;
@@ -457,22 +495,22 @@ export function App() {
     } else {
       showBanner({ kind: "error", text: `Couldn't re-queue — ${r.reason ?? "failed"}` });
     }
-  }, [guildId, noVoiceTarget, pickOne, showBanner, refreshIfNotLive]);
+  }, [botId, guildId, noVoiceTarget, pickOne, showBanner, refreshIfNotLive]);
 
   const onSavePlaylist = useCallback(async (name: string) => {
-    if (!guildId) return;
+    if (!botId || !guildId) return;
     try {
-      const { playlists: updated } = await api.savePlaylist(guildId, name);
+      const { playlists: updated } = await api.savePlaylist(botId, guildId, name);
       setPlaylists(updated);
       showBanner({ kind: "success", text: `Saved playlist: ${name}` });
     } catch (err) {
       const reason = err instanceof ApiError ? err.message : "Something went wrong";
       showBanner({ kind: "error", text: `Couldn't save playlist — ${reason}` });
     }
-  }, [guildId, showBanner]);
+  }, [botId, guildId, showBanner]);
 
   const onLoadPlaylist = useCallback(async (name: string) => {
-    if (!guildId) return;
+    if (!botId || !guildId) return;
     if (noVoiceTarget) {
       showBanner({ kind: "error", text: "Pick a voice channel first" });
       return;
@@ -480,7 +518,7 @@ export function App() {
     try {
       // Forward the current voice channel (same value play/pick use) so the bot connects
       // and the loaded tracks start playing instead of queueing into the void.
-      const r = await api.loadPlaylist(guildId, name, voiceChannelId ?? undefined);
+      const r = await api.loadPlaylist(botId, guildId, name, voiceChannelId ?? undefined);
       const base = `Loaded ${r.queued} track${r.queued === 1 ? "" : "s"} from ${name}`;
       showBanner({
         kind: "success",
@@ -491,19 +529,19 @@ export function App() {
       const reason = err instanceof ApiError ? err.message : "Something went wrong";
       showBanner({ kind: "error", text: `Couldn't load playlist — ${reason}` });
     }
-  }, [guildId, voiceChannelId, noVoiceTarget, showBanner, refreshIfNotLive]);
+  }, [botId, guildId, voiceChannelId, noVoiceTarget, showBanner, refreshIfNotLive]);
 
   const onDeletePlaylist = useCallback(async (name: string) => {
-    if (!guildId) return;
+    if (!botId || !guildId) return;
     try {
-      const { playlists: updated } = await api.deletePlaylist(guildId, name);
+      const { playlists: updated } = await api.deletePlaylist(botId, guildId, name);
       setPlaylists(updated);
       showBanner({ kind: "success", text: `Deleted playlist: ${name}` });
     } catch (err) {
       const reason = err instanceof ApiError ? err.message : "Something went wrong";
       showBanner({ kind: "error", text: `Couldn't delete playlist — ${reason}` });
     }
-  }, [guildId, showBanner]);
+  }, [botId, guildId, showBanner]);
 
   if (!authChecked) return (
     <main className="min-h-full grid place-items-center">
@@ -516,13 +554,27 @@ export function App() {
   if (!me) return <LoginGate />;
 
   const snap = live.snapshot;
+  // Which bots are "on air", for the bot-bank live jewel. We only hold live state for the
+  // ACTIVE bot (its own WS), so we can only honestly light the active bot when it has a
+  // current track — other bots' players run server-side and aren't streamed here.
+  const playingBotIds =
+    botId && snap?.current ? new Set<string>([botId]) : undefined;
   return (
     <div className="min-h-full">
       <Grain />
       <div className="mx-auto max-w-4xl px-5 sm:px-8 py-7 flex flex-col gap-5">
         <div className="reveal" style={{ animationDelay: "60ms" }}>
-          <ServerSelector me={me} activeGuildId={guildId} onSelect={setGuildId}
-            onLogout={() => { api.logout().finally(() => (location.href = "/")); }} />
+          <ServerSelector
+            me={me}
+            guilds={activeGuilds}
+            bots={me.bots}
+            activeBotId={botId}
+            onSelectBot={onSelectBot}
+            playingBotIds={playingBotIds}
+            activeGuildId={guildId}
+            onSelect={setGuildId}
+            onLogout={() => { api.logout().finally(() => (location.href = "/")); }}
+          />
         </div>
         {!guildId ? (
           <div className="card reveal p-10 text-center" style={{ animationDelay: "120ms" }}>
@@ -536,6 +588,7 @@ export function App() {
             <div className="reveal" style={{ animationDelay: "120ms" }}>
             <NowPlaying
               item={snap?.current ?? null}
+              botId={botId}
               guildId={guildId}
               // Use the local optimistic `paused` (not the snapshot's) so the progress bar
               // freezes in lockstep with the Visualizer (`playing`) and the Controls label
@@ -568,7 +621,7 @@ export function App() {
                   channels={channels}
                   value={voiceChannelId}
                   loadFailed={channelsLoadFailed}
-                  onRetry={() => guildId && loadChannels(guildId)}
+                  onRetry={() => botId && guildId && loadChannels(botId, guildId)}
                   onChange={(id) => { manualChannelRef.current = true; setVoiceChannelId(id); }}
                 />
                 <Settings
@@ -605,15 +658,16 @@ export function App() {
               </span>
             </div>
             {banner && <StatusBanner msg={banner} onDismiss={dismissBanner} />}
-            {/* key={guildId} remounts these on a guild switch so their local search/candidate
-                state (and the Picker's selection) resets — otherwise a stale candidate list
-                from guild A could be queued into guild B, since the queue handlers close over
-                the CURRENT guildId. */}
+            {/* key={botId:guildId} remounts these on a bot OR guild switch so their local
+                search/candidate state (and the Picker's selection) resets — otherwise a stale
+                candidate list from (botA,guildA) could be queued into (botB,guildB), since the
+                queue handlers close over the CURRENT bot+guild. The bot id is in the key too
+                so switching bots on a SHARED server (same guildId) still remounts cleanly. */}
             <div className="reveal" style={{ animationDelay: "180ms" }}>
-              <AddBar key={guildId} onPlay={onPlay} onQueueAll={onQueueAll} busy={noVoiceTarget} />
+              <AddBar key={`${botId}:${guildId}`} onPlay={onPlay} onQueueAll={onQueueAll} busy={noVoiceTarget} />
             </div>
             <div className="reveal" style={{ animationDelay: "220ms" }}>
-              <Discover key={guildId} onSearch={onPlay} onQueueAll={onQueueAll} busy={noVoiceTarget} />
+              <Discover key={`${botId}:${guildId}`} onSearch={onPlay} onQueueAll={onQueueAll} busy={noVoiceTarget} />
             </div>
             <div className="reveal" style={{ animationDelay: "260ms" }}>
               <Queue items={snap?.upcoming ?? []} current={snap?.current ?? null} onRemove={onRemove} onReorder={onReorder} onShuffle={onShuffle} onPlayNext={onPlayNext} onJump={onJump} autoplay={snap?.autoplay ?? false} autoplaySource={snap?.autoplaySource ?? "radio"} onToggleAutoplay={onPatchSettings} />

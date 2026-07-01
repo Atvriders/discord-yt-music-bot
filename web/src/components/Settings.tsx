@@ -1,6 +1,6 @@
 // Per-guild playback settings. Driven by the live WS snapshot (the controller emits
-// "changed" on every update) and persisted via POST /api/guilds/:id/settings, which
-// the server clamps/validates. Styled as a Late-Night Studio console "settings strip":
+// "changed" on every update) and persisted via POST /api/bots/:botId/guilds/:guildId/settings,
+// which the server clamps/validates. Styled as a Late-Night Studio console "settings strip":
 // a machined faceplate of engraved labels, carved-in selects, VU faders and toggle lamps.
 import { useEffect, useState } from "react";
 import type { AutoplaySource, FxPreset, RepeatMode, TextChannel } from "../types.js";

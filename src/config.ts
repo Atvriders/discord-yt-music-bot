@@ -1,8 +1,8 @@
-import type { MediaConfig, BotConfig, WebConfig } from "./types/config-types.js";
+import type { MediaConfig, BotConfig, BotInstance, WebConfig } from "./types/config-types.js";
 import { parseAdminIds } from "./auth/authz.js";
 import { LEVELS, isValidLevel } from "./util/logger.js";
 
-export type { MediaConfig, BotConfig, WebConfig } from "./types/config-types.js";
+export type { MediaConfig, BotConfig, BotInstance, WebConfig } from "./types/config-types.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -55,12 +55,63 @@ export function loadMediaConfig(env: Env = process.env): MediaConfig {
   };
 }
 
+/**
+ * Parse the LIST of bots from env. Bot 1 keeps the historical unnumbered env names so a
+ * single-bot deploy is 100% backward-compatible; bots 2,3,... use the DISCORD_TOKEN_<i> /
+ * COMMAND_PREFIX_<i> / BOT_NAME_<i> family. Parsing walks i upward from 2 and STOPS at the
+ * first gap (an unset/empty DISCORD_TOKEN_<i>), so the list is always a contiguous prefix —
+ * DISCORD_TOKEN_3 with no DISCORD_TOKEN_2 is treated as "only bot 1", never a sparse list.
+ */
+// Default command prefixes for bots 2,3,… — DISTINCT SINGLE CHARACTERS that are not prefixes
+// of one another (bot 1 uses "?"). This matters: with "?" and "?2", the message "?2play" also
+// starts with "?", so bot 1's parser would grab it (its bare "?<query>" fallback). Non-overlapping
+// single-char prefixes avoid that entirely. Beyond this list, the operator must set the prefix
+// explicitly (the prefix-free validation below will flag a bad fallback).
+const DEFAULT_PREFIXES = ["?", "!", "$", "%", "&", "+", "=", "~"] as const;
+
+function loadBotInstances(env: Env): BotInstance[] {
+  const token1 = strEnv(env, "DISCORD_TOKEN");
+  if (token1 === null) throw new Error("DISCORD_TOKEN is required");
+  const bots: BotInstance[] = [
+    {
+      id: "1",
+      token: token1,
+      commandPrefix: strEnv(env, "COMMAND_PREFIX") ?? "?",
+      name: strEnv(env, "BOT_NAME") ?? "YouTube Music Bot",
+    },
+  ];
+  for (let i = 2; ; i++) {
+    const token = strEnv(env, `DISCORD_TOKEN_${i}`);
+    if (token === null) break; // contiguous-only: first gap ends the list
+    bots.push({
+      id: String(i),
+      token,
+      commandPrefix: strEnv(env, `COMMAND_PREFIX_${i}`) ?? DEFAULT_PREFIXES[i - 1] ?? `?${i}`,
+      name: strEnv(env, `BOT_NAME_${i}`) ?? `YouTube Music Bot ${i}`,
+    });
+  }
+  // Command prefixes must be PREFIX-FREE — not merely distinct, but none a prefix of another.
+  // With "?" and "?2", "?2play" also starts with "?", so bot 1 would grab bot 2's command (the
+  // parser's bare "?<query>" fallback). Reject any such overlap (which also catches exact dupes).
+  for (let a = 0; a < bots.length; a++) {
+    for (let b = a + 1; b < bots.length; b++) {
+      const pa = bots[a]!.commandPrefix;
+      const pb = bots[b]!.commandPrefix;
+      if (pa.startsWith(pb) || pb.startsWith(pa)) {
+        throw new Error(
+          `Command prefixes for bots ${bots[a]!.id} ("${pa}") and ${bots[b]!.id} ("${pb}") overlap — ` +
+            `one is a prefix of the other, so "${pa.length <= pb.length ? pb : pa}…" commands would be ambiguous. ` +
+            `Use distinct, non-overlapping prefixes (e.g. "?", "!", "$").`,
+        );
+      }
+    }
+  }
+  return bots;
+}
+
 export function loadBotConfig(env: Env = process.env): BotConfig {
-  const token = strEnv(env, "DISCORD_TOKEN");
-  if (token === null) throw new Error("DISCORD_TOKEN is required");
   return {
-    discordToken: token,
-    commandPrefix: strEnv(env, "COMMAND_PREFIX") ?? "?",
+    bots: loadBotInstances(env),
     idleTimeoutMs: intEnv(env, "IDLE_TIMEOUT_SEC", 300, { min: 1 }) * 1000,
     prefetchDepth: intEnv(env, "PREFETCH_DEPTH", 1, { min: 0 }),
     // Must be >= 1: a Semaphore(0) deadlocks (no download ever acquires a slot).

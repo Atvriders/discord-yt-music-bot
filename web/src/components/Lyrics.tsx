@@ -18,7 +18,7 @@ type LoadState =
  * `videoId` identifies the current track: when it changes while the panel is open we
  * refetch so the lyrics follow the music.
  */
-export function Lyrics({ guildId, videoId }: { guildId: string; videoId: string }) {
+export function Lyrics({ botId, guildId, videoId }: { botId: string; guildId: string; videoId: string }) {
   const [open, setOpen] = useState(false);
   const [state, setState] = useState<LoadState>({ kind: "idle" });
   // Guards against a stale in-flight response overwriting a newer track's lyrics.
@@ -28,14 +28,14 @@ export function Lyrics({ guildId, videoId }: { guildId: string; videoId: string 
     const reqId = ++reqIdRef.current;
     setState({ kind: "loading" });
     try {
-      const { lyrics } = await api.lyrics(guildId);
+      const { lyrics } = await api.lyrics(botId, guildId);
       if (reqId !== reqIdRef.current) return; // superseded by a newer request
       setState(lyrics && lyrics.trim() ? { kind: "loaded", lyrics } : { kind: "empty" });
     } catch {
       if (reqId !== reqIdRef.current) return;
       setState({ kind: "error" });
     }
-  }, [guildId]);
+  }, [botId, guildId]);
 
   // Fetch when opened, and refetch whenever the track changes while open.
   useEffect(() => {

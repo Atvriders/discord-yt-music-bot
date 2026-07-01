@@ -13,7 +13,7 @@ import {
 } from "./settings.js";
 import type { PlaylistStore, PlaylistSummary } from "./playlists.js";
 
-interface DownloadResult {
+export interface DownloadResult {
   path: string;
   audio: AudioInfo | null;
 }
@@ -70,6 +70,33 @@ const AUTOPLAY_REQUESTER: Requester = {
  */
 export const AUTOPLAY_MAX_CHAIN = 50;
 
+/**
+ * Autoplay candidates longer than this are almost always compilations/albums/mixes rather than
+ * one song, so they're rejected (a single track is virtually never this long). Kept generous so
+ * genuinely long individual songs (extended/live cuts) still qualify.
+ */
+export const AUTOPLAY_MAX_SONG_SEC = 15 * 60;
+
+/**
+ * Title patterns that mark a video as a COMPILATION / multi-song upload rather than one song —
+ * "best of", "greatest hits", "full album", megamixes, "top 20", "1 hour", DJ/live sets, etc.
+ * Deliberately specific: bare "mix" is NOT matched (Radio/Club/Extended/Original Mix are single
+ * songs); only compound forms (megamix, dj/continuous/nonstop mix, "mix 2023") are.
+ */
+const COMPILATION_TITLE_RE =
+  /\b(best\s*of|greatest\s*hits|full\s*album|album\s*complet|compilation|megamix|non[\s-]?stop|mixtape|d\.?j\.?\s*(set|mix)|live\s*(set|mix)|continuous\s*mix|(?:party|summer|winter|workout|study|chill|gym)\s*mix|mix\s*(?:19|20)\d\d|full\s*(?:concert|set|show|movie|ep)|all\s+(?:songs|hits|tracks)|top\s*\d+|\d+\s+(?:greatest|best)\b|\d+\s*(?:songs|hits|tracks)|playlist|essentials|anthology|\bcollection\b|medley|the\s+very\s+best|\d+\s*(?:hour|hr)s?\b|hour[\s-]*long)\b/i;
+
+/**
+ * Whether an autoplay candidate looks like a SINGLE song worth chaining (vs a "best of"/album/
+ * mix/long-form video). Rejects compilation-y titles and over-long durations. Used only to filter
+ * auto-discover picks — it never affects a track a user explicitly queues.
+ */
+export function isLikelySingleSong(meta: TrackMeta): boolean {
+  if (COMPILATION_TITLE_RE.test(meta.title)) return false;
+  if (meta.durationSec !== null && meta.durationSec > AUTOPLAY_MAX_SONG_SEC) return false;
+  return true;
+}
+
 /** Audio post-processing options handed to the resource factory for a single track. */
 export interface AudioOptions {
   /** Pseudo-crossfade seconds (fade-out at end / fade-in at start). 0 = off. */
@@ -113,6 +140,14 @@ export interface ControllerDeps {
     evict(id: string): void;
   };
   cacheDir: string;
+  /**
+   * Process-wide in-flight download dedup, SHARED across every controller/bot. All bots share
+   * one AudioCache + cacheDir, so two bots that cache-miss the SAME videoId must share a single
+   * yt-dlp download (not both write the same file). Omitted in unit fixtures — a controller then
+   * uses its own maps, which is all a single-controller test exercises.
+   */
+  sharedInFlightDownloads?: Map<string, Promise<DownloadResult>>;
+  sharedDownloadProgressSinks?: Map<string, (cb: ((percent: number) => void) | undefined) => void>;
   // The factory receives the controller's current idle timeout so freshly-created
   // sessions honor the runtime (per-guild) value, not just the static default.
   createSession: (channelId: string, idleTimeoutMs: number) => Promise<VoiceSession>;
@@ -211,13 +246,16 @@ export class GuildController extends EventEmitter {
   // One shared download promise per videoId so the play path and the prefetcher (or two
   // panel users pasting the same link) never spawn two yt-dlp processes writing the same
   // cache file at once — the root cause of the intermittent "had to paste the link twice".
-  // `downloadProgressSinks` lets a later play-path caller redirect the running download's
-  // percent into the live status even when the prefetcher started it. See downloadOnce().
-  private readonly inFlightDownloads = new Map<string, Promise<DownloadResult>>();
-  private readonly downloadProgressSinks = new Map<
+  // These maps are PROCESS-WIDE (injected via deps + shared across every bot/guild) because
+  // all controllers share one AudioCache + cacheDir; two DIFFERENT bots that cache-miss the
+  // same id must also share a single download. They fall back to per-controller maps only in
+  // unit fixtures (a single controller still dedups within itself). `downloadProgressSinks`
+  // lets a later play-path caller redirect the running download's percent into its status.
+  private readonly inFlightDownloads: Map<string, Promise<DownloadResult>>;
+  private readonly downloadProgressSinks: Map<
     string,
     (cb: ((percent: number) => void) | undefined) => void
-  >();
+  >;
 
   // ── Autoplay state ───────────────────────────────────────────────────────────────
   // `lastPlayedMeta` is the full meta of the last-played track; it seeds the next
@@ -301,6 +339,10 @@ export class GuildController extends EventEmitter {
       idleTimeoutSec: Math.round(deps.idleTimeoutMs / 1000),
     };
     this.now = deps.now ?? (() => Date.now());
+    // Use the shared (process-wide) download-dedup maps when the host provides them so all bots
+    // coordinate on one download per videoId; otherwise a per-controller map (unit fixtures).
+    this.inFlightDownloads = deps.sharedInFlightDownloads ?? new Map();
+    this.downloadProgressSinks = deps.sharedDownloadProgressSinks ?? new Map();
     this.queue = deps.queue ?? new GuildQueue();
     this.queue.on("prefetch", (meta: TrackMeta | null) => {
       // Honor prefetchDepth: 0 disables look-ahead prefetching entirely (the play path still
@@ -408,6 +450,19 @@ export class GuildController extends EventEmitter {
    *
    * Best-effort and serialized under the playback lock. A no-op when nothing is playing.
    */
+  /**
+   * Pin a cache entry for this controller AT MOST ONCE. The cache pin is REFERENCE-COUNTED
+   * (multiple bots can hold the same track), so calling cache.pin() on every play — a repeat,
+   * a seek, a re-resource — would over-count and leave the file pinned forever (unpin runs once
+   * per id at teardown). `this.pinned` is the set of ids THIS controller holds; we bump the
+   * shared refcount only when we first add an id to it, keeping pins and unpins balanced.
+   */
+  private pinOnce(videoId: string): void {
+    if (this.pinned.has(videoId)) return;
+    this.pinned.add(videoId);
+    this.deps.cache.pin(videoId);
+  }
+
   private async reResourceCurrent(): Promise<void> {
     await this.lock.runExclusive(async () => {
       const session = this.session;
@@ -417,8 +472,7 @@ export class GuildController extends EventEmitter {
       const path = await this.ensureDownloaded(current.meta, false);
       if (this.session !== session) return; // torn down while awaiting the download
       current.audio = this.deps.cache.getAudio(current.meta.videoId);
-      this.deps.cache.pin(current.meta.videoId);
-      this.pinned.add(current.meta.videoId);
+      this.pinOnce(current.meta.videoId);
       await this.playResource(session, path, current, {
         seekMs: positionMs,
         audio: this.audioOptions(),
@@ -731,8 +785,7 @@ export class GuildController extends EventEmitter {
       }
       const path = await this.ensureDownloaded(current.meta, false);
       current.audio = this.deps.cache.getAudio(current.meta.videoId);
-      this.deps.cache.pin(current.meta.videoId);
-      this.pinned.add(current.meta.videoId);
+      this.pinOnce(current.meta.videoId);
       await this.playResource(session, path, current, {
         seekMs: positionMs,
         audio: this.audioOptions(),
@@ -931,7 +984,12 @@ export class GuildController extends EventEmitter {
       // The cached file may be the reason it failed (a corrupt/truncated download). Evict it (and
       // drop its stale pin) so a re-request re-downloads a clean copy instead of replaying the
       // same broken file from cache forever — otherwise "playing it again" would keep failing.
-      this.pinned.delete(failed.meta.videoId);
+      // Unpin THIS controller's hold BEFORE evicting. The cache pin is refcounted, so evict()
+      // is a no-op while pinCount > 0 — without the unpin the poisoned file would never be
+      // deleted (and the refcount would leak +1 forever). Unpinning drops our contribution to 0
+      // when we're the sole holder (so evict actually reclaims it); if another bot still holds
+      // the same shared file, evict correctly stays a no-op and the refcount is left balanced.
+      if (this.pinned.delete(failed.meta.videoId)) this.deps.cache.unpin(failed.meta.videoId);
       this.deps.cache.evict(failed.meta.videoId);
     }
     void this.lock.runExclusive(async () => {
@@ -968,8 +1026,7 @@ export class GuildController extends EventEmitter {
         return false;
       }
       item.audio = this.deps.cache.getAudio(item.meta.videoId);
-      this.deps.cache.pin(item.meta.videoId);
-      this.pinned.add(item.meta.videoId);
+      this.pinOnce(item.meta.videoId);
       // The file is on disk; building the ffmpeg/Opus resource is the final "processing"
       // step (transcode/passthrough setup) before the first frame plays.
       this.setPreparing({
@@ -1112,7 +1169,7 @@ export class GuildController extends EventEmitter {
       return null; // source lookup failed — fall back to idle
     }
     const next = candidates.find(
-      (c) => c.videoId && !c.isLive && !this.autoplaySeen.has(c.videoId),
+      (c) => c.videoId && !c.isLive && !this.autoplaySeen.has(c.videoId) && isLikelySingleSong(c),
     );
     if (!next) return null;
 
@@ -1232,16 +1289,13 @@ export class GuildController extends EventEmitter {
     try {
       // Shares the play path's in-flight download when they collide on the same id.
       await this.downloadOnce(meta);
-      // prefetch runs outside the lock and yields at the download await; a leaveInternal()
-      // may have torn the session down (clearing `pinned`) while we waited. If so, don't
-      // write into the now-orphaned pinned Set — drop the pin so the entry stays
-      // LRU-evictable instead of being pinned forever.
-      if (!this.session) {
-        this.deps.cache.unpin(meta.videoId);
-        return;
-      }
-      this.deps.cache.pin(meta.videoId);
-      this.pinned.add(meta.videoId);
+      // prefetch runs outside the lock and yields at the download await; a leaveInternal() may
+      // have torn the session down while we waited. If so, bail WITHOUT unpinning: prefetch has
+      // not pinned yet (pinOnce is below), so there is nothing of ours to release — and on the
+      // SHARED refcounted cache, unpinning here would steal a pin from another bot currently
+      // playing the same file. The entry just stays in cache with its correct count, LRU-evictable.
+      if (!this.session) return;
+      this.pinOnce(meta.videoId);
     } catch {
       // prefetch is best-effort; a real failure surfaces when the track is played
     }

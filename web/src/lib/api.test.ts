@@ -1,5 +1,8 @@
+// @vitest-environment jsdom
+// jsdom provides a `location` (http://localhost) so the wsUrl() test can read
+// location.protocol/host; the fetch-based tests stub fetch globally and are unaffected.
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { api } from "./api.js";
+import { api, wsUrl } from "./api.js";
 
 function mockOnce(ok: boolean, json: unknown, status = ok ? 200 : 400, statusText?: string) {
   const fn = vi.fn().mockResolvedValue({
@@ -16,26 +19,26 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("api client", () => {
   it("GET /api/me with credentials", async () => {
-    const fn = mockOnce(true, { user: { id: "1" }, guilds: [] });
+    const fn = mockOnce(true, { user: { id: "1" }, bots: [] });
     const me = await api.me();
     expect(me.user.id).toBe("1");
     const [url, init] = fn.mock.calls[0]!;
     expect(url).toBe("/api/me");
     expect((init as RequestInit).credentials).toBe("include");
   });
-  it("play POSTs the input as JSON", async () => {
+  it("play POSTs the input as JSON under /api/bots/:botId/guilds/:guildId", async () => {
     const fn = mockOnce(true, { queued: { id: "i1", title: "X" } });
-    await api.play("G1", "https://youtu.be/x", "C1");
+    await api.play("B1", "G1", "https://youtu.be/x", "C1");
     const [url, init] = fn.mock.calls[0]!;
-    expect(url).toBe("/api/guilds/G1/play");
+    expect(url).toBe("/api/bots/B1/guilds/G1/play");
     expect((init as RequestInit).method).toBe("POST");
     expect(JSON.parse(String((init as RequestInit).body))).toEqual({ input: "https://youtu.be/x", voiceChannelId: "C1" });
   });
-  it("control hits the action route with no body or JSON content-type (avoids Fastify empty-body 400)", async () => {
+  it("control hits the bot+guild action route with no body or JSON content-type (avoids Fastify empty-body 400)", async () => {
     const fn = mockOnce(true, { ok: true });
-    await api.control("G1", "pause");
+    await api.control("B1", "G1", "pause");
     const [url, init] = fn.mock.calls[0]!;
-    expect(url).toBe("/api/guilds/G1/pause");
+    expect(url).toBe("/api/bots/B1/guilds/G1/pause");
     const i = init as RequestInit;
     expect(i.method).toBe("POST");
     expect(i.body).toBeUndefined();
@@ -43,17 +46,17 @@ describe("api client", () => {
   });
   it("seek POSTs the positionMs as JSON", async () => {
     const fn = mockOnce(true, { ok: true });
-    await api.seek("G1", 42000);
+    await api.seek("B1", "G1", 42000);
     const [url, init] = fn.mock.calls[0]!;
-    expect(url).toBe("/api/guilds/G1/seek");
+    expect(url).toBe("/api/bots/B1/guilds/G1/seek");
     expect((init as RequestInit).method).toBe("POST");
     expect(JSON.parse(String((init as RequestInit).body))).toEqual({ positionMs: 42000 });
   });
   it("pick POSTs the videoId (+ optional voice channel) as JSON", async () => {
     const fn = mockOnce(true, { queued: { id: "i1", title: "X" } });
-    const r = await api.pick("G1", "vvvvvvvvvvv", "C1");
+    const r = await api.pick("B1", "G1", "vvvvvvvvvvv", "C1");
     const [url, init] = fn.mock.calls[0]!;
-    expect(url).toBe("/api/guilds/G1/pick");
+    expect(url).toBe("/api/bots/B1/guilds/G1/pick");
     expect((init as RequestInit).method).toBe("POST");
     expect(JSON.parse(String((init as RequestInit).body))).toEqual({ videoId: "vvvvvvvvvvv", voiceChannelId: "C1" });
     expect(r.queued).toEqual({ id: "i1", title: "X" });
@@ -61,43 +64,43 @@ describe("api client", () => {
 
   it("loadPlaylist POSTs the voiceChannelId (path-encodes the name)", async () => {
     const fn = mockOnce(true, { ok: true, queued: 3 });
-    const r = await api.loadPlaylist("G1", "road trip", "C1");
+    const r = await api.loadPlaylist("B1", "G1", "road trip", "C1");
     const [url, init] = fn.mock.calls[0]!;
-    expect(url).toBe("/api/guilds/G1/playlists/road%20trip/load");
+    expect(url).toBe("/api/bots/B1/guilds/G1/playlists/road%20trip/load");
     expect((init as RequestInit).method).toBe("POST");
     expect(JSON.parse(String((init as RequestInit).body))).toEqual({ voiceChannelId: "C1" });
     expect(r.queued).toBe(3);
   });
   it("loadPlaylist sends no voiceChannelId field when none is given", async () => {
     const fn = mockOnce(true, { ok: true, queued: 1 });
-    await api.loadPlaylist("G1", "chill");
+    await api.loadPlaylist("B1", "G1", "chill");
     const [, init] = fn.mock.calls[0]!;
     expect(JSON.parse(String((init as RequestInit).body))).toEqual({ voiceChannelId: undefined });
   });
 
   it("remove POSTs the itemId to the queue/remove route", async () => {
     const fn = mockOnce(true, { ok: true });
-    const r = await api.remove("G1", "item-9");
+    const r = await api.remove("B1", "G1", "item-9");
     const [url, init] = fn.mock.calls[0]!;
-    expect(url).toBe("/api/guilds/G1/queue/remove");
+    expect(url).toBe("/api/bots/B1/guilds/G1/queue/remove");
     expect(JSON.parse(String((init as RequestInit).body))).toEqual({ itemId: "item-9" });
     expect(r.ok).toBe(true);
   });
 
   it("reorder POSTs itemId + toIndex to the queue/reorder route", async () => {
     const fn = mockOnce(true, { ok: true });
-    await api.reorder("G1", "item-9", 3);
+    await api.reorder("B1", "G1", "item-9", 3);
     const [url, init] = fn.mock.calls[0]!;
-    expect(url).toBe("/api/guilds/G1/queue/reorder");
+    expect(url).toBe("/api/bots/B1/guilds/G1/queue/reorder");
     expect(JSON.parse(String((init as RequestInit).body))).toEqual({ itemId: "item-9", toIndex: 3 });
   });
 
   it("getSettings GETs the settings route and returns the settings", async () => {
     const settings = { idleTimeoutSec: 300, crossfadeSec: 0, normalizeLoudness: false, repeat: "off", autoplay: false, autoplaySource: "radio", maxTrackDurationSec: 0 };
     const fn = mockOnce(true, { settings });
-    const r = await api.getSettings("G1");
+    const r = await api.getSettings("B1", "G1");
     const [url, init] = fn.mock.calls[0]!;
-    expect(url).toBe("/api/guilds/G1/settings");
+    expect(url).toBe("/api/bots/B1/guilds/G1/settings");
     // A GET carries no body and is not a POST.
     expect((init as RequestInit).method).toBeUndefined();
     expect(r.settings).toEqual(settings);
@@ -106,9 +109,9 @@ describe("api client", () => {
   it("setSettings POSTs the patch (incl. new audio fields) and returns the persisted settings", async () => {
     const patch = { crossfadeSec: 8, normalizeLoudness: true, repeat: "all", autoplay: true, autoplaySource: "artist", maxTrackDurationSec: 7200 };
     const fn = mockOnce(true, { settings: { idleTimeoutSec: 300, ...patch } });
-    const r = await api.setSettings("G1", patch as never);
+    const r = await api.setSettings("B1", "G1", patch as never);
     const [url, init] = fn.mock.calls[0]!;
-    expect(url).toBe("/api/guilds/G1/settings");
+    expect(url).toBe("/api/bots/B1/guilds/G1/settings");
     expect((init as RequestInit).method).toBe("POST");
     expect(JSON.parse(String((init as RequestInit).body))).toEqual(patch);
     expect(r.settings).toMatchObject(patch);
@@ -116,26 +119,26 @@ describe("api client", () => {
 
   it("voiceChannels GETs the route and returns channels + currentChannelId", async () => {
     const fn = mockOnce(true, { channels: [{ id: "C1", name: "General" }], currentChannelId: "C1" });
-    const r = await api.voiceChannels("G1");
+    const r = await api.voiceChannels("B1", "G1");
     const [url] = fn.mock.calls[0]!;
-    expect(url).toBe("/api/guilds/G1/voice-channels");
+    expect(url).toBe("/api/bots/B1/guilds/G1/voice-channels");
     expect(r.channels).toEqual([{ id: "C1", name: "General" }]);
     expect(r.currentChannelId).toBe("C1");
   });
 
   it("textChannels GETs the route and returns the channel list", async () => {
     const fn = mockOnce(true, { channels: [{ id: "T1", name: "general" }] });
-    const r = await api.textChannels("G1");
+    const r = await api.textChannels("B1", "G1");
     const [url] = fn.mock.calls[0]!;
-    expect(url).toBe("/api/guilds/G1/text-channels");
+    expect(url).toBe("/api/bots/B1/guilds/G1/text-channels");
     expect(r.channels).toEqual([{ id: "T1", name: "general" }]);
   });
 
   it("shuffle is a bodyless POST (no body / no JSON content-type — avoids Fastify empty-body 400)", async () => {
     const fn = mockOnce(true, { ok: true });
-    await api.shuffle("G1");
+    await api.shuffle("B1", "G1");
     const [url, init] = fn.mock.calls[0]!;
-    expect(url).toBe("/api/guilds/G1/shuffle");
+    expect(url).toBe("/api/bots/B1/guilds/G1/shuffle");
     const i = init as RequestInit;
     expect(i.method).toBe("POST");
     expect(i.body).toBeUndefined();
@@ -144,18 +147,18 @@ describe("api client", () => {
 
   it("jump POSTs the itemId", async () => {
     const fn = mockOnce(true, { ok: true });
-    await api.jump("G1", "item-7");
+    await api.jump("B1", "G1", "item-7");
     const [url, init] = fn.mock.calls[0]!;
-    expect(url).toBe("/api/guilds/G1/jump");
+    expect(url).toBe("/api/bots/B1/guilds/G1/jump");
     expect((init as RequestInit).method).toBe("POST");
     expect(JSON.parse(String((init as RequestInit).body))).toEqual({ itemId: "item-7" });
   });
 
   it("lyrics GETs the route and surfaces the null (no-lyrics) branch", async () => {
     const fn = mockOnce(true, { lyrics: null, source: "lyrics.ovh" });
-    const r = await api.lyrics("G1");
+    const r = await api.lyrics("B1", "G1");
     const [url, init] = fn.mock.calls[0]!;
-    expect(url).toBe("/api/guilds/G1/lyrics");
+    expect(url).toBe("/api/bots/B1/guilds/G1/lyrics");
     expect((init as RequestInit).method).toBeUndefined(); // GET
     expect(r.lyrics).toBeNull();
     expect(r.source).toBe("lyrics.ovh");
@@ -163,45 +166,45 @@ describe("api client", () => {
 
   it("listPlaylists GETs the route and returns the playlists", async () => {
     const fn = mockOnce(true, { playlists: [{ name: "chill", trackCount: 3, savedAt: 1 }] });
-    const r = await api.listPlaylists("G1");
+    const r = await api.listPlaylists("B1", "G1");
     const [url, init] = fn.mock.calls[0]!;
-    expect(url).toBe("/api/guilds/G1/playlists");
+    expect(url).toBe("/api/bots/B1/guilds/G1/playlists");
     expect((init as RequestInit).method).toBeUndefined(); // GET
     expect(r.playlists).toEqual([{ name: "chill", trackCount: 3, savedAt: 1 }]);
   });
 
   it("savePlaylist POSTs the name", async () => {
     const fn = mockOnce(true, { ok: true, playlists: [] });
-    await api.savePlaylist("G1", "road trip");
+    await api.savePlaylist("B1", "G1", "road trip");
     const [url, init] = fn.mock.calls[0]!;
-    expect(url).toBe("/api/guilds/G1/playlists");
+    expect(url).toBe("/api/bots/B1/guilds/G1/playlists");
     expect((init as RequestInit).method).toBe("POST");
     expect(JSON.parse(String((init as RequestInit).body))).toEqual({ name: "road trip" });
   });
 
   it("deletePlaylist uses HTTP DELETE and path-encodes the name", async () => {
     const fn = mockOnce(true, { ok: true, playlists: [] });
-    await api.deletePlaylist("G1", "road trip");
+    await api.deletePlaylist("B1", "G1", "road trip");
     const [url, init] = fn.mock.calls[0]!;
     // The only DELETE verb in the module + correct percent-encoding of the space.
-    expect(url).toBe("/api/guilds/G1/playlists/road%20trip");
+    expect(url).toBe("/api/bots/B1/guilds/G1/playlists/road%20trip");
     expect((init as RequestInit).method).toBe("DELETE");
   });
 
   it("play/pick without a voiceChannelId send the field as undefined (not omitted)", async () => {
     const fn1 = mockOnce(true, { queued: { id: "i1", title: "X" } });
-    await api.play("G1", "https://youtu.be/x");
+    await api.play("B1", "G1", "https://youtu.be/x");
     expect(JSON.parse(String((fn1.mock.calls[0]![1] as RequestInit).body)))
       .toEqual({ input: "https://youtu.be/x", voiceChannelId: undefined });
     const fn2 = mockOnce(true, { queued: { id: "i1", title: "X" } });
-    await api.pick("G1", "vvvvvvvvvvv");
+    await api.pick("B1", "G1", "vvvvvvvvvvv");
     expect(JSON.parse(String((fn2.mock.calls[0]![1] as RequestInit).body)))
       .toEqual({ videoId: "vvvvvvvvvvv", voiceChannelId: undefined });
   });
 
   it("throws ApiError with the status AND the body's error message on non-OK", async () => {
     mockOnce(false, { error: "forbidden" }, 403);
-    await expect(api.state("G1")).rejects.toMatchObject({ status: 403, message: "forbidden" });
+    await expect(api.state("B1", "G1")).rejects.toMatchObject({ status: 403, message: "forbidden" });
   });
 
   it("falls back to statusText when the non-OK body has no parseable JSON", async () => {
@@ -213,12 +216,12 @@ describe("api client", () => {
       json: async () => { throw new SyntaxError("Unexpected end of JSON input"); },
     });
     vi.stubGlobal("fetch", fn);
-    await expect(api.state("G1")).rejects.toMatchObject({ status: 500, message: "Internal Server Error" });
+    await expect(api.state("B1", "G1")).rejects.toMatchObject({ status: 500, message: "Internal Server Error" });
   });
 
   it("falls back to statusText when the non-OK body has no error field", async () => {
     mockOnce(false, { somethingElse: true }, 404, "Not Found");
-    await expect(api.state("G1")).rejects.toMatchObject({ status: 404, message: "Not Found" });
+    await expect(api.state("B1", "G1")).rejects.toMatchObject({ status: 404, message: "Not Found" });
   });
   it("logout resolves on an empty 204 body without trying to parse JSON", async () => {
     // A 204 has no body; calling res.json() throws. The client must short-circuit.
@@ -241,5 +244,15 @@ describe("api client", () => {
     });
     vi.stubGlobal("fetch", fn);
     await expect(api.logout()).resolves.toBeUndefined();
+  });
+
+  it("wsUrl carries BOTH botId and guildId in the /ws query string", () => {
+    // The live socket is now addressed to a specific bot: /ws?botId=<b>&guildId=<g>.
+    const url = wsUrl("B1", "G1");
+    expect(url).toContain("/ws?");
+    expect(url).toContain("botId=B1");
+    expect(url).toContain("guildId=G1");
+    // ws:// under http (jsdom's default location.protocol).
+    expect(url.startsWith("ws://")).toBe(true);
   });
 });

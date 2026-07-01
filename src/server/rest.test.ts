@@ -5,6 +5,7 @@ import { YtError, YtErrorKind } from "../youtube/errors.js";
 
 const USER = "123456789012345678";
 const GUILD = "234567890123456789";
+const BOT = "1";
 const meta = (id: string, title = id) => ({
   videoId: id,
   title,
@@ -88,17 +89,29 @@ function build(sessionUserId: string | null, depOverrides: Record<string, unknow
       ]),
     },
   };
+  // A depOverride of `client` still lets a caller swap the (single) bot's client/guild cache —
+  // it's folded into the one bot below so the existing auth-gating fixtures keep working.
+  const { client: clientOverride, ...restOverrides } = depOverrides as {
+    client?: unknown;
+    [k: string]: unknown;
+  };
+  const client = clientOverride ?? { guilds: { cache: new Map([[GUILD, guild]]) } };
+  const hub = { get: vi.fn(() => controller) };
+  const bot = { id: BOT, name: "Bot One", client, hub };
+  const registry = {
+    list: vi.fn(() => [bot]),
+    get: vi.fn((id: string) => (id === BOT ? bot : undefined)),
+  };
   const deps = {
-    hub: { get: vi.fn(() => controller) },
+    registry,
     youtube: {
       resolve: vi.fn(async (id: string) => meta(id, "Song")),
       search: vi.fn(async () => [meta("aaaaaaaaaaa", "A")]),
       resolveUrl: vi.fn(async () => meta("sc_1", "SC Track")),
     },
-    client: { guilds: { cache: new Map([[GUILD, guild]]) } },
     adminIds: new Set<string>(),
     searchLimit: 5,
-    ...depOverrides,
+    ...restOverrides,
   };
   const app = Fastify();
   // emulate the session: a preHandler that sets request.session from a header
@@ -113,7 +126,7 @@ function build(sessionUserId: string | null, depOverrides: Record<string, unknow
 describe("REST auth gating", () => {
   it("401 when not logged in", async () => {
     const { app } = build(null);
-    const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/state` });
+    const res = await app.inject({ method: "GET", url: `/api/bots/${BOT}/guilds/${GUILD}/state` });
     expect(res.statusCode).toBe(401);
   });
   it("403 when logged in but not a guild member / admin", async () => {
@@ -125,7 +138,7 @@ describe("REST auth gating", () => {
       },
     };
     const { app } = build(USER, { client: { guilds: { cache: new Map([[GUILD, guild]]) } } });
-    const res = await app.inject({ method: "POST", url: `/api/guilds/${GUILD}/skip` });
+    const res = await app.inject({ method: "POST", url: `/api/bots/${BOT}/guilds/${GUILD}/skip` });
     expect(res.statusCode).toBe(403);
   });
 });
@@ -136,17 +149,25 @@ describe("REST actions", () => {
     h = build(USER);
   });
 
-  it("GET /api/me returns the user and bot-verified guilds", async () => {
+  it("GET /api/me returns the user and, per bot, its control-verified guilds", async () => {
     const res = await h.app.inject({ method: "GET", url: "/api/me" });
     expect(res.statusCode).toBe(200);
     expect(res.json().user.id).toBe(USER);
-    expect(Array.isArray(res.json().guilds)).toBe(true);
-    expect(res.json().guilds[0]).toMatchObject({ id: GUILD, name: "Test Guild" });
+    expect(Array.isArray(res.json().bots)).toBe(true);
+    const bot = res.json().bots[0];
+    expect(bot).toMatchObject({ id: BOT, name: "Bot One" });
+    expect(bot.guilds[0]).toMatchObject({ id: GUILD, name: "Test Guild" });
+  });
+  it("guild routes 404 for an unknown botId (before any auth check)", async () => {
+    const res = await h.app.inject({ method: "GET", url: `/api/bots/99/guilds/${GUILD}/state` });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toBe("unknown_bot");
+    expect(h.controller.snapshot).not.toHaveBeenCalled();
   });
   it("play with a URL resolves + enqueues (attributed to the web user)", async () => {
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/play`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/play`,
       payload: { input: "https://youtu.be/aaaaaaaaaaa", voiceChannelId: "C1" },
     });
     expect(res.statusCode).toBe(200);
@@ -157,7 +178,7 @@ describe("REST actions", () => {
   it("play with a SoundCloud URL resolves via resolveUrl and echoes the source", async () => {
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/play`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/play`,
       payload: { input: "https://soundcloud.com/artist/track", voiceChannelId: "C1" },
     });
     expect(res.statusCode).toBe(200);
@@ -174,7 +195,7 @@ describe("REST actions", () => {
     ]);
     const res = await app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/play`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/play`,
       payload: { input: "https://open.spotify.com/track/abc", voiceChannelId: "C1" },
     });
     expect(res.statusCode).toBe(200);
@@ -188,7 +209,7 @@ describe("REST actions", () => {
     const { app } = build(USER, { spotify });
     const res = await app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/play`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/play`,
       payload: { input: "https://open.spotify.com/track/abc", voiceChannelId: "C1" },
     });
     expect(res.statusCode).toBe(400);
@@ -203,7 +224,7 @@ describe("REST actions", () => {
     });
     const res = await app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/play`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/play`,
       payload: { input: "daft punk" },
     });
     expect(res.statusCode).toBe(400);
@@ -214,7 +235,7 @@ describe("REST actions", () => {
   it("play with a query returns candidates (no enqueue)", async () => {
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/play`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/play`,
       payload: { input: "daft punk" },
     });
     expect(res.statusCode).toBe(200);
@@ -224,7 +245,7 @@ describe("REST actions", () => {
   it("play with a non-YouTube URL is rejected (400), no resolve", async () => {
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/play`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/play`,
       payload: { input: "https://vimeo.com/1" },
     });
     expect(res.statusCode).toBe(400);
@@ -237,7 +258,7 @@ describe("REST actions", () => {
     controller.connectedChannelId = "C1";
     const res = await app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/play`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/play`,
       payload: { input: "https://youtu.be/aaaaaaaaaaa", voiceChannelId: "C2" },
     });
     expect(res.statusCode).toBe(200);
@@ -248,7 +269,7 @@ describe("REST actions", () => {
     // h.controller.connectedChannelId defaults to null, no voiceChannelId in payload.
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/play`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/play`,
       payload: { input: "https://youtu.be/aaaaaaaaaaa" },
     });
     expect(res.statusCode).toBe(400);
@@ -260,7 +281,7 @@ describe("REST actions", () => {
     controller.connectedChannelId = "C1";
     const res = await app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/play`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/play`,
       payload: { input: "https://youtu.be/aaaaaaaaaaa" },
     });
     expect(res.statusCode).toBe(200);
@@ -272,7 +293,7 @@ describe("REST actions", () => {
     controller.connectedChannelId = "C1";
     const res = await app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/play`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/play`,
       payload: { input: "https://youtu.be/aaaaaaaaaaa", voiceChannelId: "C2" },
     });
     expect(res.statusCode).toBe(200);
@@ -285,7 +306,7 @@ describe("REST actions", () => {
   it("pick rejects a malformed videoId with 400 and no resolve", async () => {
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/pick`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/pick`,
       payload: { videoId: "short" },
     });
     expect(res.statusCode).toBe(400);
@@ -296,7 +317,7 @@ describe("REST actions", () => {
     controller.connectedChannelId = "C1"; // avoid the no_voice_channel 400
     const res = await app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/pick`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/pick`,
       payload: { videoId: "aaaaaaaaaaa" },
     });
     expect(res.statusCode).toBe(200);
@@ -313,7 +334,7 @@ describe("REST actions", () => {
     });
     const res = await app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/play`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/play`,
       payload: { input: "https://youtu.be/aaaaaaaaaaa" },
     });
     expect(res.statusCode).toBe(400);
@@ -327,7 +348,7 @@ describe("REST actions", () => {
     });
     const res = await app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/play`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/play`,
       payload: { input: "https://youtu.be/aaaaaaaaaaa" },
     });
     expect(res.statusCode).toBe(500);
@@ -346,7 +367,7 @@ describe("REST actions", () => {
     });
     const res = await app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/pick`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/pick`,
       payload: { videoId: "aaaaaaaaaaa", voiceChannelId: "C1" },
     });
     expect(res.statusCode).toBe(400);
@@ -363,7 +384,7 @@ describe("REST actions", () => {
     });
     const res = await app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/pick`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/pick`,
       payload: { videoId: "aaaaaaaaaaa", voiceChannelId: "C1" },
     });
     expect(res.statusCode).toBe(400);
@@ -376,7 +397,7 @@ describe("REST actions", () => {
     });
     const res = await app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/play`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/play`,
       payload: { input: "https://youtu.be/aaaaaaaaaaa", voiceChannelId: "C1" },
     });
     expect(res.statusCode).toBe(400);
@@ -384,7 +405,10 @@ describe("REST actions", () => {
   });
   it("skip/pause/resume/stop call the controller", async () => {
     for (const action of ["skip", "pause", "resume", "stop"] as const) {
-      const res = await h.app.inject({ method: "POST", url: `/api/guilds/${GUILD}/${action}` });
+      const res = await h.app.inject({
+        method: "POST",
+        url: `/api/bots/${BOT}/guilds/${GUILD}/${action}`,
+      });
       expect(res.statusCode).toBe(200);
     }
     expect(h.controller.skip).toHaveBeenCalled();
@@ -401,7 +425,7 @@ describe("REST actions", () => {
     });
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/seek`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/seek`,
       payload: { positionMs: 30000.7 },
     });
     expect(res.statusCode).toBe(200);
@@ -411,7 +435,7 @@ describe("REST actions", () => {
   it("seek rejects a negative position with 400 and no controller call", async () => {
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/seek`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/seek`,
       payload: { positionMs: -5 },
     });
     expect(res.statusCode).toBe(400);
@@ -426,7 +450,7 @@ describe("REST actions", () => {
     });
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/seek`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/seek`,
       payload: { positionMs: 999999 },
     });
     expect(res.statusCode).toBe(400);
@@ -435,7 +459,7 @@ describe("REST actions", () => {
   it("seek with nothing playing returns 409", async () => {
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/seek`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/seek`,
       payload: { positionMs: 0 },
     });
     expect(res.statusCode).toBe(409);
@@ -451,7 +475,7 @@ describe("REST actions", () => {
     h.controller.seek.mockResolvedValue(false);
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/seek`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/seek`,
       payload: { positionMs: 30000 },
     });
     expect(res.statusCode).toBe(200);
@@ -467,7 +491,7 @@ describe("REST actions", () => {
     h.controller.seek.mockRejectedValue(new Error("boom"));
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/seek`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/seek`,
       payload: { positionMs: 30000 },
     });
     expect(res.statusCode).toBe(400);
@@ -482,7 +506,7 @@ describe("REST actions", () => {
     });
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/seek`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/seek`,
       payload: { positionMs: 999999999 },
     });
     expect(res.statusCode).toBe(200);
@@ -492,14 +516,14 @@ describe("REST actions", () => {
   it("queue/remove and reorder use the itemId (200)", async () => {
     const r1 = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/queue/remove`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/queue/remove`,
       payload: { itemId: "i9" },
     });
     expect(r1.statusCode).toBe(200);
     expect(h.controller.remove).toHaveBeenCalledWith("i9");
     const r2 = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/queue/reorder`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/queue/reorder`,
       payload: { itemId: "i9", toIndex: 0 },
     });
     expect(r2.statusCode).toBe(200);
@@ -508,7 +532,7 @@ describe("REST actions", () => {
   it("queue/remove with an empty itemId returns 400 and does not call remove", async () => {
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/queue/remove`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/queue/remove`,
       payload: { itemId: "" },
     });
     expect(res.statusCode).toBe(400);
@@ -517,7 +541,7 @@ describe("REST actions", () => {
   it("queue/reorder with a missing itemId returns 400 and does not call reorder", async () => {
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/queue/reorder`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/queue/reorder`,
       payload: { toIndex: 1 },
     });
     expect(res.statusCode).toBe(400);
@@ -526,7 +550,7 @@ describe("REST actions", () => {
   it("queue/reorder with a negative toIndex returns 400 and does not call reorder", async () => {
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/queue/reorder`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/queue/reorder`,
       payload: { itemId: "i9", toIndex: -1 },
     });
     expect(res.statusCode).toBe(400);
@@ -535,27 +559,33 @@ describe("REST actions", () => {
   it("queue/reorder with a fractional toIndex returns 400 and does not call reorder", async () => {
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/queue/reorder`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/queue/reorder`,
       payload: { itemId: "i9", toIndex: 1.5 },
     });
     expect(res.statusCode).toBe(400);
     expect(h.controller.reorder).not.toHaveBeenCalled();
   });
   it("shuffle forwards to the controller (200) and is auth-gated", async () => {
-    const r = await h.app.inject({ method: "POST", url: `/api/guilds/${GUILD}/shuffle` });
+    const r = await h.app.inject({
+      method: "POST",
+      url: `/api/bots/${BOT}/guilds/${GUILD}/shuffle`,
+    });
     expect(r.statusCode).toBe(200);
     expect(r.json()).toEqual({ ok: true });
     expect(h.controller.shuffle).toHaveBeenCalledTimes(1);
 
     const anon = build(null);
-    const r401 = await anon.app.inject({ method: "POST", url: `/api/guilds/${GUILD}/shuffle` });
+    const r401 = await anon.app.inject({
+      method: "POST",
+      url: `/api/bots/${BOT}/guilds/${GUILD}/shuffle`,
+    });
     expect(r401.statusCode).toBe(401);
     expect(anon.controller.shuffle).not.toHaveBeenCalled();
   });
   it("jump forwards the itemId to jumpTo (200) and echoes ok", async () => {
     const r = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/jump`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/jump`,
       payload: { itemId: "i9" },
     });
     expect(r.statusCode).toBe(200);
@@ -565,7 +595,7 @@ describe("REST actions", () => {
   it("jump with a missing itemId returns 400 and does not call jumpTo", async () => {
     const r = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/jump`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/jump`,
       payload: {},
     });
     expect(r.statusCode).toBe(400);
@@ -575,13 +605,13 @@ describe("REST actions", () => {
     const anon = build(null);
     const r = await anon.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/jump`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/jump`,
       payload: { itemId: "i9" },
     });
     expect(r.statusCode).toBe(401);
     expect(anon.controller.jumpTo).not.toHaveBeenCalled();
   });
-  it("GET /api/guilds/:id/state returns the full snapshot payload shape", async () => {
+  it("GET /api/bots/:botId/guilds/:id/state returns the full snapshot payload shape", async () => {
     h.controller.snapshot.mockReturnValue({
       current: null,
       upcoming: [],
@@ -595,7 +625,10 @@ describe("REST actions", () => {
       autoplaySource: "radio",
       maxTrackDurationSec: 0,
     });
-    const res = await h.app.inject({ method: "GET", url: `/api/guilds/${GUILD}/state` });
+    const res = await h.app.inject({
+      method: "GET",
+      url: `/api/bots/${BOT}/guilds/${GUILD}/state`,
+    });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({
       paused: false,
@@ -605,8 +638,11 @@ describe("REST actions", () => {
     });
   });
 
-  it("GET /api/guilds/:id/settings returns the controller's settings", async () => {
-    const res = await h.app.inject({ method: "GET", url: `/api/guilds/${GUILD}/settings` });
+  it("GET /api/bots/:botId/guilds/:id/settings returns the controller's settings", async () => {
+    const res = await h.app.inject({
+      method: "GET",
+      url: `/api/bots/${BOT}/guilds/${GUILD}/settings`,
+    });
     expect(res.statusCode).toBe(200);
     expect(res.json().settings).toMatchObject({
       idleTimeoutSec: 300,
@@ -618,16 +654,19 @@ describe("REST actions", () => {
     });
   });
 
-  it("GET /api/guilds/:id/settings is gated by control auth (401 when not logged in)", async () => {
+  it("GET /api/bots/:botId/guilds/:id/settings is gated by control auth (401 when not logged in)", async () => {
     const { app } = build(null);
-    const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/settings` });
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/bots/${BOT}/guilds/${GUILD}/settings`,
+    });
     expect(res.statusCode).toBe(401);
   });
 
-  it("POST /api/guilds/:id/settings forwards the patch to updateSettings and echoes the result", async () => {
+  it("POST /api/bots/:botId/guilds/:id/settings forwards the patch to updateSettings and echoes the result", async () => {
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/settings`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/settings`,
       payload: { crossfadeSec: 5, repeat: "all", normalizeLoudness: true },
     });
     expect(res.statusCode).toBe(200);
@@ -643,10 +682,10 @@ describe("REST actions", () => {
     });
   });
 
-  it("POST /api/guilds/:id/settings forwards a volume + fx patch and echoes the result", async () => {
+  it("POST /api/bots/:botId/guilds/:id/settings forwards a volume + fx patch and echoes the result", async () => {
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/settings`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/settings`,
       payload: { volume: 150, fx: "bassboost" },
     });
     expect(res.statusCode).toBe(200);
@@ -654,10 +693,10 @@ describe("REST actions", () => {
     expect(res.json().settings).toMatchObject({ volume: 150, fx: "bassboost" });
   });
 
-  it("POST /api/guilds/:id/settings forwards a commandChannelId patch (set and clear)", async () => {
+  it("POST /api/bots/:botId/guilds/:id/settings forwards a commandChannelId patch (set and clear)", async () => {
     const set = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/settings`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/settings`,
       payload: { commandChannelId: "TC1" },
     });
     expect(set.statusCode).toBe(200);
@@ -666,7 +705,7 @@ describe("REST actions", () => {
 
     const clear = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/settings`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/settings`,
       payload: { commandChannelId: null },
     });
     expect(clear.statusCode).toBe(200);
@@ -674,10 +713,10 @@ describe("REST actions", () => {
     expect(clear.json().settings).toMatchObject({ commandChannelId: null });
   });
 
-  it("POST /api/guilds/:id/settings forwards an idle-timeout patch (clamping is the controller's job)", async () => {
+  it("POST /api/bots/:botId/guilds/:id/settings forwards an idle-timeout patch (clamping is the controller's job)", async () => {
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/settings`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/settings`,
       payload: { idleTimeoutSec: 600 },
     });
     expect(res.statusCode).toBe(200);
@@ -685,17 +724,17 @@ describe("REST actions", () => {
     expect(res.json().settings).toMatchObject({ idleTimeoutSec: 600 });
   });
 
-  it("POST /api/guilds/:id/settings is gated by control auth (401 when not logged in)", async () => {
+  it("POST /api/bots/:botId/guilds/:id/settings is gated by control auth (401 when not logged in)", async () => {
     const { app } = build(null);
     const res = await app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/settings`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/settings`,
       payload: { crossfadeSec: 2 },
     });
     expect(res.statusCode).toBe(401);
   });
 
-  it("POST /api/guilds/:id/settings is gated by control auth (403 for a non-member)", async () => {
+  it("POST /api/bots/:botId/guilds/:id/settings is gated by control auth (403 for a non-member)", async () => {
     const guild = {
       members: {
         fetch: vi.fn(async () => {
@@ -706,14 +745,17 @@ describe("REST actions", () => {
     const { app } = build(USER, { client: { guilds: { cache: new Map([[GUILD, guild]]) } } });
     const res = await app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/settings`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/settings`,
       payload: { idleTimeoutSec: 60 },
     });
     expect(res.statusCode).toBe(403);
   });
 
-  it("GET /api/guilds/:id/voice-channels returns only voice channels for a member", async () => {
-    const res = await h.app.inject({ method: "GET", url: `/api/guilds/${GUILD}/voice-channels` });
+  it("GET /api/bots/:botId/guilds/:id/voice-channels returns only voice channels for a member", async () => {
+    const res = await h.app.inject({
+      method: "GET",
+      url: `/api/bots/${BOT}/guilds/${GUILD}/voice-channels`,
+    });
     expect(res.statusCode).toBe(200);
     const { channels, currentChannelId } = res.json() as {
       channels: { id: string; name: string }[];
@@ -725,7 +767,7 @@ describe("REST actions", () => {
     expect(currentChannelId).toBeNull();
   });
 
-  it("GET /api/guilds/:id/voice-channels reports the channel the user is connected to", async () => {
+  it("GET /api/bots/:botId/guilds/:id/voice-channels reports the channel the user is connected to", async () => {
     const guild = {
       name: "Test Guild",
       members: { fetch: vi.fn(async (id: string) => ({ id })) },
@@ -737,11 +779,14 @@ describe("REST actions", () => {
       voiceStates: { cache: new Map([[USER, { channelId: "VC1" }]]) },
     };
     const { app } = build(USER, { client: { guilds: { cache: new Map([[GUILD, guild]]) } } });
-    const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/voice-channels` });
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/bots/${BOT}/guilds/${GUILD}/voice-channels`,
+    });
     expect(res.statusCode).toBe(200);
     expect((res.json() as { currentChannelId: string | null }).currentChannelId).toBe("VC1");
   });
-  it("GET /api/guilds/:id/voice-channels returns 403 for a non-member", async () => {
+  it("GET /api/bots/:botId/guilds/:id/voice-channels returns 403 for a non-member", async () => {
     const guild = {
       name: "Test Guild",
       members: {
@@ -756,12 +801,18 @@ describe("REST actions", () => {
       },
     };
     const { app } = build(USER, { client: { guilds: { cache: new Map([[GUILD, guild]]) } } });
-    const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/voice-channels` });
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/bots/${BOT}/guilds/${GUILD}/voice-channels`,
+    });
     expect(res.statusCode).toBe(403);
   });
 
-  it("GET /api/guilds/:id/text-channels returns only text (non-voice) channels for a member", async () => {
-    const res = await h.app.inject({ method: "GET", url: `/api/guilds/${GUILD}/text-channels` });
+  it("GET /api/bots/:botId/guilds/:id/text-channels returns only text (non-voice) channels for a member", async () => {
+    const res = await h.app.inject({
+      method: "GET",
+      url: `/api/bots/${BOT}/guilds/${GUILD}/text-channels`,
+    });
     expect(res.statusCode).toBe(200);
     const { channels } = res.json() as { channels: { id: string; name: string }[] };
     // The voice channel (VC1) is text-based too in v14, but it is excluded — only TC1.
@@ -769,7 +820,7 @@ describe("REST actions", () => {
     expect(channels[0]).toMatchObject({ id: "TC1", name: "general" });
   });
 
-  it("GET /api/guilds/:id/text-channels returns 403 for a non-member", async () => {
+  it("GET /api/bots/:botId/guilds/:id/text-channels returns 403 for a non-member", async () => {
     const guild = {
       name: "Test Guild",
       members: {
@@ -793,13 +844,19 @@ describe("REST actions", () => {
       },
     };
     const { app } = build(USER, { client: { guilds: { cache: new Map([[GUILD, guild]]) } } });
-    const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/text-channels` });
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/bots/${BOT}/guilds/${GUILD}/text-channels`,
+    });
     expect(res.statusCode).toBe(403);
   });
 
-  it("GET /api/guilds/:id/text-channels returns 401 when not logged in", async () => {
+  it("GET /api/bots/:botId/guilds/:id/text-channels returns 401 when not logged in", async () => {
     const { app } = build(null);
-    const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/text-channels` });
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/bots/${BOT}/guilds/${GUILD}/text-channels`,
+    });
     expect(res.statusCode).toBe(401);
   });
 });
@@ -811,7 +868,10 @@ describe("REST playlists", () => {
   });
 
   it("GET /playlists returns the controller's summaries", async () => {
-    const res = await h.app.inject({ method: "GET", url: `/api/guilds/${GUILD}/playlists` });
+    const res = await h.app.inject({
+      method: "GET",
+      url: `/api/bots/${BOT}/guilds/${GUILD}/playlists`,
+    });
     expect(res.statusCode).toBe(200);
     expect(res.json().playlists).toEqual([{ name: "chill", trackCount: 3, savedAt: 1000 }]);
     expect(h.controller.listPlaylists).toHaveBeenCalled();
@@ -820,7 +880,7 @@ describe("REST playlists", () => {
   it("POST /playlists saves the named playlist and echoes the new list", async () => {
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/playlists`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/playlists`,
       payload: { name: "road trip" },
     });
     expect(res.statusCode).toBe(200);
@@ -832,7 +892,7 @@ describe("REST playlists", () => {
   it("POST /playlists trims the name and rejects a blank one with 400", async () => {
     const r1 = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/playlists`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/playlists`,
       payload: { name: "  spaced  " },
     });
     expect(r1.statusCode).toBe(200);
@@ -840,7 +900,7 @@ describe("REST playlists", () => {
 
     const r2 = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/playlists`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/playlists`,
       payload: { name: "   " },
     });
     expect(r2.statusCode).toBe(400);
@@ -852,7 +912,7 @@ describe("REST playlists", () => {
     });
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/playlists`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/playlists`,
       payload: { name: "nothing" },
     });
     expect(res.statusCode).toBe(400);
@@ -865,7 +925,7 @@ describe("REST playlists", () => {
     });
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/playlists`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/playlists`,
       payload: { name: "road trip" },
     });
     expect(res.statusCode).toBe(500);
@@ -877,7 +937,7 @@ describe("REST playlists", () => {
   it("POST /playlists/:name/load connects to the given channel, then enqueues + reports the count", async () => {
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/playlists/road%20trip/load`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/playlists/road%20trip/load`,
       payload: { voiceChannelId: "C1" },
     });
     expect(res.statusCode).toBe(200);
@@ -898,7 +958,7 @@ describe("REST playlists", () => {
     controller.connectedChannelId = "C1";
     const res = await app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/playlists/50%25off/load`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/playlists/50%25off/load`,
     });
     expect(res.statusCode).toBe(200);
     const [name] = controller.loadPlaylist.mock.calls[0]!;
@@ -908,7 +968,7 @@ describe("REST playlists", () => {
   it("DELETE /playlists/:name handles a name containing a literal '%' (no double-decode 500)", async () => {
     const res = await h.app.inject({
       method: "DELETE",
-      url: `/api/guilds/${GUILD}/playlists/50%25off`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/playlists/50%25off`,
     });
     expect(res.statusCode).toBe(200);
     expect(h.controller.deletePlaylist).toHaveBeenCalledWith("50%off");
@@ -919,7 +979,7 @@ describe("REST playlists", () => {
     h.controller.loadPlaylist = vi.fn(async () => 0);
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/playlists/ghost/load`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/playlists/ghost/load`,
       payload: { voiceChannelId: "C1" },
     });
     expect(res.statusCode).toBe(404);
@@ -929,7 +989,7 @@ describe("REST playlists", () => {
     // h.controller.connectedChannelId defaults to null, no voiceChannelId in payload.
     const res = await h.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/playlists/road%20trip/load`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/playlists/road%20trip/load`,
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toBe("no_voice_channel");
@@ -941,7 +1001,7 @@ describe("REST playlists", () => {
     controller.connectedChannelId = "C1";
     const res = await app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/playlists/road%20trip/load`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/playlists/road%20trip/load`,
     });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true, queued: 2 });
@@ -955,7 +1015,7 @@ describe("REST playlists", () => {
     controller.connectedChannelId = "C1";
     const res = await app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/playlists/road%20trip/load`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/playlists/road%20trip/load`,
       payload: { voiceChannelId: "C2" },
     });
     expect(res.statusCode).toBe(200);
@@ -970,7 +1030,7 @@ describe("REST playlists", () => {
     });
     const res = await app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/playlists/road%20trip/load`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/playlists/road%20trip/load`,
       payload: { voiceChannelId: "C1" },
     });
     expect(res.statusCode).toBe(400);
@@ -981,7 +1041,7 @@ describe("REST playlists", () => {
   it("DELETE /playlists/:name deletes and echoes the new list", async () => {
     const res = await h.app.inject({
       method: "DELETE",
-      url: `/api/guilds/${GUILD}/playlists/chill`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/playlists/chill`,
     });
     expect(res.statusCode).toBe(200);
     expect(h.controller.deletePlaylist).toHaveBeenCalledWith("chill");
@@ -992,26 +1052,29 @@ describe("REST playlists", () => {
     h.controller.deletePlaylist = vi.fn(async () => false);
     const res = await h.app.inject({
       method: "DELETE",
-      url: `/api/guilds/${GUILD}/playlists/ghost`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/playlists/ghost`,
     });
     expect(res.statusCode).toBe(404);
   });
 
   it("all playlist endpoints are auth-gated (401 when not logged in)", async () => {
     const anon = build(null);
-    const get = await anon.app.inject({ method: "GET", url: `/api/guilds/${GUILD}/playlists` });
+    const get = await anon.app.inject({
+      method: "GET",
+      url: `/api/bots/${BOT}/guilds/${GUILD}/playlists`,
+    });
     const post = await anon.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/playlists`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/playlists`,
       payload: { name: "x" },
     });
     const load = await anon.app.inject({
       method: "POST",
-      url: `/api/guilds/${GUILD}/playlists/x/load`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/playlists/x/load`,
     });
     const del = await anon.app.inject({
       method: "DELETE",
-      url: `/api/guilds/${GUILD}/playlists/x`,
+      url: `/api/bots/${BOT}/guilds/${GUILD}/playlists/x`,
     });
     expect(get.statusCode).toBe(401);
     expect(post.statusCode).toBe(401);
@@ -1031,7 +1094,10 @@ describe("REST playlists", () => {
       },
     };
     const { app } = build(USER, { client: { guilds: { cache: new Map([[GUILD, guild]]) } } });
-    const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/playlists` });
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/bots/${BOT}/guilds/${GUILD}/playlists`,
+    });
     expect(res.statusCode).toBe(403);
   });
 });
@@ -1056,7 +1122,7 @@ describe("REST lyrics", () => {
       history: [],
       idleTimeoutSec: 300,
     });
-    const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/lyrics` });
+    const res = await app.inject({ method: "GET", url: `/api/bots/${BOT}/guilds/${GUILD}/lyrics` });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ lyrics: "la la", source: "lyrics.ovh" });
     expect(lyrics).toHaveBeenCalledWith(current.meta);
@@ -1071,7 +1137,7 @@ describe("REST lyrics", () => {
       history: [],
       idleTimeoutSec: 300,
     });
-    const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/lyrics` });
+    const res = await app.inject({ method: "GET", url: `/api/bots/${BOT}/guilds/${GUILD}/lyrics` });
     expect(res.statusCode).toBe(200);
     expect(res.json().lyrics).toBeNull();
     expect(lyrics).not.toHaveBeenCalled();
@@ -1086,7 +1152,7 @@ describe("REST lyrics", () => {
       history: [],
       idleTimeoutSec: 300,
     });
-    const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/lyrics` });
+    const res = await app.inject({ method: "GET", url: `/api/bots/${BOT}/guilds/${GUILD}/lyrics` });
     expect(res.statusCode).toBe(200);
     expect(res.json().lyrics).toBeNull();
   });
@@ -1100,7 +1166,7 @@ describe("REST lyrics", () => {
       },
     };
     const { app } = build(USER, { client: { guilds: { cache: new Map([[GUILD, guild]]) } } });
-    const res = await app.inject({ method: "GET", url: `/api/guilds/${GUILD}/lyrics` });
+    const res = await app.inject({ method: "GET", url: `/api/bots/${BOT}/guilds/${GUILD}/lyrics` });
     expect(res.statusCode).toBe(403);
   });
 });

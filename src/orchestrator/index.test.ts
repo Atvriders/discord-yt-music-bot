@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { EventEmitter } from "node:events";
-import { GuildController, AUTOPLAY_MAX_CHAIN } from "./index.js";
+import { GuildController, AUTOPLAY_MAX_CHAIN, isLikelySingleSong } from "./index.js";
 import { DEFAULT_SETTINGS } from "./settings.js";
 import { Semaphore } from "../util/semaphore.js";
 import type { AudioInfo, Requester, TrackMeta } from "../types/index.js";
@@ -50,6 +50,10 @@ function makeController(
   const session = new FakeSession();
   const cacheStore = new Map<string, string>();
   const audioStore = new Map<string, AudioInfo | null>();
+  // Refcounted pins, mirroring the REAL AudioCache: evict() is a no-op while pinCount>0. This
+  // makes the mock faithful so a regression like "evict without unpinning first" is actually
+  // caught (a no-op mock would silently pass it).
+  const pinCounts = new Map<string, number>();
   const makeResource = vi.fn((p: string, _item: unknown, opts?: { seekMs?: number }) => ({
     res: p,
     seekMs: opts?.seekMs ?? 0,
@@ -73,9 +77,10 @@ function makeController(
         cacheStore.set(id, p);
         audioStore.set(id, audio);
       },
-      pin: vi.fn(),
-      unpin: vi.fn(),
+      pin: vi.fn((id: string) => pinCounts.set(id, (pinCounts.get(id) ?? 0) + 1)),
+      unpin: vi.fn((id: string) => pinCounts.set(id, Math.max(0, (pinCounts.get(id) ?? 0) - 1))),
       evict: (id: string) => {
+        if ((pinCounts.get(id) ?? 0) > 0) return; // refcount-aware, like the real cache
         cacheStore.delete(id);
         audioStore.delete(id);
       },
@@ -307,11 +312,12 @@ describe("GuildController", () => {
     });
 
     it("does NOT reject autoplay tracks on the per-guild limit (best-effort feed only)", async () => {
-      // Autoplay (synthetic requester) should keep playing even if a related track is long;
-      // the cap is a user-facing enqueue guard, not an autoplay killer.
+      // Autoplay (synthetic requester) bypasses the per-guild USER cap. Use a track OVER the cap
+      // (60s) but still a plausible single song (5 min) so the separate single-song autoplay
+      // filter (which rejects compilation-length picks) doesn't also apply here.
       const { ctrl, session } = makeController({
-        settings: { maxTrackDurationSec: 3600, autoplay: true },
-        relatedFn: async () => [longMeta("bbbbbbbbbbb", 10800)],
+        settings: { maxTrackDurationSec: 200, autoplay: true },
+        relatedFn: async () => [longMeta("bbbbbbbbbbb", 300)],
       });
       await ctrl.ensureConnected("C1");
       await ctrl.enqueue(meta("aaaaaaaaaaa"), requester); // short seed (100s)
@@ -1842,5 +1848,71 @@ describe("GuildController preparing (live download/processing status)", () => {
     expect(captured).toContain(100);
     expect(captured).not.toContain(2);
     expect(captured).not.toContain(7);
+  });
+});
+
+describe("isLikelySingleSong (autoplay compilation filter)", () => {
+  const m = (title: string, durationSec: number | null = 200): TrackMeta => ({
+    videoId: "xxxxxxxxxxx",
+    title,
+    channel: "c",
+    durationSec,
+    isLive: false,
+    thumbnailUrl: null,
+  });
+  it("accepts normal single songs (incl. legit *-Mix song titles)", () => {
+    for (const t of [
+      "Daft Punk - One More Time",
+      "Song Title (Extended Mix)",
+      "Track (Radio Edit)",
+      "Artist - Original Mix",
+      "Some Club Mix",
+    ]) {
+      expect(isLikelySingleSong(m(t))).toBe(true);
+    }
+  });
+  it("rejects compilation / multi-song titles", () => {
+    for (const t of [
+      "Queen - Greatest Hits",
+      "The Best of ABBA",
+      "Nirvana - Nevermind (Full Album)",
+      "Summer Mix 2023",
+      "Deep House Megamix",
+      "Top 20 Songs 2022",
+      "1 Hour of Lofi Beats",
+      "Nonstop Party Mix",
+      "DJ Set - Live @ Tomorrowland",
+      "Rock Anthology",
+      "Coldplay Playlist",
+      "50 Greatest Rock Tracks",
+    ]) {
+      expect(isLikelySingleSong(m(t))).toBe(false);
+    }
+  });
+  it("rejects over-long candidates regardless of title, allows unknown duration", () => {
+    expect(isLikelySingleSong(m("Some Jam", 40 * 60))).toBe(false); // 40 min → compilation-length
+    expect(isLikelySingleSong(m("Some Jam", 10 * 60))).toBe(true); // 10 min ok
+    expect(isLikelySingleSong(m("A Song", null))).toBe(true); // unknown length allowed
+  });
+});
+
+describe("GuildController autoplay single-song filter", () => {
+  it("skips a compilation candidate and picks the single song", async () => {
+    const { ctrl, session } = makeController({
+      settings: { autoplay: true },
+      // related() offers a "Best Of" compilation FIRST, then a real single song.
+      relatedFn: async () => [
+        { ...meta("ccccccccccc"), title: "Greatest Hits (Full Album)" },
+        { ...meta("sssssssssss"), title: "Real Single Song" },
+      ],
+    });
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+
+    session.emit("trackEnd"); // queue empties → reactive autoplay picks a candidate
+    await new Promise((r) => setTimeout(r, 0));
+    // The compilation is skipped; the single song plays.
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("sssssssssss");
   });
 });

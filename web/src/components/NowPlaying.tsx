@@ -26,9 +26,12 @@ export function NowPlaying({
   receivedAt = 0,
   canSeek = false,
   onSeek,
+  botId,
   guildId,
 }: {
   item: CurrentItem | null;
+  /** Active bot id — needed alongside guildId to fetch the Lyrics for this bot's track. */
+  botId?: string | null;
   /** Active guild id — enables the best-effort Lyrics panel. Omit to hide it. */
   guildId?: string | null;
   paused?: boolean;
@@ -157,7 +160,7 @@ export function NowPlaying({
               <span className="font-mono" style={{ color: "var(--color-ink-faint)" }}> · {requester.source}</span>
             </span>
           </div>
-          {guildId && <Lyrics guildId={guildId} videoId={meta.videoId} />}
+          {botId && guildId && <Lyrics botId={botId} guildId={guildId} videoId={meta.videoId} />}
         </div>
       </div>
     </section>

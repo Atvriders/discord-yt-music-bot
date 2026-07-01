@@ -11,6 +11,15 @@ services:
       # Discord bot token
       DISCORD_TOKEN: "CHANGE_ME"
 
+      # ── Additional bots (optional) ────────────────────────────────────────────────
+      # Run more bots in this SAME container so each can play a different song in a different
+      # voice channel. Each needs its OWN Discord application + bot token, invited to your server,
+      # and a DISTINCT command prefix. The web panel gets a bot-picker to choose which one to control.
+      # DISCORD_TOKEN_2: ""          # second bot's token (leave "" to disable)
+      # COMMAND_PREFIX_2: "!"        # must NOT overlap another prefix — "?"/"?2" clash, so use "!", "$", …
+      # BOT_NAME_2: "YouTube Music Bot 2"
+      # For a third bot add DISCORD_TOKEN_3 / COMMAND_PREFIX_3 / BOT_NAME_3, and so on (contiguous).
+
       # Discord OAuth configuration
       DISCORD_CLIENT_ID: "your_client_id_here"
       DISCORD_CLIENT_SECRET: "CHANGE_ME"

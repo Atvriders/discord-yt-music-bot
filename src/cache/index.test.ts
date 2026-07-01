@@ -83,6 +83,51 @@ describe("AudioCache", () => {
     expect(cache.totalBytes()).toBe(300);
   });
 
+  it("requires two unpins before a twice-pinned entry becomes LRU-evictable", async () => {
+    // Two bots play the SAME track and each pins its file (pinCount 2). One bot's single unpin
+    // (pinCount 1) must NOT make the file evictable — the other bot is still playing it. Only
+    // once BOTH have unpinned (pinCount 0) may the LRU loop reclaim it.
+    const cache = new AudioCache(dir, 500);
+    await cache.init();
+    cache.register("aaaaaaaaaaa", await makeFile("aaaaaaaaaaa.webm", 300));
+    cache.pin("aaaaaaaaaaa"); // bot 1 pins → count 1
+    cache.pin("aaaaaaaaaaa"); // bot 2 pins → count 2
+    cache.unpin("aaaaaaaaaaa"); // bot 1 done → count 1 (still held by bot 2)
+    // Registering 'b' pushes over the cap; 'a' is still pinned (count 1) so 'a' survives.
+    cache.register("bbbbbbbbbbb", await makeFile("bbbbbbbbbbb.webm", 300)); // 600 > 500
+    expect(cache.has("aaaaaaaaaaa")).toBe(true); // one unpin is not enough
+    expect(cache.has("bbbbbbbbbbb")).toBe(true);
+    cache.unpin("aaaaaaaaaaa"); // bot 2 done → count 0, now evictable
+    cache.register("ccccccccccc", await makeFile("ccccccccccc.webm", 300)); // over cap again
+    // With 'a' unpinned to 0 it is the LRU victim; registering 'c' evicts both 'a' and 'b'.
+    expect(cache.has("aaaaaaaaaaa")).toBe(false);
+    expect(cache.has("bbbbbbbbbbb")).toBe(false);
+    expect(cache.has("ccccccccccc")).toBe(true);
+    expect(cache.totalBytes()).toBe(300);
+  });
+
+  it("evict() is a no-op while pinCount>0 and removes once unpinned to 0", async () => {
+    // One bot hit a poisoned file and calls evict(), but a second bot still has the same track
+    // pinned. evict() must NOT delete the shared file mid-playback; it only reclaims once the
+    // last holder has unpinned.
+    const cache = new AudioCache(dir, 1000);
+    await cache.init();
+    const p = await makeFile("aaaaaaaaaaa.webm", 200);
+    cache.register("aaaaaaaaaaa", p);
+    cache.pin("aaaaaaaaaaa");
+    cache.pin("aaaaaaaaaaa"); // two holders → count 2
+    cache.unpin("aaaaaaaaaaa"); // one leaves → count 1
+    cache.evict("aaaaaaaaaaa"); // still held by the other bot → no-op
+    expect(cache.has("aaaaaaaaaaa")).toBe(true);
+    expect(existsSync(p)).toBe(true);
+    expect(cache.totalBytes()).toBe(200);
+    cache.unpin("aaaaaaaaaaa"); // last holder leaves → count 0
+    cache.evict("aaaaaaaaaaa"); // now it actually removes the entry + file
+    expect(cache.has("aaaaaaaaaaa")).toBe(false);
+    expect(existsSync(p)).toBe(false);
+    expect(cache.totalBytes()).toBe(0);
+  });
+
   it("does not over-evict innocent entries when re-registering an existing id", async () => {
     // maxBytes 1000, entries {A:600, B:300} (total 900). Re-register A at 300: the old
     // 600 bytes are freed by the overwrite, so the post-register footprint is

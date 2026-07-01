@@ -53,7 +53,14 @@ export interface PreparingState {
   percent?: number;
 }
 export interface Snapshot extends GuildSettings { current: CurrentItem | null; upcoming: QueueItem[]; history: QueueItem[]; paused: boolean; preparing: PreparingState | null; }
-export interface Me { user: { id: string; username: string; avatarUrl: string }; guilds: { id: string; name: string }[]; }
+// A guild the panel can control — the same shape the server has always sent under
+// /api/me's guilds (id + name). Now nested under a bot (each bot lists only the guilds
+// that bot is in AND the user can control).
+export interface Guild { id: string; name: string; }
+// One Discord bot in the multi-bot deployment. Each bot runs independently (its own voice
+// connection / player), so guild-scoped calls and the live WS are addressed by (botId, guildId).
+export interface Bot { id: string; name: string; guilds: Guild[]; }
+export interface Me { user: { id: string; username: string; avatarUrl: string }; bots: Bot[]; }
 export interface VoiceChannel { id: string; name: string; }
 export interface TextChannel { id: string; name: string; }
 // A saved, per-guild playlist summary (mirrors the backend PlaylistSummary).

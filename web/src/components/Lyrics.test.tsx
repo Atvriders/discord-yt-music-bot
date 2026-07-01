@@ -15,7 +15,7 @@ beforeEach(() => {
 describe("Lyrics", () => {
   it("does not fetch until the panel is opened", () => {
     (api.lyrics as ReturnType<typeof vi.fn>).mockResolvedValue({ lyrics: "x", source: "lyrics.ovh" });
-    render(<Lyrics guildId="g1" videoId="vid1" />);
+    render(<Lyrics botId="b1" guildId="g1" videoId="vid1" />);
     expect(api.lyrics).not.toHaveBeenCalled();
   });
 
@@ -24,23 +24,23 @@ describe("Lyrics", () => {
       lyrics: "line one\nline two",
       source: "lyrics.ovh",
     });
-    render(<Lyrics guildId="g1" videoId="vid1" />);
+    render(<Lyrics botId="b1" guildId="g1" videoId="vid1" />);
     fireEvent.click(screen.getByRole("button", { name: /lyrics/i }));
     await waitFor(() => screen.getByText(/line one/));
     screen.getByText(/line two/);
-    expect(api.lyrics).toHaveBeenCalledWith("g1");
+    expect(api.lyrics).toHaveBeenCalledWith("b1", "g1");
   });
 
   it("shows a graceful empty state when no lyrics are found", async () => {
     (api.lyrics as ReturnType<typeof vi.fn>).mockResolvedValue({ lyrics: null, source: "lyrics.ovh" });
-    render(<Lyrics guildId="g1" videoId="vid1" />);
+    render(<Lyrics botId="b1" guildId="g1" videoId="vid1" />);
     fireEvent.click(screen.getByRole("button", { name: /lyrics/i }));
     await waitFor(() => screen.getByText(/no lyrics found/i));
   });
 
   it("shows an error state when the fetch fails", async () => {
     (api.lyrics as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("boom"));
-    render(<Lyrics guildId="g1" videoId="vid1" />);
+    render(<Lyrics botId="b1" guildId="g1" videoId="vid1" />);
     fireEvent.click(screen.getByRole("button", { name: /lyrics/i }));
     // Error-specific text (NOT the empty state). The wildcard matches the typographic
     // apostrophe (U+2019) the component renders in "Couldn't".
@@ -53,12 +53,12 @@ describe("Lyrics", () => {
   it("refetches when the track (videoId) changes while open", async () => {
     const m = api.lyrics as ReturnType<typeof vi.fn>;
     m.mockResolvedValueOnce({ lyrics: "first song", source: "lyrics.ovh" });
-    const { rerender } = render(<Lyrics guildId="g1" videoId="vid1" />);
+    const { rerender } = render(<Lyrics botId="b1" guildId="g1" videoId="vid1" />);
     fireEvent.click(screen.getByRole("button", { name: /lyrics/i }));
     await waitFor(() => screen.getByText(/first song/));
 
     m.mockResolvedValueOnce({ lyrics: "second song", source: "lyrics.ovh" });
-    rerender(<Lyrics guildId="g1" videoId="vid2" />);
+    rerender(<Lyrics botId="b1" guildId="g1" videoId="vid2" />);
     await waitFor(() => screen.getByText(/second song/));
     expect(api.lyrics).toHaveBeenCalledTimes(2);
   });
@@ -71,9 +71,9 @@ describe("Lyrics", () => {
     m.mockReturnValueOnce(new Promise((r) => { resolve1 = r; }));
     m.mockReturnValueOnce(new Promise((r) => { resolve2 = r; }));
 
-    const { rerender } = render(<Lyrics guildId="g1" videoId="vid1" />);
+    const { rerender } = render(<Lyrics botId="b1" guildId="g1" videoId="vid1" />);
     fireEvent.click(screen.getByRole("button", { name: /lyrics/i })); // request 1 in flight (held)
-    rerender(<Lyrics guildId="g1" videoId="vid2" />); // request 2 in flight (held)
+    rerender(<Lyrics botId="b1" guildId="g1" videoId="vid2" />); // request 2 in flight (held)
 
     // Resolve the SECOND (newer) request first, then the FIRST (stale) request.
     await act(async () => { resolve2({ lyrics: "second song", source: "lyrics.ovh" }); });
@@ -86,7 +86,7 @@ describe("Lyrics", () => {
 
   it("includes the honest 'not time-synced' note", async () => {
     (api.lyrics as ReturnType<typeof vi.fn>).mockResolvedValue({ lyrics: "la", source: "lyrics.ovh" });
-    render(<Lyrics guildId="g1" videoId="vid1" />);
+    render(<Lyrics botId="b1" guildId="g1" videoId="vid1" />);
     fireEvent.click(screen.getByRole("button", { name: /lyrics/i }));
     await waitFor(() => screen.getByText(/la/));
     screen.getByText(/not time-synced|best-effort/i);

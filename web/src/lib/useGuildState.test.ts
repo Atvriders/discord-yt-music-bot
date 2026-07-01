@@ -84,14 +84,14 @@ describe("reconnectDelayMs", () => {
 
 describe("useGuildState reconnect", () => {
   it("opens a socket and subscribes to the active guild", () => {
-    renderHook(() => useGuildState("g1"));
+    renderHook(() => useGuildState("b1", "g1"));
     expect(FakeWS.instances).toHaveLength(1);
     act(() => FakeWS.instances[0]!.open());
-    expect(FakeWS.instances[0]!.sent).toContain(JSON.stringify({ subscribe: "g1" }));
+    expect(FakeWS.instances[0]!.sent).toContain(JSON.stringify({ subscribe: "g1", botId: "b1" }));
   });
 
   it("schedules a reconnect on close: a NEW socket is created after the backoff", () => {
-    const { result } = renderHook(() => useGuildState("g1"));
+    const { result } = renderHook(() => useGuildState("b1", "g1"));
     act(() => FakeWS.instances[0]!.open());
     expect(FakeWS.instances).toHaveLength(1);
 
@@ -104,11 +104,11 @@ describe("useGuildState reconnect", () => {
     act(() => vi.advanceTimersByTime(1000));
     expect(FakeWS.instances).toHaveLength(2);
     act(() => FakeWS.instances[1]!.open());
-    expect(FakeWS.instances[1]!.sent).toContain(JSON.stringify({ subscribe: "g1" }));
+    expect(FakeWS.instances[1]!.sent).toContain(JSON.stringify({ subscribe: "g1", botId: "b1" }));
   });
 
   it("reconnects immediately when the tab becomes visible while closed", () => {
-    renderHook(() => useGuildState("g1"));
+    renderHook(() => useGuildState("b1", "g1"));
     act(() => FakeWS.instances[0]!.open());
     act(() => FakeWS.instances[0]!.drop());
     expect(FakeWS.instances).toHaveLength(1);
@@ -120,14 +120,14 @@ describe("useGuildState reconnect", () => {
   });
 
   it("does not reconnect on visibility when the socket is still open (no duplicate)", () => {
-    renderHook(() => useGuildState("g1"));
+    renderHook(() => useGuildState("b1", "g1"));
     act(() => FakeWS.instances[0]!.open());
     act(() => document.dispatchEvent(new Event("visibilitychange")));
     expect(FakeWS.instances).toHaveLength(1);
   });
 
   it("stops reconnecting and tears down on unmount (no leaked timers/sockets)", () => {
-    const { unmount } = renderHook(() => useGuildState("g1"));
+    const { unmount } = renderHook(() => useGuildState("b1", "g1"));
     act(() => FakeWS.instances[0]!.open());
     act(() => FakeWS.instances[0]!.drop()); // schedules a retry
     unmount();
@@ -145,7 +145,7 @@ describe("useGuildState reconnect", () => {
       repeat: "off", autoplay: false, autoplaySource: "radio", maxTrackDurationSec: 0,
       volume: 100, fx: "none", commandChannelId: null, preparing: null,
     };
-    const { result } = renderHook(() => useGuildState("g1"));
+    const { result } = renderHook(() => useGuildState("b1", "g1"));
     act(() => FakeWS.instances[0]!.open());
     act(() => FakeWS.instances[0]!.message(JSON.stringify({ type: "state", state: snap })));
     // The hook wired the listener, extracted String(e.data), and reduced it into state.
@@ -155,18 +155,18 @@ describe("useGuildState reconnect", () => {
   });
 
   it("reconnects on a socket 'error' event (shares the onDown path)", () => {
-    const { result } = renderHook(() => useGuildState("g1"));
+    const { result } = renderHook(() => useGuildState("b1", "g1"));
     act(() => FakeWS.instances[0]!.open());
     act(() => FakeWS.instances[0]!.error());
     expect(result.current.status).toBe("closed");
     act(() => vi.advanceTimersByTime(1000));
     expect(FakeWS.instances).toHaveLength(2);
     act(() => FakeWS.instances[1]!.open());
-    expect(FakeWS.instances[1]!.sent).toContain(JSON.stringify({ subscribe: "g1" }));
+    expect(FakeWS.instances[1]!.sent).toContain(JSON.stringify({ subscribe: "g1", botId: "b1" }));
   });
 
   it("reconnects immediately on a window 'online' event while closed", () => {
-    renderHook(() => useGuildState("g1"));
+    renderHook(() => useGuildState("b1", "g1"));
     act(() => FakeWS.instances[0]!.open());
     act(() => FakeWS.instances[0]!.drop());
     expect(FakeWS.instances).toHaveLength(1);
@@ -176,7 +176,7 @@ describe("useGuildState reconnect", () => {
   });
 
   it("stops reconnecting once a guild is forbidden ({type:'error'} then close)", () => {
-    const { result } = renderHook(() => useGuildState("g1"));
+    const { result } = renderHook(() => useGuildState("b1", "g1"));
     act(() => FakeWS.instances[0]!.open());
     // Server rejects the subscription, then the socket closes.
     act(() => FakeWS.instances[0]!.message(JSON.stringify({ type: "error", reason: "forbidden" })));
@@ -189,7 +189,7 @@ describe("useGuildState reconnect", () => {
   });
 
   it("stops reconnecting once a guild is revoked ({type:'revoked'} then close)", () => {
-    const { result } = renderHook(() => useGuildState("g1"));
+    const { result } = renderHook(() => useGuildState("b1", "g1"));
     act(() => FakeWS.instances[0]!.open());
     act(() => FakeWS.instances[0]!.message(JSON.stringify({ type: "revoked" })));
     act(() => FakeWS.instances[0]!.drop());
@@ -200,7 +200,7 @@ describe("useGuildState reconnect", () => {
   });
 
   it("does not reconnect a forbidden guild on visibilitychange or window 'online'", () => {
-    const { result } = renderHook(() => useGuildState("g1"));
+    const { result } = renderHook(() => useGuildState("b1", "g1"));
     act(() => FakeWS.instances[0]!.open());
     act(() => FakeWS.instances[0]!.message(JSON.stringify({ type: "error", reason: "forbidden" })));
     act(() => FakeWS.instances[0]!.drop());
@@ -214,7 +214,7 @@ describe("useGuildState reconnect", () => {
   });
 
   it("removes the 'online' listener on unmount (no leak / no reconnect after teardown)", () => {
-    const { unmount } = renderHook(() => useGuildState("g1"));
+    const { unmount } = renderHook(() => useGuildState("b1", "g1"));
     act(() => FakeWS.instances[0]!.open());
     act(() => FakeWS.instances[0]!.drop());
     unmount();
@@ -224,7 +224,7 @@ describe("useGuildState reconnect", () => {
   });
 
   it("increases the backoff across consecutive failures, and resets it after a healthy open", () => {
-    renderHook(() => useGuildState("g1"));
+    renderHook(() => useGuildState("b1", "g1"));
     // Attempt 0: drop -> 1s -> socket 1.
     act(() => FakeWS.instances[0]!.drop());
     act(() => vi.advanceTimersByTime(1000));
@@ -243,22 +243,43 @@ describe("useGuildState reconnect", () => {
   });
 
   it("creates no socket when guildId is null, and connects once on null -> 'g1'", () => {
-    const { rerender } = renderHook(({ g }) => useGuildState(g), { initialProps: { g: null as string | null } });
+    const { rerender } = renderHook(({ g }) => useGuildState("b1", g), { initialProps: { g: null as string | null } });
     expect(FakeWS.instances).toHaveLength(0);
     rerender({ g: "g1" });
     expect(FakeWS.instances).toHaveLength(1);
     act(() => FakeWS.instances[0]!.open());
-    expect(FakeWS.instances[0]!.sent).toContain(JSON.stringify({ subscribe: "g1" }));
+    expect(FakeWS.instances[0]!.sent).toContain(JSON.stringify({ subscribe: "g1", botId: "b1" }));
+  });
+
+  it("creates no socket when botId is null, and connects once on null -> 'b1'", () => {
+    const { rerender } = renderHook(({ b }) => useGuildState(b, "g1"), { initialProps: { b: null as string | null } });
+    expect(FakeWS.instances).toHaveLength(0);
+    rerender({ b: "b1" });
+    expect(FakeWS.instances).toHaveLength(1);
+    act(() => FakeWS.instances[0]!.open());
+    expect(FakeWS.instances[0]!.sent).toContain(JSON.stringify({ subscribe: "g1", botId: "b1" }));
   });
 
   it("on a g1 -> g2 switch, tears down the old socket and subscribes exactly one new socket to g2", () => {
-    const { rerender } = renderHook(({ g }) => useGuildState(g), { initialProps: { g: "g1" } });
+    const { rerender } = renderHook(({ g }) => useGuildState("b1", g), { initialProps: { g: "g1" } });
     act(() => FakeWS.instances[0]!.open());
     rerender({ g: "g2" });
     // Old socket closed, a single fresh socket created for g2.
     expect(FakeWS.instances[0]!.readyState).toBe(3);
     expect(FakeWS.instances).toHaveLength(2);
     act(() => FakeWS.instances[1]!.open());
-    expect(FakeWS.instances[1]!.sent).toContain(JSON.stringify({ subscribe: "g2" }));
+    expect(FakeWS.instances[1]!.sent).toContain(JSON.stringify({ subscribe: "g2", botId: "b1" }));
+  });
+
+  it("on a b1 -> b2 switch (SAME guild), tears down the old socket and re-subscribes as b2", () => {
+    // Two bots can share a server: switching bots on the same guild must reconnect the
+    // socket for the new bot (the guildId alone is ambiguous across bots).
+    const { rerender } = renderHook(({ b }) => useGuildState(b, "g1"), { initialProps: { b: "b1" } });
+    act(() => FakeWS.instances[0]!.open());
+    rerender({ b: "b2" });
+    expect(FakeWS.instances[0]!.readyState).toBe(3);
+    expect(FakeWS.instances).toHaveLength(2);
+    act(() => FakeWS.instances[1]!.open());
+    expect(FakeWS.instances[1]!.sent).toContain(JSON.stringify({ subscribe: "g1", botId: "b2" }));
   });
 });

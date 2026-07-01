@@ -1,11 +1,12 @@
-// Per-guild live state over a WebSocket. The server emits a "state" frame on every
-// change. This hook owns the socket lifecycle: it (re)subscribes to the active guild,
+// Per-(bot, guild) live state over a WebSocket. The server emits a "state" frame on every
+// change. This hook owns the socket lifecycle: it (re)subscribes to the active bot+guild,
 // and — critically — survives the socket being dropped when the tab is backgrounded by
 // a phone/laptop. On an unexpected close it auto-reconnects with exponential backoff,
 // and it reconnects immediately when the tab becomes visible again or the network
 // comes back online, re-sending the subscribe so state resumes without a manual refresh.
 import { useCallback, useEffect, useReducer } from "react";
 import type { Snapshot } from "../types.js";
+import { wsUrl } from "./api.js";
 
 export interface WsState {
   snapshot: Snapshot | null;
@@ -69,13 +70,17 @@ function reduce(s: WsState, a: WsAction): WsState {
   return applyWsMessage(s, a.raw);
 }
 
-export function useGuildState(guildId: string | null): WsState {
+export function useGuildState(botId: string | null, guildId: string | null): WsState {
   const [state, dispatch] = useReducer(reduce, initialWsState);
   const refresh = useCallback((snapshot: Snapshot) => dispatch({ refresh: snapshot }), []);
 
   useEffect(() => {
-    if (!guildId) return;
+    if (!botId || !guildId) return;
     if (typeof WebSocket === "undefined") return;
+    // Non-null locals so the nested connect() closure sees them as `string` (TS won't
+    // carry the guard's narrowing into a hoisted function that captures the params).
+    const activeBotId: string = botId;
+    const activeGuildId: string = guildId;
 
     dispatch({ reset: true });
 
@@ -84,11 +89,11 @@ export function useGuildState(guildId: string | null): WsState {
     let socket: WebSocket | null = null;
     let attempt = 0; // failed-connection counter, drives the backoff schedule
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
-    // Permission errors are PERMANENT for this guild: once the server sends `error`
+    // Permission errors are PERMANENT for this (bot, guild): once the server sends `error`
     // or `revoked`, reconnecting just gets rejected again. Latch a flag so every
     // reconnect entry point (backoff, visibilitychange, window online) stops
-    // recreating sockets — otherwise a forbidden guild loops forever, opening a new
-    // socket each backoff interval. Reset per guildId change (the effect re-runs).
+    // recreating sockets — otherwise a forbidden target loops forever, opening a new
+    // socket each backoff interval. Reset per bot/guild change (the effect re-runs).
     let forbidden = false;
 
     const clearRetry = () => {
@@ -128,14 +133,15 @@ export function useGuildState(guildId: string | null): WsState {
       // Tear down any prior socket so we never run two in parallel.
       teardownSocket();
       dispatch({ connecting: true });
-      const proto = location.protocol === "https:" ? "wss" : "ws";
-      const ws = new WebSocket(`${proto}://${location.host}/ws`) as Tracked;
+      // The bot + guild are carried in the query string (/ws?botId=&guildId=); the
+      // subscribe frame below re-states them so the server can route the stream.
+      const ws = new WebSocket(wsUrl(activeBotId, activeGuildId)) as Tracked;
       socket = ws;
 
       ws.addEventListener("open", () => {
         if (ws._dead) return;
         attempt = 0; // a healthy connection resets the backoff
-        ws.send(JSON.stringify({ subscribe: guildId }));
+        ws.send(JSON.stringify({ subscribe: activeGuildId, botId: activeBotId }));
       });
       ws.addEventListener("message", (e) => {
         if (ws._dead) return;
@@ -184,7 +190,7 @@ export function useGuildState(guildId: string | null): WsState {
       window.removeEventListener("online", reconnectNow);
       teardownSocket();
     };
-  }, [guildId]);
+  }, [botId, guildId]);
 
   return { ...state, refresh };
 }

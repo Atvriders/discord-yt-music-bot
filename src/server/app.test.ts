@@ -38,13 +38,19 @@ const cfg = {
   secureCookies: false,
 };
 function deps() {
+  // A controller stub with the top-level members both server interfaces touch:
+  // ControllerLike needs `on`/`snapshot`; the old nested `queue.on` matched neither.
+  const hub = { get: vi.fn(() => ({ on: vi.fn(), snapshot: vi.fn(() => ({})) })) };
+  const client = { guilds: { cache: new Map() } };
+  // Both rest.ts and ws.ts now resolve their per-bot client + hub through the registry
+  // instead of a single top-level client/hub. One bot ("1") is enough to exercise the
+  // health/auth/static/error paths these tests cover.
+  const bot = { id: "1", name: "Bot 1", client, hub };
+  const registry = { list: () => [bot], get: (id: string) => (id === "1" ? bot : undefined) };
   return {
     cfg,
-    // A controller stub with the top-level members both server interfaces touch:
-    // ControllerLike needs `on`/`snapshot`; the old nested `queue.on` matched neither.
-    hub: { get: vi.fn(() => ({ on: vi.fn(), snapshot: vi.fn(() => ({})) })) },
+    registry,
     youtube: { resolve: vi.fn(), search: vi.fn() },
-    client: { guilds: { cache: new Map() } },
     adminIds: new Set<string>(),
     searchLimit: 5,
   } as never;

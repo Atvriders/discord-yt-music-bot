@@ -11,8 +11,8 @@ import { ActivityType, type Client } from "discord.js";
 /** Discord caps an activity name at 128 characters. */
 export const ACTIVITY_NAME_MAX = 128;
 
-/** Default prefix shown in the idle presence; mirrors the typical command prefix. */
-const DEFAULT_HINT = "?help";
+/** Command prefix used for the idle hint when a bot doesn't specify its own. */
+const DEFAULT_PREFIX = "?";
 
 export interface PresenceActivity {
   name: string;
@@ -31,17 +31,21 @@ function clamp(name: string): string {
 export function buildPresenceActivity(
   title: string | null | undefined,
   baseUrl: string | undefined,
+  prefix: string = DEFAULT_PREFIX,
 ): PresenceActivity {
   if (title && title.trim().length > 0) {
     return { name: clamp(title.trim()), type: ActivityType.Listening };
   }
-  const name = baseUrl ? `${DEFAULT_HINT} · ${baseUrl}` : DEFAULT_HINT;
+  const hint = `${prefix}help`;
+  const name = baseUrl ? `${hint} · ${baseUrl}` : hint;
   return { name: clamp(name), type: ActivityType.Listening };
 }
 
 export interface PresenceOptions {
   /** Public panel URL, shown in the idle/default presence. Optional. */
   baseUrl?: string;
+  /** This bot's command prefix, shown in the idle hint as "<prefix>help". Defaults to "?". */
+  prefix?: string;
 }
 
 export class PresenceController {
@@ -56,7 +60,7 @@ export class PresenceController {
   /** A track started in `guildId`; take over the (global) presence and show its title. */
   onTrackStart(guildId: string, title: string): void {
     this.holder = guildId;
-    this.apply(buildPresenceActivity(title, this.opts.baseUrl));
+    this.apply(buildPresenceActivity(title, this.opts.baseUrl, this.opts.prefix));
   }
 
   /**
@@ -67,13 +71,13 @@ export class PresenceController {
   onIdle(guildId: string): void {
     if (this.holder !== guildId) return;
     this.holder = null;
-    this.apply(buildPresenceActivity(null, this.opts.baseUrl));
+    this.apply(buildPresenceActivity(null, this.opts.baseUrl, this.opts.prefix));
   }
 
   /** Force the default presence (e.g. once at startup before anything has played). */
   applyDefault(): void {
     this.holder = null;
-    this.apply(buildPresenceActivity(null, this.opts.baseUrl));
+    this.apply(buildPresenceActivity(null, this.opts.baseUrl, this.opts.prefix));
   }
 
   private apply(activity: PresenceActivity): void {
