@@ -49,5 +49,9 @@
  </g>
  <rect x="128" y="350" width="256" height="5" rx="2.5" fill="#e8877e" opacity="0.34"/>
 
+ <circle cx="372" cy="366" r="80" fill="#0a0606"/>
+ <circle cx="372" cy="366" r="67" fill="url(#badge)"/>
+ <circle cx="372" cy="366" r="67" fill="none" stroke="#ffd9b0" stroke-opacity="0.40" stroke-width="2.4"/>
+ <text x="372" y="401" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-weight="700" font-size="99" fill="#fff3e6" text-anchor="middle">2</text>
 <rect width="512" height="512" filter="url(#grain)" opacity="0.04"/>
 </svg>
