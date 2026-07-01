@@ -75,6 +75,10 @@ function makeController(
       },
       pin: vi.fn(),
       unpin: vi.fn(),
+      evict: (id: string) => {
+        cacheStore.delete(id);
+        audioStore.delete(id);
+      },
     },
     cacheDir: "/cache",
     createSession: vi.fn(async () => session as never),
@@ -102,6 +106,36 @@ describe("GuildController", () => {
     expect(deps.youtube.download).toHaveBeenCalledWith("aaaaaaaaaaa", "/cache", expect.any(Object));
     expect(session.play).toHaveBeenCalledTimes(1);
     expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+  });
+
+  it("downloads a queued track only ONCE despite the prefetch+play race (paste-twice fix)", async () => {
+    // Regression: the queue "prefetch" event fires for the SAME item maybeStart is about to
+    // play, so the prefetcher and the play path used to EACH spawn a yt-dlp download for the
+    // same videoId — two processes writing the same cache file at once, corrupting it, so the
+    // first play failed and the user "had to paste the link twice". They must now share one
+    // in-flight download.
+    const { ctrl, deps } = makeController();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    const dl = deps.youtube.download as ReturnType<typeof vi.fn>;
+    const callsForId = dl.mock.calls.filter((c) => c[0] === "aaaaaaaaaaa");
+    expect(callsForId).toHaveLength(1);
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+  });
+
+  it("evicts the cached file when a track fails to play (so a re-request re-downloads)", async () => {
+    // A play-time 'error' can mean the cached file is corrupt/truncated. Evicting it ensures a
+    // re-paste re-downloads a clean copy instead of replaying the same broken file forever.
+    const { ctrl, session, deps } = makeController();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(deps.cache.get("aaaaaaaaaaa")).not.toBeNull(); // cached after the first play
+    session.emit("error", new Error("resource exploded")); // play-time failure
+    await new Promise((r) => setTimeout(r, 0));
+    expect(deps.cache.get("aaaaaaaaaaa")).toBeNull(); // evicted → next request re-downloads
   });
 
   it("fires onTrackStart with the started track's meta (drives presence)", async () => {

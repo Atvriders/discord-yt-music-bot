@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile, readdir, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -584,6 +584,40 @@ describe("YouTubeService.download", () => {
     // And it passes --no-part so future attempts don't even create a .part artifact.
     const args = runMock.mock.calls[0]![0] as string[];
     expect(args).toContain("--no-part");
+  });
+
+  it("skips a truncated ZERO-byte bare-extension leftover and selects the real file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yt-"));
+    // `--no-part` makes a killed rung write its partial directly to a FINAL name (no `.part`).
+    // A first-match pick could return this truncated file (→ ffmpeg EOF → "paste it twice").
+    await writeFile(join(dir, "dQw4w9WgXcQ.webm"), ""); // 0 bytes = truncated leftover
+    await writeFile(join(dir, "dQw4w9WgXcQ.opus"), "realaudio");
+    runMock.mockResolvedValue(ok("AUDIOFMT::opus|160|165|48000\n"));
+    const res = await new YouTubeService(cfg).download("dQw4w9WgXcQ", dir);
+    expect(res.path).toBe(join(dir, "dQw4w9WgXcQ.opus"));
+  });
+
+  it("prefers the NEWEST file when two same-id non-empty candidates exist", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yt-"));
+    await writeFile(join(dir, "dQw4w9WgXcQ.webm"), "stale");
+    await writeFile(join(dir, "dQw4w9WgXcQ.opus"), "fresh");
+    // Pin mtimes explicitly (fs mtime resolution can be coarse): .opus is newer.
+    await utimes(join(dir, "dQw4w9WgXcQ.webm"), new Date(1000), new Date(1000));
+    await utimes(join(dir, "dQw4w9WgXcQ.opus"), new Date(2000), new Date(2000));
+    runMock.mockResolvedValue(ok("AUDIOFMT::opus|160|165|48000\n"));
+    const res = await new YouTubeService(cfg).download("dQw4w9WgXcQ", dir);
+    expect(res.path).toBe(join(dir, "dQw4w9WgXcQ.opus"));
+  });
+
+  it("passes --force-overwrites and removes sibling `<videoId>.*` leftovers after downloading", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yt-"));
+    await writeFile(join(dir, "dQw4w9WgXcQ.webm"), ""); // stale different-ext leftover
+    await writeFile(join(dir, "dQw4w9WgXcQ.opus"), "real");
+    runMock.mockResolvedValue(ok("AUDIOFMT::opus|160|165|48000\n"));
+    await new YouTubeService(cfg).download("dQw4w9WgXcQ", dir);
+    expect(runMock.mock.calls[0]![0] as string[]).toContain("--force-overwrites");
+    const left = (await readdir(dir)).filter((f) => f.startsWith("dQw4w9WgXcQ."));
+    expect(left).toEqual(["dQw4w9WgXcQ.opus"]); // sibling cleaned up; only the produced file remains
   });
 
   it("falls back to the next player client when the first download fails, then succeeds", async () => {

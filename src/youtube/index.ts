@@ -1,4 +1,4 @@
-import { readdir } from "node:fs/promises";
+import { readdir, unlink, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { MediaConfig } from "../config.js";
 import type { AudioInfo, TrackMeta } from "../types/index.js";
@@ -222,6 +222,37 @@ export function sourceKey(j: Pick<RawInfo, "id" | "extractor">, url: string): st
     : ex.replace(/[^a-z0-9]/g, "").slice(0, 8) || "src";
   const rawId = String(j.id ?? "").replace(/[^A-Za-z0-9_-]/g, "");
   return `${prefix}_${rawId || stableHash(url)}`;
+}
+
+/** Best-effort file stat; null when the file is missing/unstattable. */
+async function statSafe(path: string): Promise<{ size: number; mtimeMs: number } | null> {
+  try {
+    const s = await stat(path);
+    return { size: s.size, mtimeMs: s.mtimeMs };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Delete every `<videoId>.*` file in outDir EXCEPT `keep` (best-effort). Called AFTER a
+ * download so a truncated leftover from a prior killed/failed client-rung — which `--no-part`
+ * writes directly to a final `<videoId>.<ext>` name (no `.part` suffix) — can neither be
+ * mis-selected on a future attempt nor accumulate on disk. Safe because download() only runs on
+ * a cache MISS (deduped per id), so no other download or playback references these siblings.
+ */
+async function cleanupSiblings(outDir: string, videoId: string, keep: string): Promise<void> {
+  let files: string[];
+  try {
+    files = await readdir(outDir);
+  } catch {
+    return;
+  }
+  await Promise.all(
+    files
+      .filter((f) => f !== keep && f.startsWith(`${videoId}.`))
+      .map((f) => unlink(join(outDir, f)).catch(() => {})),
+  );
 }
 
 /**
@@ -602,6 +633,11 @@ export class YouTubeService {
         // killed/timed-out attempt (SIGKILL on timeout skips yt-dlp's own cleanup) cannot
         // leave a partial artifact that the readdir-based file detection below could pick up.
         "--no-part",
+        // Always re-download over any leftover file with the SAME name from a prior killed
+        // attempt. Without this, yt-dlp sees the stale `<id>.<ext>` and reports "has already
+        // been downloaded" (or tries a misaligned resume), handing back a TRUNCATED file —
+        // which fails to play so the user "has to paste the link twice". Force a clean write.
+        "--force-overwrites",
         "--max-filesize",
         `${Math.max(1, Math.min(maxMb, 500))}M`,
         "--socket-timeout",
@@ -655,24 +691,38 @@ export class YouTubeService {
         });
 
     const files = await readdir(outDir);
-    // Never select a partial/intermediate artifact. A previous client's timed-out attempt is
-    // SIGKILLed (no yt-dlp cleanup), so a `<videoId>.<fmt>.part` (or `.ytdl`/`.temp`) can
-    // linger in outDir; readdir typically returns it first (creation order), and the bare
-    // `startsWith(videoId + ".")` predicate would match it — returning a truncated file to play
-    // or cache. Filter those out so only the finalized audio file is ever chosen.
-    const produced = files.find(
+    // Select the finalized audio file. Exclude yt-dlp's intermediate artifacts
+    // (`.part`/`.ytdl`/`.temp`), then among the remaining `<videoId>.*` matches pick the
+    // NEWEST one with a NON-ZERO size. `--no-part` writes directly to the final name, so a
+    // prior killed/failed client-rung can leave a truncated bare `<videoId>.<ext>`; a
+    // first-match pick could return that stale file (→ ffmpeg EOF → "paste it twice"). The
+    // newest-non-empty rule guarantees this attempt's freshly-finalized output wins.
+    const candidates = files.filter(
       (f) =>
         f.startsWith(`${videoId}.`) &&
         !f.endsWith(".part") &&
         !f.endsWith(".ytdl") &&
         !f.endsWith(".temp"),
     );
+    let produced: string | null = null;
+    let bestMtime = -Infinity;
+    for (const f of candidates) {
+      const st = await statSafe(join(outDir, f));
+      if (!st || st.size === 0) continue;
+      if (st.mtimeMs > bestMtime) {
+        bestMtime = st.mtimeMs;
+        produced = f;
+      }
+    }
     if (!produced) {
       throw new YtError(
         YtErrorKind.Unknown,
         `download completed but no file for ${videoId} was found`,
       );
     }
+    // Remove any other `<videoId>.*` siblings (a different-extension leftover from a failed
+    // rung) so they can't be mis-selected next time and don't accumulate on disk. Best-effort.
+    await cleanupSiblings(outDir, videoId, produced);
     return { path: join(outDir, produced), audio: parseAudioInfo(stdout) };
   }
 }

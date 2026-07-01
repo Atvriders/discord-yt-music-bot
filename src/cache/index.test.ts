@@ -50,6 +50,20 @@ describe("AudioCache", () => {
     expect(cache.has("ccccccccccc")).toBe(true);
   });
 
+  it("evict() removes the entry and deletes its file (idempotent)", async () => {
+    const cache = new AudioCache(dir, 1000);
+    await cache.init();
+    const p = await makeFile("aaaaaaaaaaa.webm", 200);
+    cache.register("aaaaaaaaaaa", p);
+    expect(cache.has("aaaaaaaaaaa")).toBe(true);
+    cache.evict("aaaaaaaaaaa");
+    expect(cache.has("aaaaaaaaaaa")).toBe(false);
+    expect(cache.get("aaaaaaaaaaa")).toBeNull();
+    expect(existsSync(p)).toBe(false);
+    expect(cache.totalBytes()).toBe(0);
+    cache.evict("aaaaaaaaaaa"); // no-op on an absent entry
+  });
+
   it("never evicts a pinned entry, even if it is LRU", async () => {
     const cache = new AudioCache(dir, 500);
     await cache.init();

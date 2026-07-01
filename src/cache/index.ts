@@ -102,6 +102,22 @@ export class AudioCache {
     if (e) e.pinned = false;
   }
 
+  /**
+   * Drop a cache entry and delete its file. Used when a track FAILS to play from its cached
+   * file (a truncated/corrupt download that slipped through), so the next request re-downloads
+   * a clean copy instead of serving the poisoned entry forever. No-op if not cached.
+   */
+  evict(videoId: string): void {
+    const e = this.entries.get(videoId);
+    if (!e) return;
+    this.entries.delete(videoId);
+    try {
+      rmSync(e.filePath, { force: true });
+    } catch {
+      // File already gone, ignore
+    }
+  }
+
   totalBytes(): number {
     let total = 0;
     for (const e of this.entries.values()) total += e.sizeBytes;

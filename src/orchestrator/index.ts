@@ -109,6 +109,8 @@ export interface ControllerDeps {
     register(id: string, path: string, audio?: AudioInfo | null): void;
     pin(id: string): void;
     unpin(id: string): void;
+    /** Drop a cache entry + its file so a track that failed to play is re-downloaded next time. */
+    evict(id: string): void;
   };
   cacheDir: string;
   // The factory receives the controller's current idle timeout so freshly-created
@@ -205,6 +207,18 @@ export class GuildController extends EventEmitter {
   private readonly pinned = new Set<string>();
   private readonly now: () => number;
 
+  // ── In-flight download dedup ──────────────────────────────────────────────────────
+  // One shared download promise per videoId so the play path and the prefetcher (or two
+  // panel users pasting the same link) never spawn two yt-dlp processes writing the same
+  // cache file at once — the root cause of the intermittent "had to paste the link twice".
+  // `downloadProgressSinks` lets a later play-path caller redirect the running download's
+  // percent into the live status even when the prefetcher started it. See downloadOnce().
+  private readonly inFlightDownloads = new Map<string, Promise<DownloadResult>>();
+  private readonly downloadProgressSinks = new Map<
+    string,
+    (cb: ((percent: number) => void) | undefined) => void
+  >();
+
   // ── Autoplay state ───────────────────────────────────────────────────────────────
   // `lastPlayedMeta` is the full meta of the last-played track; it seeds the next
   // autoplay pull — by videoId for the "radio" source and by `channel`/artist for the
@@ -289,7 +303,10 @@ export class GuildController extends EventEmitter {
     this.now = deps.now ?? (() => Date.now());
     this.queue = deps.queue ?? new GuildQueue();
     this.queue.on("prefetch", (meta: TrackMeta | null) => {
-      if (meta) void this.prefetch(meta);
+      // Honor prefetchDepth: 0 disables look-ahead prefetching entirely (the play path still
+      // downloads on demand). >0 pre-downloads the next track; downloadOnce dedups it against
+      // the play path when they collide on the same id.
+      if (meta && this.deps.prefetchDepth > 0) void this.prefetch(meta);
     });
     this.queue.on("changed", () => {
       void this.maybeStart();
@@ -590,7 +607,17 @@ export class GuildController extends EventEmitter {
     // the session mid-download (while playNextLocked yields on ensureDownloaded), causing
     // play() on a dead session and a leaked pin. Serialize via leaveInternal under the lock.
     session.on("idle", () => {
-      if (this.session === session) void this.lock.runExclusive(() => this.leaveInternal());
+      if (this.session !== session) return;
+      // Capture the play generation NOW. A paste can land between this idle firing and the lock
+      // being acquired and START a new track on the still-live session; if it did, playGeneration
+      // advanced (see playResource) and we must NOT tear the session down — it's actively in use,
+      // else the freshly-started track is silently killed and the user "has to paste it again". A
+      // lost connection can't start a track, so genAtIdle stays put and its teardown proceeds.
+      const genAtIdle = this.playGeneration;
+      void this.lock.runExclusive(() => {
+        if (this.session !== session || this.playGeneration !== genAtIdle) return;
+        this.leaveInternal();
+      });
     });
     this.session = session;
   }
@@ -901,6 +928,11 @@ export class GuildController extends EventEmitter {
         title: failed.meta.title,
         reason,
       });
+      // The cached file may be the reason it failed (a corrupt/truncated download). Evict it (and
+      // drop its stale pin) so a re-request re-downloads a clean copy instead of replaying the
+      // same broken file from cache forever — otherwise "playing it again" would keep failing.
+      this.pinned.delete(failed.meta.videoId);
+      this.deps.cache.evict(failed.meta.videoId);
     }
     void this.lock.runExclusive(async () => {
       // The session may have been torn down/replaced while this was queued behind the lock.
@@ -1122,11 +1154,60 @@ export class GuildController extends EventEmitter {
   }
 
   /**
-   * Ensure the track is on disk, returning its cached path. When `prepare` is supplied
-   * (the play-for-playback path) and the file is NOT already cached, the live preparing
-   * status advances to "downloading" and the download's onProgress streams into
-   * `preparing.percent` (throttled). A cache hit skips the download (and the downloading
-   * phase) entirely. The caller owns clearing/advancing the status afterwards.
+   * Download a track to the cache EXACTLY ONCE across concurrent callers. Both the PLAY path
+   * (ensureDownloaded) and the background PREFETCHER can request the same track at the same
+   * instant — most notably when a link is queued into an empty queue, where the queue's
+   * "prefetch" event fires for the very item maybeStart is about to play. Without deduping,
+   * the two spawn TWO yt-dlp processes writing the SAME `<videoId>.<ext>` file at once,
+   * truncating/corrupting it, so the first play fails and the user "has to paste the link
+   * twice". This shares one download per id (and its progress feed) and registers it in the
+   * cache on success; the in-flight entry is cleared when settled so a failure can be retried.
+   *
+   * `onProgress` streams the live download percent. A later caller that supplies one (the play
+   * path adopting a download the prefetcher started first) redirects the running download's
+   * progress into its own status via the stored sink-setter.
+   */
+  private downloadOnce(
+    meta: TrackMeta,
+    onProgress?: (percent: number) => void,
+  ): Promise<DownloadResult> {
+    const existing = this.inFlightDownloads.get(meta.videoId);
+    if (existing) {
+      if (onProgress) this.downloadProgressSinks.get(meta.videoId)?.(onProgress);
+      return existing;
+    }
+    let sink = onProgress;
+    this.downloadProgressSinks.set(meta.videoId, (cb) => {
+      sink = cb;
+    });
+    const promise = this.deps.downloads
+      .run(() =>
+        this.deps.youtube.download(meta.videoId, this.deps.cacheDir, {
+          durationSec: meta.durationSec,
+          // Non-YouTube tracks (SoundCloud) carry the real URL here; YouTube leaves it
+          // undefined and download() reconstructs the watch URL from videoId.
+          sourceUrl: meta.sourceUrl,
+          onProgress: (p) => sink?.(p.percent),
+        }),
+      )
+      .then((res) => {
+        this.deps.cache.register(meta.videoId, res.path, res.audio);
+        return res;
+      })
+      .finally(() => {
+        this.inFlightDownloads.delete(meta.videoId);
+        this.downloadProgressSinks.delete(meta.videoId);
+      });
+    this.inFlightDownloads.set(meta.videoId, promise);
+    return promise;
+  }
+
+  /**
+   * Ensure the track is on disk, returning its cached path. When `withStatus` is set (the
+   * play-for-playback path) and the file is NOT already cached, the live preparing status
+   * advances to "downloading" and the download percent streams into `preparing.percent`
+   * (throttled). A cache hit skips the download entirely. A download already in flight for the
+   * same id (e.g. started by the prefetcher) is SHARED, never duplicated.
    */
   private async ensureDownloaded(meta: TrackMeta, withStatus: boolean): Promise<string> {
     const cached = this.deps.cache.get(meta.videoId);
@@ -1139,29 +1220,18 @@ export class GuildController extends EventEmitter {
         percent: 0,
       });
     }
-    const { path, audio } = await this.deps.downloads.run(() =>
-      this.deps.youtube.download(meta.videoId, this.deps.cacheDir, {
-        durationSec: meta.durationSec,
-        // Non-YouTube tracks (SoundCloud) carry the real URL here; YouTube leaves it undefined
-        // and download() reconstructs the watch URL from videoId.
-        sourceUrl: meta.sourceUrl,
-        onProgress: withStatus ? (p) => this.updatePreparingPercent(p.percent) : undefined,
-      }),
+    const { path } = await this.downloadOnce(
+      meta,
+      withStatus ? (percent) => this.updatePreparingPercent(percent) : undefined,
     );
-    this.deps.cache.register(meta.videoId, path, audio);
     return path;
   }
 
   private async prefetch(meta: TrackMeta): Promise<void> {
     if (this.deps.cache.has(meta.videoId)) return;
     try {
-      const { path, audio } = await this.deps.downloads.run(() =>
-        this.deps.youtube.download(meta.videoId, this.deps.cacheDir, {
-          durationSec: meta.durationSec,
-          sourceUrl: meta.sourceUrl,
-        }),
-      );
-      this.deps.cache.register(meta.videoId, path, audio);
+      // Shares the play path's in-flight download when they collide on the same id.
+      await this.downloadOnce(meta);
       // prefetch runs outside the lock and yields at the download await; a leaveInternal()
       // may have torn the session down (clearing `pinned`) while we waited. If so, don't
       // write into the now-orphaned pinned Set — drop the pin so the entry stays
