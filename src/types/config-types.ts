@@ -6,7 +6,10 @@ export interface MediaConfig {
   maxTrackDurationSec: number | null;
   normalizeLoudness: boolean;
   ytProxy: string | null;
+  /** Path to a mounted cookies.txt (yt-dlp --cookies). Takes precedence over ytCookiesText. */
   ytCookiesFile: string | null;
+  /** Inline Netscape cookies.txt CONTENT; materialized to a file at startup (see materializeCookies). */
+  ytCookiesText: string | null;
   poTokenProviderUrl: string | null;
   sponsorblockRemove: string | null;
   playerClients: string;

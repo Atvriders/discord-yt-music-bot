@@ -76,11 +76,22 @@ services:
 
       # YouTube configuration
       YT_PROXY: "" # optional residential/SOCKS proxy if your IP gets blocked by YouTube
-      # Optional path to a mounted cookies.txt. Most age-restricted videos already play without
-      # this (the extraction ladder falls through to the tv_embedded/mediaconnect bypass clients).
-      # Provide cookies exported from an 18+ account ONLY for age-restricted videos whose uploader
-      # disabled embedding; also helps on flagged/datacenter IPs.
-      YT_COOKIES: ""
+      # ── Age-restricted (18+) cookies ──────────────────────────────────────────────────────
+      # Most age-restricted videos already play WITHOUT cookies (the extraction ladder falls
+      # through to the tv_embedded/mediaconnect bypass clients). You only need cookies from a
+      # logged-in 18+ account for age-restricted videos whose uploader DISABLED embedding (also
+      # helps on flagged/datacenter IPs). Export cookies.txt from a browser (extension: "Get
+      # cookies.txt LOCALLY") in a private window on an 18+ account, then EITHER:
+      #  (a) mount the file and give its path here:
+      YT_COOKIES: "" # e.g. "/data/cookies.txt" — and add  - ./cookies.txt:/data/cookies.txt:ro  under volumes:
+      #  (b) OR paste the cookies.txt CONTENTS inline (no file to mount) as a YAML block. Keep the
+      #      2-space indent on every line; the fields inside each line are TAB-separated (as
+      #      exported). Leave it commented/unset to disable.
+      # YT_COOKIES_TEXT: |
+      #   # Netscape HTTP Cookie File
+      #   .youtube.com	TRUE	/	TRUE	1799999999	SID	<paste-value>
+      #   .youtube.com	TRUE	/	TRUE	1799999999	HSID	<paste-value>
+      #   # …paste every line from your exported cookies.txt here…
       # Zero-PO-token clients — reliable on most hosts. Only use "web,mweb" if you also run the
       # bgutil PO-token sidecar (`--profile pot`) and set PO_TOKEN_PROVIDER_URL below; otherwise
       # those clients silently fail to extract audio. (The bgutil yt-dlp plugin ships in the image.)

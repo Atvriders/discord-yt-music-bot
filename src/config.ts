@@ -1,3 +1,5 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { MediaConfig, BotConfig, BotInstance, WebConfig } from "./types/config-types.js";
 import { parseAdminIds } from "./auth/authz.js";
 import { LEVELS, isValidLevel } from "./util/logger.js";
@@ -48,11 +50,36 @@ export function loadMediaConfig(env: Env = process.env): MediaConfig {
     normalizeLoudness: strEnv(env, "NORMALIZE_LOUDNESS") === "true",
     ytProxy: strEnv(env, "YT_PROXY"),
     ytCookiesFile: strEnv(env, "YT_COOKIES"),
+    // Inline cookies.txt CONTENT (pasted straight into compose) — materialized to a file at
+    // startup (see materializeCookies) since yt-dlp's --cookies only accepts a path.
+    ytCookiesText: strEnv(env, "YT_COOKIES_TEXT"),
     poTokenProviderUrl: strEnv(env, "PO_TOKEN_PROVIDER_URL"),
     sponsorblockRemove: strEnv(env, "SPONSORBLOCK_REMOVE"),
     playerClients: strEnv(env, "YT_PLAYER_CLIENTS") ?? "android_vr,web_embedded,tv",
     ytdlpTimeoutMs: intEnv(env, "YTDLP_TIMEOUT_MS", 60_000, { min: 1 }),
   };
+}
+
+/**
+ * Resolve the effective yt-dlp cookies FILE path. An explicit YT_COOKIES path always wins.
+ * Otherwise, if YT_COOKIES_TEXT (inline Netscape cookies.txt content — e.g. pasted straight into
+ * docker-compose) is set, write it to `<cacheDir>/yt-cookies.txt` and return that path, since
+ * yt-dlp's --cookies only accepts a path, not the cookie text. A Netscape header is prepended when
+ * the pasted text lacks it (so a copy-paste that dropped the "# Netscape HTTP Cookie File" line
+ * still works), and the file is written 0600 since these are auth cookies. Returns null when
+ * neither is configured. Called once at startup before the YouTubeService is used.
+ */
+export async function materializeCookies(media: MediaConfig): Promise<string | null> {
+  if (media.ytCookiesFile) return media.ytCookiesFile;
+  const text = media.ytCookiesText?.trim();
+  if (!text) return null;
+  const body = /^#\s*(netscape|http\s+cookie)/i.test(text)
+    ? text
+    : `# Netscape HTTP Cookie File\n${text}`;
+  await mkdir(media.cacheDir, { recursive: true });
+  const path = join(media.cacheDir, "yt-cookies.txt");
+  await writeFile(path, body.endsWith("\n") ? body : `${body}\n`, { mode: 0o600 });
+  return path;
 }
 
 /**

@@ -1,4 +1,10 @@
-import { loadMediaConfig, loadBotConfig, loadWebConfig, type BotInstance } from "./config.js";
+import {
+  loadMediaConfig,
+  loadBotConfig,
+  loadWebConfig,
+  materializeCookies,
+  type BotInstance,
+} from "./config.js";
 import { YouTubeService } from "./youtube/index.js";
 import { AudioCache } from "./cache/index.js";
 import { Semaphore } from "./util/semaphore.js";
@@ -36,6 +42,11 @@ async function main(): Promise<void> {
   // nullable so the shutdown tasks registered below — BEFORE login — can close it if it
   // already exists, and no-op if a signal arrives mid-startup.
   let app: Awaited<ReturnType<typeof buildApp>> | null = null;
+
+  // Resolve the effective yt-dlp cookies file BEFORE the extractor uses it: an explicit
+  // YT_COOKIES path wins; otherwise inline YT_COOKIES_TEXT (pasted cookies) is written to a file.
+  media.ytCookiesFile = await materializeCookies(media);
+  if (media.ytCookiesFile) log.info("yt-dlp cookies enabled (age-restricted / flagged-IP support)");
 
   // Shared across every bot: extraction, the download cache + concurrency limiter, saved
   // playlists (a playlist belongs to a guild, not a bot), and the live-updates broadcaster.

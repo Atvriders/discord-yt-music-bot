@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { loadMediaConfig } from "./config.js";
+import { mkdtemp, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { loadMediaConfig, materializeCookies } from "./config.js";
 
 describe("loadMediaConfig", () => {
   it("applies defaults when env is empty", () => {
@@ -15,8 +18,15 @@ describe("loadMediaConfig", () => {
     expect(c.ytdlpTimeoutMs).toBe(60000);
     expect(c.ytProxy).toBeNull();
     expect(c.ytCookiesFile).toBeNull();
+    expect(c.ytCookiesText).toBeNull();
     expect(c.poTokenProviderUrl).toBeNull();
     expect(c.normalizeLoudness).toBe(false);
+  });
+
+  it("reads YT_COOKIES (path) and YT_COOKIES_TEXT (inline content)", () => {
+    const c = loadMediaConfig({ YT_COOKIES: "/data/cookies.txt", YT_COOKIES_TEXT: "raw\ncookies" });
+    expect(c.ytCookiesFile).toBe("/data/cookies.txt");
+    expect(c.ytCookiesText).toBe("raw\ncookies");
   });
 
   it("parses overrides from env", () => {
@@ -67,5 +77,55 @@ describe("loadMediaConfig", () => {
     expect(() => loadMediaConfig({ MAX_TRACK_DURATION_SEC: "-1" })).toThrow(
       /MAX_TRACK_DURATION_SEC/,
     );
+  });
+});
+
+describe("materializeCookies", () => {
+  const base = {
+    cacheDir: "/data/cache",
+    cacheMaxBytes: 1,
+    historyMaxItems: 1,
+    searchResultCount: 1,
+    maxTrackDurationSec: null,
+    normalizeLoudness: false,
+    ytProxy: null,
+    ytCookiesFile: null as string | null,
+    ytCookiesText: null as string | null,
+    poTokenProviderUrl: null,
+    sponsorblockRemove: null,
+    playerClients: "tv",
+    ytdlpTimeoutMs: 1,
+  };
+
+  it("returns null when neither a path nor inline text is set", async () => {
+    expect(await materializeCookies({ ...base })).toBeNull();
+  });
+
+  it("an explicit YT_COOKIES path wins over inline text (no file written)", async () => {
+    const path = await materializeCookies({
+      ...base,
+      ytCookiesFile: "/data/cookies.txt",
+      ytCookiesText: "ignored",
+    });
+    expect(path).toBe("/data/cookies.txt");
+  });
+
+  it("writes inline text to <cacheDir>/yt-cookies.txt and returns that path", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ck-"));
+    const text = ".youtube.com\tTRUE\t/\tTRUE\t1799999999\tSID\tabc";
+    const path = await materializeCookies({ ...base, cacheDir: dir, ytCookiesText: text });
+    expect(path).toBe(join(dir, "yt-cookies.txt"));
+    const written = await readFile(path!, "utf8");
+    // Prepends the Netscape header when the pasted text lacks it, and keeps the cookie line.
+    expect(written.startsWith("# Netscape HTTP Cookie File\n")).toBe(true);
+    expect(written).toContain("\tSID\tabc");
+  });
+
+  it("does not double-prepend the header when the text already has it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ck-"));
+    const text = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t1\tSID\tx";
+    const path = await materializeCookies({ ...base, cacheDir: dir, ytCookiesText: text });
+    const written = await readFile(path!, "utf8");
+    expect(written.match(/# Netscape HTTP Cookie File/g)).toHaveLength(1);
   });
 });
