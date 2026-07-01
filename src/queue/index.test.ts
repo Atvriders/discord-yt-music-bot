@@ -36,7 +36,7 @@ describe("GuildQueue", () => {
     expect(q.snapshot().upcoming.map((i) => i.id)).toEqual(["id1"]);
     expect(q.current).toBeNull();
     expect(changed).toHaveBeenCalledTimes(1);
-    expect(prefetch).toHaveBeenLastCalledWith("aaaaaaaaaaa");
+    expect(prefetch).toHaveBeenLastCalledWith(expect.objectContaining({ videoId: "aaaaaaaaaaa" }));
   });
 
   it("advance() promotes the head and moves the old current to history", async () => {

@@ -35,7 +35,7 @@ function ctx(overrides: Partial<Parameters<typeof handleCommand>[1]> = {}) {
       ...patch,
     })),
   };
-  const youtube = { resolve: vi.fn(), search: vi.fn() };
+  const youtube = { resolve: vi.fn(), search: vi.fn(), resolveUrl: vi.fn() };
   const { controller: _c, youtube: _y, ...rest } = overrides;
   return {
     requester,
@@ -71,6 +71,63 @@ describe("handleCommand — play", () => {
     const res = await handleCommand({ kind: "play", input: "https://vimeo.com/1" }, c as never);
     expect(c.youtube.resolve).not.toHaveBeenCalled();
     expect(res.type).toBe("message");
+  });
+
+  it("queues a SoundCloud link via resolveUrl and labels the source", async () => {
+    const c = ctx();
+    c.youtube.resolveUrl.mockResolvedValue(meta("sc_9", "SC Jam"));
+    const res = await handleCommand(
+      { kind: "play", input: "https://soundcloud.com/artist/sc-jam" },
+      c as never,
+    );
+    expect(c.youtube.resolveUrl).toHaveBeenCalledWith("https://soundcloud.com/artist/sc-jam");
+    expect(c.youtube.resolve).not.toHaveBeenCalled();
+    expect(c.controller.enqueue).toHaveBeenCalled();
+    expect(res).toEqual({
+      type: "message",
+      content: expect.stringMatching(/SC Jam.*SoundCloud/s),
+    });
+  });
+
+  it("resolves a Spotify link to a YouTube match and plays it", async () => {
+    const spotify = vi.fn(async () => "Feel Good Inc Gorillaz");
+    const c = ctx({ spotify });
+    c.youtube.search.mockResolvedValue([meta("aaaaaaaaaaa", "Feel Good Inc")]);
+    const res = await handleCommand(
+      { kind: "play", input: "https://open.spotify.com/track/abc" },
+      c as never,
+    );
+    expect(spotify).toHaveBeenCalledWith("https://open.spotify.com/track/abc");
+    expect(c.youtube.search).toHaveBeenCalledWith("Feel Good Inc Gorillaz", 1);
+    expect(c.controller.enqueue).toHaveBeenCalled();
+    expect(res).toEqual({
+      type: "message",
+      content: expect.stringMatching(/Feel Good Inc.*Spotify/s),
+    });
+  });
+
+  it("reports when a Spotify track can't be resolved", async () => {
+    const spotify = vi.fn(async () => null);
+    const c = ctx({ spotify });
+    const res = await handleCommand(
+      { kind: "play", input: "https://open.spotify.com/track/abc" },
+      c as never,
+    );
+    expect(c.youtube.search).not.toHaveBeenCalled();
+    expect(c.controller.enqueue).not.toHaveBeenCalled();
+    expect(res.type).toBe("message");
+  });
+
+  it("reports when a Spotify track has no YouTube match", async () => {
+    const spotify = vi.fn(async () => "obscure track nobody uploaded");
+    const c = ctx({ spotify });
+    c.youtube.search.mockResolvedValue([]);
+    const res = await handleCommand(
+      { kind: "play", input: "https://open.spotify.com/track/abc" },
+      c as never,
+    );
+    expect(c.controller.enqueue).not.toHaveBeenCalled();
+    expect(res).toEqual({ type: "message", content: expect.stringMatching(/no youtube match/i) });
   });
 
   it("surfaces a friendly message on a YtError", async () => {

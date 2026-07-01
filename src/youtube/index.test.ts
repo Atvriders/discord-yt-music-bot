@@ -518,6 +518,34 @@ describe("YouTubeService.download", () => {
     expect(args[sbIdx + 1]).toBe("sponsor,music_offtopic");
   });
 
+  it("uses the sourceUrl verbatim, outputs by the videoId key, and does not loop the client ladder", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yt-"));
+    // The on-disk file is named by OUR synthetic key (sc_123), not a youtube id.
+    await writeFile(join(dir, "sc_123.opus"), "fakeaudio");
+    runMock.mockResolvedValue(ok("AUDIOFMT::opus|128|130|44100\n"));
+    const src = "https://soundcloud.com/artist/some-track";
+    const res = await new YouTubeService(cfg).download("sc_123", dir, { sourceUrl: src });
+    expect(res.path).toBe(join(dir, "sc_123.opus"));
+    const args = runMock.mock.calls[0]![0] as string[];
+    // The media URL is the SoundCloud URL, not a reconstructed youtube watch URL.
+    expect(args[args.length - 1]).toBe(src);
+    // Output template stems from the videoId key so readdir finds the SoundCloud file.
+    expect(args[args.indexOf("-o") + 1]).toBe(join(dir, "sc_123.%(ext)s"));
+    // No YouTube player-client extractor args for a non-YouTube source…
+    expect(args).not.toContain("--extractor-args");
+    // …and a single attempt (the ladder is YouTube-only).
+    expect(runMock.mock.calls.length).toBe(1);
+  });
+
+  it("does a single attempt for a sourceUrl download even when it fails (no ladder retries)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yt-"));
+    runMock.mockResolvedValue({ stdout: "", stderr: "boom", code: 1 });
+    await expect(
+      new YouTubeService(cfg).download("sc_9", dir, { sourceUrl: "https://soundcloud.com/a/b" }),
+    ).rejects.toBeInstanceOf(Error);
+    expect(runMock.mock.calls.length).toBe(1);
+  });
+
   it("throws a classified YtError(Unknown) when yt-dlp succeeds but no file is produced", async () => {
     const dir = await mkdtemp(join(tmpdir(), "yt-"));
     runMock.mockResolvedValue(ok(""));
@@ -756,5 +784,81 @@ describe("YouTubeService.download progress + timeout", () => {
     const res = await new YouTubeService(cfg).download("dQw4w9WgXcQ", dir);
     expect(res.path).toBe(join(dir, "dQw4w9WgXcQ.webm"));
     expect(runMock.mock.calls[0]![1] as number).toBe(cfg.ytdlpTimeoutMs);
+  });
+});
+
+describe("YouTubeService.resolveUrl (SoundCloud)", () => {
+  beforeEach(() => runMock.mockReset());
+
+  const scJson = (over: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      id: "123456",
+      title: "SC Song",
+      uploader: "DJ Someone",
+      duration: 180,
+      extractor: "soundcloud",
+      webpage_url: "https://soundcloud.com/dj-someone/sc-song",
+      ...over,
+    });
+
+  it("maps a SoundCloud probe to TrackMeta with a synthetic key + sourceUrl", async () => {
+    runMock.mockResolvedValue(ok(scJson()));
+    const meta = await new YouTubeService(cfg).resolveUrl(
+      "https://soundcloud.com/dj-someone/sc-song?utm_source=x",
+    );
+    expect(meta).toMatchObject({
+      videoId: "sc_123456",
+      title: "SC Song",
+      channel: "DJ Someone",
+      durationSec: 180,
+      sourceUrl: "https://soundcloud.com/dj-someone/sc-song",
+    });
+    // Single probe, no YouTube player-client extractor args, URL passed verbatim.
+    const args = runMock.mock.calls[0]![0] as string[];
+    expect(args).toContain("-J");
+    expect(args).not.toContain("--extractor-args");
+    expect(args[args.length - 1]).toBe("https://soundcloud.com/dj-someone/sc-song?utm_source=x");
+  });
+
+  it("falls back to the input URL when webpage_url is absent", async () => {
+    runMock.mockResolvedValue(ok(scJson({ webpage_url: undefined })));
+    const meta = await new YouTubeService(cfg).resolveUrl("https://on.soundcloud.com/aBcD");
+    expect(meta.sourceUrl).toBe("https://on.soundcloud.com/aBcD");
+  });
+
+  it("rejects a set/playlist container", async () => {
+    runMock.mockResolvedValue(ok(JSON.stringify({ _type: "playlist", entries: [{ id: "1" }] })));
+    await expect(
+      new YouTubeService(cfg).resolveUrl("https://soundcloud.com/dj/sets/mix"),
+    ).rejects.toMatchObject({ kind: YtErrorKind.Unavailable });
+  });
+
+  it("does NOT reject a single track that carries a stray entries array", async () => {
+    // Some yt-dlp single-track info dicts attach an `entries` array; gating on it (rather than
+    // on `_type`) would false-reject a valid track. Only a real container `_type` rejects.
+    runMock.mockResolvedValue(ok(scJson({ entries: [{ id: "related" }] })));
+    const meta = await new YouTubeService(cfg).resolveUrl("https://soundcloud.com/dj/track");
+    expect(meta.videoId).toBe("sc_123456");
+  });
+
+  it("rejects a live stream", async () => {
+    runMock.mockResolvedValue(ok(scJson({ live_status: "is_live" })));
+    await expect(
+      new YouTubeService(cfg).resolveUrl("https://soundcloud.com/dj/live"),
+    ).rejects.toMatchObject({ kind: YtErrorKind.Live });
+  });
+
+  it("rejects a track over the duration ceiling", async () => {
+    runMock.mockResolvedValue(ok(scJson({ duration: 4000 }))); // cfg ceiling is 3600
+    await expect(
+      new YouTubeService(cfg).resolveUrl("https://soundcloud.com/dj/epic"),
+    ).rejects.toMatchObject({ kind: YtErrorKind.TooLong });
+  });
+
+  it("throws YtError(Unknown) on non-JSON output", async () => {
+    runMock.mockResolvedValue(ok("not json"));
+    await expect(
+      new YouTubeService(cfg).resolveUrl("https://soundcloud.com/dj/x"),
+    ).rejects.toMatchObject({ kind: YtErrorKind.Unknown });
   });
 });

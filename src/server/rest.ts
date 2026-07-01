@@ -4,6 +4,7 @@ import { canControl } from "../auth/authz.js";
 import { avatarUrl, type DiscordUser } from "../auth/oauth.js";
 import { YtError } from "../youtube/errors.js";
 import { fetchLyrics, type LyricsResult } from "../youtube/lyrics.js";
+import { resolveSpotifyQuery } from "../youtube/spotify.js";
 import type { Requester, TrackMeta } from "../types/index.js";
 import type { GuildSettings } from "../orchestrator/settings.js";
 import type { ControllerSnapshot } from "../orchestrator/index.js";
@@ -40,6 +41,8 @@ export interface RestDeps {
   youtube: {
     resolve(id: string): Promise<TrackMeta>;
     search(q: string, n: number): Promise<TrackMeta[]>;
+    /** Resolve a direct non-YouTube media URL (SoundCloud) to a playable track. */
+    resolveUrl(url: string): Promise<TrackMeta>;
   };
   client: Parameters<typeof canControl>[0];
   adminIds: ReadonlySet<string>;
@@ -49,6 +52,11 @@ export interface RestDeps {
    * `fetchLyrics`). Injectable so tests can stub it without hitting the network.
    */
   lyrics?: (meta: TrackMeta) => Promise<LyricsResult>;
+  /**
+   * Resolve a Spotify track URL to a "<track> <artist>" YouTube search string (best-effort;
+   * null on failure). Defaults to the real spotify.ts resolver; injectable for tests.
+   */
+  spotify?: (url: string) => Promise<string | null>;
 }
 
 function sessionUser(req: FastifyRequest): (DiscordUser & { id: string }) | null {
@@ -146,6 +154,39 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
           throw err;
         }
       }
+      // Spotify: resolve the track to a search string, find the closest YouTube video, play it.
+      if (parsed.kind === "spotify") {
+        const resolveSpotify = deps.spotify ?? resolveSpotifyQuery;
+        let query: string | null;
+        try {
+          query = await resolveSpotify(parsed.url);
+        } catch {
+          query = null;
+        }
+        if (!query) return reply.code(400).send({ error: "spotify_unresolved" });
+        let results: TrackMeta[];
+        try {
+          results = await deps.youtube.search(query, 1);
+        } catch (err) {
+          if (err instanceof YtError) return reply.code(400).send({ error: err.kind });
+          throw err;
+        }
+        const match = results[0];
+        if (!match) return reply.code(400).send({ error: "spotify_no_match" });
+        return enqueueMeta(req, reply, match, "spotify");
+      }
+      // SoundCloud (direct URL): resolve the exact track, then enqueue like a video.
+      if (parsed.kind === "url") {
+        let meta: TrackMeta;
+        try {
+          meta = await deps.youtube.resolveUrl(parsed.url);
+        } catch (err) {
+          return reply
+            .code(400)
+            .send({ error: err instanceof YtError ? err.kind : "resolve_failed" });
+        }
+        return enqueueMeta(req, reply, meta, parsed.source);
+      }
       return enqueueVideo(req, reply, parsed.videoId);
     },
   );
@@ -210,30 +251,29 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
     return { ok: true };
   }
 
-  async function enqueueVideo(req: FastifyRequest, reply: FastifyReply, videoId: string) {
-    const params = req.params as { id: string };
-    const body = (req.body ?? {}) as { voiceChannelId?: string };
-    const user = sessionUser(req);
-    if (!user) return reply.code(401).send({ error: "unauthenticated" });
-    const controller = deps.hub.get(params.id);
-    // Validate/connect the voice target BEFORE the (multi-second) YouTube resolve so a doomed
-    // request (no_voice_channel / voice_connect_failed) returns immediately instead of after a
-    // wasted round-trip — and so this matches the playlist-load path which checks voice first.
-    const voice = await ensureVoiceTarget(req, controller, body.voiceChannelId);
-    if ("error" in voice) return reply.code(400).send({ error: voice.error });
-    const moveSuppressed = voice.moveSuppressed;
-    let meta: TrackMeta;
-    try {
-      meta = await deps.youtube.resolve(videoId);
-    } catch (err) {
-      return reply.code(400).send({ error: err instanceof YtError ? err.kind : "resolve_failed" });
-    }
-    const requester: Requester = {
+  /** Build the web-attributed Requester from the authenticated session user. */
+  function webRequester(user: DiscordUser & { id: string }): Requester {
+    return {
       discordUserId: user.id,
       displayName: user.global_name ?? user.username,
       avatarUrl: avatarUrl(user),
       source: "web",
     };
+  }
+
+  /**
+   * Enqueue an already-resolved track and build the /play response. Shared tail of the
+   * video / SoundCloud / Spotify paths. `source` (e.g. "soundcloud" | "spotify"), when set,
+   * is echoed on `queued.source` so the panel can label how the track was resolved.
+   */
+  async function finishEnqueue(
+    reply: FastifyReply,
+    controller: Controller,
+    meta: TrackMeta,
+    requester: Requester,
+    moveSuppressed: { requested: string; actual: string | null } | undefined,
+    source?: string,
+  ) {
     let item: { id: string };
     try {
       item = await controller.enqueue(meta, requester);
@@ -249,9 +289,49 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
       return reply.code(500).send({ error: "enqueue_failed" });
     }
     return {
-      queued: { id: item.id, title: meta.title },
+      queued: { id: item.id, title: meta.title, ...(source ? { source } : {}) },
       ...(moveSuppressed ? { moveSuppressed } : {}),
     };
+  }
+
+  async function enqueueVideo(req: FastifyRequest, reply: FastifyReply, videoId: string) {
+    const params = req.params as { id: string };
+    const body = (req.body ?? {}) as { voiceChannelId?: string };
+    const user = sessionUser(req);
+    if (!user) return reply.code(401).send({ error: "unauthenticated" });
+    const controller = deps.hub.get(params.id);
+    // Validate/connect the voice target BEFORE the (multi-second) YouTube resolve so a doomed
+    // request (no_voice_channel / voice_connect_failed) returns immediately instead of after a
+    // wasted round-trip — and so this matches the playlist-load path which checks voice first.
+    const voice = await ensureVoiceTarget(req, controller, body.voiceChannelId);
+    if ("error" in voice) return reply.code(400).send({ error: voice.error });
+    let meta: TrackMeta;
+    try {
+      meta = await deps.youtube.resolve(videoId);
+    } catch (err) {
+      return reply.code(400).send({ error: err instanceof YtError ? err.kind : "resolve_failed" });
+    }
+    return finishEnqueue(reply, controller, meta, webRequester(user), voice.moveSuppressed);
+  }
+
+  /**
+   * Enqueue an ALREADY-resolved track (SoundCloud direct / Spotify→YouTube match). Mirrors
+   * enqueueVideo minus the YouTube resolve, still checking the voice target first.
+   */
+  async function enqueueMeta(
+    req: FastifyRequest,
+    reply: FastifyReply,
+    meta: TrackMeta,
+    source?: string,
+  ) {
+    const params = req.params as { id: string };
+    const body = (req.body ?? {}) as { voiceChannelId?: string };
+    const user = sessionUser(req);
+    if (!user) return reply.code(401).send({ error: "unauthenticated" });
+    const controller = deps.hub.get(params.id);
+    const voice = await ensureVoiceTarget(req, controller, body.voiceChannelId);
+    if ("error" in voice) return reply.code(400).send({ error: voice.error });
+    return finishEnqueue(reply, controller, meta, webRequester(user), voice.moveSuppressed, source);
   }
 
   for (const action of ["skip", "pause", "resume", "stop"] as const) {

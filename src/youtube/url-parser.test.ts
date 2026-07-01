@@ -88,7 +88,50 @@ describe("parseInput — queries", () => {
   );
 
   it("still rejects an explicit-scheme non-YouTube URL", () => {
-    // A real http(s):// URL pointing at a non-YouTube host must keep rejecting.
+    // A real http(s):// URL pointing at a non-recognized host must keep rejecting.
     expect(parseInput("https://vimeo.com/12345").kind).toBe("reject");
+  });
+});
+
+describe("parseInput — SoundCloud", () => {
+  it.each([
+    "https://soundcloud.com/artist/track-name",
+    "https://www.soundcloud.com/artist/track-name",
+    "https://m.soundcloud.com/artist/track-name",
+    "https://on.soundcloud.com/AbCdEf",
+    "soundcloud.com/artist/track-name", // scheme-less recognized host
+  ])("routes %s to a soundcloud url", (input) => {
+    const p = parseInput(input);
+    expect(p.kind).toBe("url");
+    if (p.kind === "url") expect(p.source).toBe("soundcloud");
+  });
+
+  it("rejects a SoundCloud set/playlist link", () => {
+    const p = parseInput("https://soundcloud.com/artist/sets/my-playlist");
+    expect(p.kind).toBe("reject");
+    if (p.kind === "reject") expect(p.reason).toMatch(/set/i);
+  });
+});
+
+describe("parseInput — Spotify", () => {
+  const ID = "4cOdK2wGLETKBW3PvgPWqT";
+  it.each([
+    `https://open.spotify.com/track/${ID}`,
+    `https://open.spotify.com/track/${ID}?si=abc123`,
+    `https://open.spotify.com/intl-de/track/${ID}`,
+    `spotify:track:${ID}`,
+    `open.spotify.com/track/${ID}`, // scheme-less recognized host
+  ])("normalizes %s to a canonical spotify track url", (input) => {
+    expect(parseInput(input)).toEqual({
+      kind: "spotify",
+      url: `https://open.spotify.com/track/${ID}`,
+    });
+  });
+
+  it("rejects a Spotify album/playlist/artist link (tracks only)", () => {
+    for (const kind of ["album", "playlist", "artist"]) {
+      const p = parseInput(`https://open.spotify.com/${kind}/${ID}`);
+      expect(p.kind).toBe("reject");
+    }
   });
 });

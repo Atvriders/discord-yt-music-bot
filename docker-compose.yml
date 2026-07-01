@@ -58,8 +58,11 @@ services:
       # 14400 = 4h so long content (e.g. concerts) plays out-of-box; "" / 0 = no limit.
       MAX_TRACK_DURATION_SEC: "14400"
 
-      # Audio processing
-      SPONSORBLOCK_REMOVE: "sponsor,intro,outro,selfpromo"
+      # Audio processing — SponsorBlock trims non-song segments out before playback.
+      #   music_offtopic = the NON-MUSIC parts of a music video (spoken intros/outros, skits);
+      #   intro/outro = title cards & endcards; sponsor/selfpromo = ad reads.
+      # Comma-separated; "" disables. Categories: https://wiki.sponsor.ajay.app/w/Segment_Categories
+      SPONSORBLOCK_REMOVE: "sponsor,selfpromo,intro,outro,music_offtopic"
       NORMALIZE_LOUDNESS: "false"
 
       # YouTube configuration

@@ -99,7 +99,7 @@ describe("GuildController", () => {
     await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
     // allow the changed/prefetch microtasks + playNext to settle
     await new Promise((r) => setTimeout(r, 0));
-    expect(deps.youtube.download).toHaveBeenCalledWith("aaaaaaaaaaa", "/cache");
+    expect(deps.youtube.download).toHaveBeenCalledWith("aaaaaaaaaaa", "/cache", expect.any(Object));
     expect(session.play).toHaveBeenCalledTimes(1);
     expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
   });
@@ -1204,9 +1204,8 @@ describe("GuildController settings", () => {
 
     it("idles when related() returns only already-seen ids (no new candidate to play)", async () => {
       // related() always returns ONLY ids that have already been played. After the seed
-      // track, every radio pull yields nothing new, so the seen-id de-dup keeps autoplay
-      // from ever queueing a track and the queue idles — even though the proactive
-      // low-water path also consults related() while upcoming is empty.
+      // track, the radio pull yields nothing new, so the seen-id de-dup keeps autoplay from
+      // queueing a track and the queue idles.
       const played = new Set<string>();
       const { ctrl, session, related } = makeController({
         settings: { autoplay: true },
@@ -1220,16 +1219,14 @@ describe("GuildController settings", () => {
       session.emit("trackEnd");
       await new Promise((r) => setTimeout(r, 0));
 
-      // Nothing new to play -> idle. In the all-seen path the AUTOPLAY_MAX_CHAIN cap never
-      // fires (autoplayChain is only incremented on a HIT, after the `if (!next) return null`
-      // early-out), so ONLY the seen-id de-dup bounds the calls. related() is consulted by both
-      // the reactive trackEnd path and the proactive low-water top-ups — a small constant, not
-      // the chain cap. Pin a tight bound so a regression that loops related() up to the cap
-      // (which would pass a ≤cap+1 bound) is caught.
+      // Nothing new to play -> idle. With autoplay REACTIVE-only, related() is consulted
+      // EXACTLY ONCE — on the single trackEnd that empties the queue; the seen-id de-dup then
+      // yields no new candidate, so it idles. (autoplayChain is only bumped on a HIT, after the
+      // `if (!next) return null` early-out, so the MAX_CHAIN cap never enters here.) Pin the
+      // exact count so a regression that loops related() up to the cap is caught.
       expect(ctrl.snapshot().current).toBeNull();
       expect(session.startIdleTimer).toHaveBeenCalled();
-      expect(related.mock.calls.length).toBeGreaterThanOrEqual(1);
-      expect(related.mock.calls.length).toBeLessThanOrEqual(3);
+      expect(related.mock.calls.length).toBe(1);
     });
 
     it("caps consecutive autoplay enqueues at AUTOPLAY_MAX_CHAIN even when fresh ids keep arriving", async () => {
@@ -1304,10 +1301,10 @@ describe("GuildController settings", () => {
       expect(ctrl.snapshot().current?.requester.source).toBe("autoplay");
     });
 
-    it("PROACTIVE: tops up the queue when upcoming runs LOW (<=1) without waiting for empty", async () => {
-      // Two user tracks queued; once the FIRST starts playing, upcoming has just one
-      // track left (<=1) — that should already trigger a best-effort autoplay top-up so
-      // there's no gap when the user queue drains.
+    it("REACTIVE-only: never pre-fills a discover track ahead of the user queue", async () => {
+      // Two user tracks queued: a plays, b is the single upcoming track. Autoplay must NOT
+      // append a discover track while something is still playing — a pre-filled discover track
+      // would sit ahead of the next song the user queues (breaking queue-next + skip-plays-it).
       const { ctrl, related } = makeController({
         settings: { autoplay: true },
         relatedFn: async () => [meta("rrrrrrrrrrr")],
@@ -1317,15 +1314,52 @@ describe("GuildController settings", () => {
       await ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
       await new Promise((r) => setTimeout(r, 0));
 
-      // a is current, b is the single upcoming track -> LOW -> top-up fired.
       expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
-      await new Promise((r) => setTimeout(r, 0));
-      expect(related).toHaveBeenCalledWith("aaaaaaaaaaa");
-      // The autoplay top-up appended a related track to upcoming (no advance/skip).
-      expect(ctrl.snapshot().upcoming.map((i) => i.meta.videoId)).toContain("rrrrrrrrrrr");
+      // Only the user's own track is upcoming — no discover track appended alongside it.
+      expect(ctrl.snapshot().upcoming.map((i) => i.meta.videoId)).toEqual(["bbbbbbbbbbb"]);
+      expect(related).not.toHaveBeenCalled();
     });
 
-    it("PROACTIVE: does NOT top up when upcoming is low but autoplay is OFF", async () => {
+    it("REACTIVE-only: a song queued mid-play is played next, before any discover track", async () => {
+      // With autoplay on and a track playing, queue a user song, then end the current track.
+      // The user's song must play next (reactive autoplay only fills a GENUINELY empty queue).
+      const { ctrl, session, related } = makeController({
+        settings: { autoplay: true },
+        relatedFn: async () => [meta("rrrrrrrrrrr")],
+      });
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+      await new Promise((r) => setTimeout(r, 0));
+      await ctrl.enqueue(meta("bbbbbbbbbbb"), requester); // queued while a is playing
+      await new Promise((r) => setTimeout(r, 0));
+      expect(related).not.toHaveBeenCalled(); // nothing fetched ahead of the user's song
+
+      session.emit("trackEnd"); // a finishes
+      await new Promise((r) => setTimeout(r, 0));
+      expect(ctrl.snapshot().current?.meta.videoId).toBe("bbbbbbbbbbb"); // the user song, not discover
+      expect(related).not.toHaveBeenCalled();
+    });
+
+    it("REACTIVE-only: Skip with a user song queued plays that song, not a discover track", async () => {
+      // The exact reported bug: with autoplay on, queue a song then hit Skip — the queued song
+      // must play. Skip must NOT land on an autoplay/discover track.
+      const { ctrl, related } = makeController({
+        settings: { autoplay: true },
+        relatedFn: async () => [meta("rrrrrrrrrrr")],
+      });
+      await ctrl.ensureConnected("C1");
+      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+      await new Promise((r) => setTimeout(r, 0));
+      await ctrl.enqueue(meta("bbbbbbbbbbb"), requester); // queued while a plays
+      await new Promise((r) => setTimeout(r, 0));
+
+      ctrl.skip(); // FakeSession.skip emits trackEnd -> advance
+      await new Promise((r) => setTimeout(r, 0));
+      expect(ctrl.snapshot().current?.meta.videoId).toBe("bbbbbbbbbbb");
+      expect(related).not.toHaveBeenCalled();
+    });
+
+    it("autoplay OFF: never appends a discover track", async () => {
       const { ctrl, related } = makeController({
         settings: { autoplay: false },
         relatedFn: async () => [meta("rrrrrrrrrrr")],
@@ -1336,31 +1370,12 @@ describe("GuildController settings", () => {
       await new Promise((r) => setTimeout(r, 0));
 
       expect(related).not.toHaveBeenCalled();
-      // Only the two user tracks: a current, b upcoming. Nothing appended.
       expect(ctrl.snapshot().upcoming.map((i) => i.meta.videoId)).toEqual(["bbbbbbbbbbb"]);
     });
 
-    it("PROACTIVE: the low-water top-up still honors the seen-id de-dup", async () => {
-      // related echoes the already-playing id + a fresh one; the played id must be filtered
-      // out of the proactive top-up just like the empty-queue path.
-      const { ctrl } = makeController({
-        settings: { autoplay: true },
-        relatedFn: async () => [meta("aaaaaaaaaaa"), meta("rrrrrrrrrrr")],
-      });
-      await ctrl.ensureConnected("C1");
-      await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
-      await ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
-      await new Promise((r) => setTimeout(r, 0));
-
-      const up = ctrl.snapshot().upcoming.map((i) => i.meta.videoId);
-      // The seed id is NOT re-appended; only the fresh related id is.
-      expect(up).toContain("rrrrrrrrrrr");
-      expect(up.filter((id) => id === "aaaaaaaaaaa")).toHaveLength(0);
-    });
-
-    it("PROACTIVE: a real user enqueue resets the autoplay chain so a fresh cap applies", async () => {
-      // Drive autoplay (via trackEnd) until the chain caps and the queue idles, then prove a
-      // real user enqueue resets autoplayChain to 0 so autoplay can resume from a clean cap.
+    it("a real user enqueue resets the autoplay chain so a fresh cap applies", async () => {
+      // Drive REACTIVE autoplay (via trackEnd) until the chain caps and the queue idles, then
+      // prove a real user enqueue resets autoplayChain to 0 so autoplay resumes from a clean cap.
       let n = 0;
       const freshId = () => `auto${String(n++).padStart(7, "0")}`;
       const { ctrl, session, related } = makeController({
@@ -1371,7 +1386,7 @@ describe("GuildController settings", () => {
       await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
       await new Promise((r) => setTimeout(r, 0));
 
-      // Skip through tracks until autoplay caps out and the queue idles (current === null).
+      // End tracks until reactive autoplay caps out and the queue idles (current === null).
       for (let i = 0; i < AUTOPLAY_MAX_CHAIN + 10; i++) {
         if (ctrl.snapshot().current === null) break;
         session.emit("trackEnd");
@@ -1385,11 +1400,12 @@ describe("GuildController settings", () => {
       await new Promise((r) => setTimeout(r, 0));
       expect(ctrl.snapshot().current?.meta.videoId).toBe("ccccccccccc");
 
-      // With the chain reset, autoplay tops up again off the user track — more related()
-      // pulls happen that the prior cap would otherwise have forbidden.
+      // With the chain reset, ending the user track lets reactive autoplay resume — more
+      // related() pulls happen that the prior cap would otherwise have forbidden.
+      session.emit("trackEnd");
       await new Promise((r) => setTimeout(r, 0));
       expect(related.mock.calls.length).toBeGreaterThan(cappedCalls);
-      expect(ctrl.snapshot().upcoming.length).toBeGreaterThan(0); // fresh top-up landed
+      expect(ctrl.snapshot().current?.requester.source).toBe("autoplay");
     });
 
     it("artist source reuses the same seen-id de-dup + idle fallback", async () => {

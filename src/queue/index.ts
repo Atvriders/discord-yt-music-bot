@@ -177,6 +177,9 @@ export class GuildQueue extends EventEmitter {
     this.emit("changed", this.snapshot());
     // Optional-chain through `meta` too: a malformed head item (from a partial/torn snapshot
     // restore) must not crash the prefetch emit by reading .videoId off an undefined meta.
-    this.emit("prefetch", this._upcoming[0]?.meta?.videoId ?? null);
+    // Emit the FULL head meta (not just the videoId) so the prefetcher can reach `sourceUrl`
+    // for non-YouTube tracks (SoundCloud). Optional-chained so a torn/partial restored item
+    // can't crash the emit.
+    this.emit("prefetch", this._upcoming[0]?.meta ?? null);
   }
 }

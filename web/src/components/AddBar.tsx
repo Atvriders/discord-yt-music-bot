@@ -33,7 +33,8 @@ export function AddBar({ onPlay, onQueueAll, busy }: {
       <span className="eyebrow">Add to queue</span>
       <form onSubmit={submit} className="mt-3 flex flex-col gap-2.5 sm:flex-row">
         <input value={input} onChange={(e) => setInput(e.target.value)} disabled={disabled}
-          placeholder="Paste a YouTube link, or search a song…" aria-label="Add a track"
+          placeholder="Paste a YouTube, SoundCloud, or Spotify link — or search a song…"
+          aria-label="Add a track"
           className="flex-1 outline-none text-sm px-4 py-3"
           style={{ border: "1px solid var(--color-line)", color: "var(--color-ink)" }} />
         <button className="pill pill-primary justify-center" disabled={disabled} type="submit">

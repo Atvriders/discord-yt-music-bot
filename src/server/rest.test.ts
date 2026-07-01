@@ -93,6 +93,7 @@ function build(sessionUserId: string | null, depOverrides: Record<string, unknow
     youtube: {
       resolve: vi.fn(async (id: string) => meta(id, "Song")),
       search: vi.fn(async () => [meta("aaaaaaaaaaa", "A")]),
+      resolveUrl: vi.fn(async () => meta("sc_1", "SC Track")),
     },
     client: { guilds: { cache: new Map([[GUILD, guild]]) } },
     adminIds: new Set<string>(),
@@ -153,6 +154,47 @@ describe("REST actions", () => {
     const [, requester] = h.controller.enqueue.mock.calls[0]!;
     expect(requester).toMatchObject({ discordUserId: USER, source: "web" });
   });
+  it("play with a SoundCloud URL resolves via resolveUrl and echoes the source", async () => {
+    const res = await h.app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/play`,
+      payload: { input: "https://soundcloud.com/artist/track", voiceChannelId: "C1" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(h.deps.youtube.resolveUrl).toHaveBeenCalledWith("https://soundcloud.com/artist/track");
+    expect(h.deps.youtube.resolve).not.toHaveBeenCalled();
+    expect(res.json().queued).toMatchObject({ title: "SC Track", source: "soundcloud" });
+  });
+
+  it("play with a Spotify URL resolves to a YouTube match and enqueues it", async () => {
+    const spotify = vi.fn(async () => "Feel Good Inc Gorillaz");
+    const { app, deps } = build(USER, { spotify });
+    (deps.youtube.search as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      meta("aaaaaaaaaaa", "Feel Good Inc"),
+    ]);
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/play`,
+      payload: { input: "https://open.spotify.com/track/abc", voiceChannelId: "C1" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(spotify).toHaveBeenCalledWith("https://open.spotify.com/track/abc");
+    expect(deps.youtube.search).toHaveBeenCalledWith("Feel Good Inc Gorillaz", 1);
+    expect(res.json().queued).toMatchObject({ title: "Feel Good Inc", source: "spotify" });
+  });
+
+  it("play with an unresolvable Spotify track returns 400", async () => {
+    const spotify = vi.fn(async () => null);
+    const { app } = build(USER, { spotify });
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/guilds/${GUILD}/play`,
+      payload: { input: "https://open.spotify.com/track/abc", voiceChannelId: "C1" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("spotify_unresolved");
+  });
+
   it("play with a query that makes youtube.search throw a YtError returns 400 with the kind", async () => {
     const { app, controller, deps } = build(USER);
     controller.connectedChannelId = "C1";

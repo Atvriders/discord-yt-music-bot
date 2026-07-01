@@ -119,6 +119,13 @@ export interface DownloadOptions {
   durationSec?: number | null;
   /** Fired for every parsed progress line as the download streams (best-effort). */
   onProgress?: (p: DownloadProgress) => void;
+  /**
+   * Canonical media URL to download (e.g. a SoundCloud track URL). When set it is used
+   * verbatim instead of reconstructing a YouTube watch URL from `videoId`, the 11-char
+   * youtube-id guard is skipped, and the YouTube player-client ladder is bypassed (a single
+   * attempt). `videoId` is still the on-disk/cache key.
+   */
+  sourceUrl?: string;
 }
 
 /** Marker prefixing the yt-dlp --print line so we can locate it amid other stdout. */
@@ -170,6 +177,37 @@ interface RawInfo {
   thumbnail?: string;
   /** --flat-playlist (ytsearch) entries expose an array of thumbnails, not a single `thumbnail`. */
   thumbnails?: RawThumbnail[];
+  /** yt-dlp's canonical page URL for the item (used as the sourceUrl for non-YouTube tracks). */
+  webpage_url?: string;
+  /** The extractor that matched (e.g. "soundcloud"); used to prefix the synthetic cache key. */
+  extractor?: string;
+  /** "playlist"/"multi_video" for a set/album container (vs a single track). */
+  _type?: string;
+  /** Present on a playlist/set container — its child entries. */
+  entries?: unknown[];
+}
+
+/** Small, stable, dependency-free string hash → base36; used only for a no-id fallback key. */
+function stableHash(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+/**
+ * Derive a filesystem-safe, collision-resistant cache key for a NON-YouTube track. Format is
+ * "<sourcePrefix>_<id>" — e.g. "sc_98765" for SoundCloud. The prefix keeps it from colliding
+ * with 11-char YouTube ids; the id is sanitized and falls back to a hash of the URL when
+ * yt-dlp reports no usable id. The result is used both as the dedup key AND the on-disk
+ * filename stem, so it must contain only [A-Za-z0-9_-].
+ */
+export function sourceKey(j: Pick<RawInfo, "id" | "extractor">, url: string): string {
+  const ex = (j.extractor ?? "").toLowerCase();
+  const prefix = ex.includes("soundcloud")
+    ? "sc"
+    : ex.replace(/[^a-z0-9]/g, "").slice(0, 8) || "src";
+  const rawId = String(j.id ?? "").replace(/[^A-Za-z0-9_-]/g, "");
+  return `${prefix}_${rawId || stableHash(url)}`;
 }
 
 /**
@@ -214,8 +252,22 @@ export class YouTubeService {
   ) {}
 
   /**
+   * Source-agnostic network args (proxy + cookies) applied to EVERY yt-dlp invocation,
+   * YouTube or otherwise. Kept separate from the YouTube-only extractor args so a
+   * SoundCloud probe/download still honors the operator's proxy/cookies without dragging in
+   * `youtube:player_client=…` (which would be meaningless for a non-YouTube extractor).
+   */
+  private netArgs(): string[] {
+    const args: string[] = [];
+    if (this.cfg.ytProxy) args.push("--proxy", this.cfg.ytProxy);
+    if (this.cfg.ytCookiesFile) args.push("--cookies", this.cfg.ytCookiesFile);
+    return args;
+  }
+
+  /**
    * Extractor args for a SINGLE player_client. `client` overrides the configured value
-   * so the fallback ladder can probe one client per attempt.
+   * so the fallback ladder can probe one client per attempt. Includes the source-agnostic
+   * net args (proxy/cookies) so callers append just this one list.
    */
   private extractorArgs(client: string): string[] {
     const args = ["--extractor-args", `youtube:player_client=${client}`];
@@ -228,9 +280,7 @@ export class YouTubeService {
         `youtubepot-bgutilhttp:base_url=${this.cfg.poTokenProviderUrl}`,
       );
     }
-    if (this.cfg.ytProxy) args.push("--proxy", this.cfg.ytProxy);
-    if (this.cfg.ytCookiesFile) args.push("--cookies", this.cfg.ytCookiesFile);
-    return args;
+    return [...args, ...this.netArgs()];
   }
 
   /**
@@ -295,6 +345,58 @@ export class YouTubeService {
     // (unset/null = no ceiling) so a pathological multi-hour stream can't slip past
     // before a guild has even set its own limit. Set the compose default high enough
     // (e.g. 14400 = 4h) that normal long content reaches the per-guild check.
+    if (
+      this.cfg.maxTrackDurationSec !== null &&
+      meta.durationSec !== null &&
+      meta.durationSec > this.cfg.maxTrackDurationSec
+    ) {
+      throw new YtError(
+        YtErrorKind.TooLong,
+        `track is ${meta.durationSec}s, over the ${this.cfg.maxTrackDurationSec}s sanity ceiling`,
+      );
+    }
+    return meta;
+  }
+
+  /**
+   * Resolve an arbitrary NON-YouTube media URL (currently SoundCloud) to TrackMeta via a
+   * single `yt-dlp -J` probe. Unlike resolve(id):
+   *   - it does NOT use the YouTube player-client ladder (the source isn't YouTube),
+   *   - it sets `sourceUrl` to yt-dlp's canonical `webpage_url` (fallback: the input url) so
+   *     download() fetches the exact track, and
+   *   - it derives a synthetic filesystem-safe `videoId` cache key via sourceKey() (e.g.
+   *     "sc_98765") instead of trusting the raw extractor id.
+   * A set/album/playlist container is rejected (link a single track). Live streams and
+   * durations over the sanity ceiling are rejected exactly like resolve().
+   */
+  async resolveUrl(url: string): Promise<TrackMeta> {
+    const { stdout, stderr, code } = await this.run(
+      ["-J", "--no-playlist", "--no-warnings", "--no-progress", ...this.netArgs(), "--", url],
+      this.cfg.ytdlpTimeoutMs,
+    );
+    if (code !== 0) throw classifyYtdlpError(stderr, code);
+    let raw: RawInfo;
+    try {
+      raw = JSON.parse(stdout) as RawInfo;
+    } catch {
+      throw new YtError(YtErrorKind.Unknown, "yt-dlp returned non-JSON output");
+    }
+    // A set/album/playlist link yields a container, not one track. Gate ONLY on yt-dlp's
+    // canonical container signal (`_type`) — some single-track info dicts carry a stray
+    // `entries` array, so keying off `entries` would false-reject a valid track.
+    if (raw._type === "playlist" || raw._type === "multi_video") {
+      throw new YtError(
+        YtErrorKind.Unavailable,
+        "that link is a playlist/set — link a single track",
+      );
+    }
+    const base = toMeta(raw);
+    const meta: TrackMeta = {
+      ...base,
+      videoId: sourceKey(raw, url),
+      sourceUrl: typeof raw.webpage_url === "string" && raw.webpage_url ? raw.webpage_url : url,
+    };
+    if (meta.isLive) throw new YtError(YtErrorKind.Live, "live streams are not supported");
     if (
       this.cfg.maxTrackDurationSec !== null &&
       meta.durationSec !== null &&
@@ -452,12 +554,15 @@ export class YouTubeService {
     outDir: string,
     opts: DownloadOptions = {},
   ): Promise<DownloadResult> {
-    if (!VIDEO_ID_RE.test(videoId)) {
+    // A YouTube download must carry a valid 11-char id; a non-YouTube download (sourceUrl set)
+    // uses the URL verbatim, so `videoId` there is a synthetic key and the id guard is skipped.
+    if (!opts.sourceUrl && !VIDEO_ID_RE.test(videoId)) {
       throw new YtError(
         YtErrorKind.Unavailable,
         `"${videoId}" is not a YouTube video id (likely a playlist, Mix, or channel result)`,
       );
     }
+    const mediaUrl = opts.sourceUrl ?? `https://www.youtube.com/watch?v=${videoId}`;
     // Auto-scale the timeout so a long mix/concert isn't killed by the short default.
     const timeoutMs = scaleDownloadTimeout(this.cfg.ytdlpTimeoutMs, opts.durationSec);
     // Per progress line: parse it and (best-effort) forward to the caller. A throw inside
@@ -470,7 +575,11 @@ export class YouTubeService {
         }
       : undefined;
     const maxMb = Math.floor(this.cfg.cacheMaxBytes / (1024 * 1024));
-    const stdout = await this.withClientFallback(async (client) => {
+    // Build the yt-dlp argv for one attempt. `extractor` is the source-specific arg list
+    // (YouTube: the player-client ladder rung; non-YouTube: just proxy/cookies). The output
+    // template uses OUR `videoId` as the filename stem (for YouTube that equals `%(id)s`; for
+    // SoundCloud it's the synthetic "sc_<id>" key) so the readdir match below is source-agnostic.
+    const buildArgs = (extractor: string[]): string[] => {
       const args = [
         "-f",
         "bestaudio[acodec=opus]/bestaudio/best",
@@ -493,7 +602,7 @@ export class YouTubeService {
         DOWNLOAD_PROGRESS_TEMPLATE,
         "--print",
         AUDIO_PRINT_TEMPLATE,
-        ...this.extractorArgs(client),
+        ...extractor,
       ];
       if (this.cfg.sponsorblockRemove) {
         args.push(
@@ -504,17 +613,32 @@ export class YouTubeService {
           this.cfg.sponsorblockRemove,
         );
       }
-      args.push(
-        "-o",
-        join(outDir, "%(id)s.%(ext)s"),
-        "--",
-        `https://www.youtube.com/watch?v=${videoId}`,
-      );
+      args.push("-o", join(outDir, `${videoId}.%(ext)s`), "--", mediaUrl);
+      return args;
+    };
 
-      const { stdout, stderr, code } = await this.run(args, timeoutMs, onLine);
-      if (code !== 0) throw classifyYtdlpError(stderr, code);
-      return stdout;
-    });
+    // Non-YouTube source (sourceUrl set): a single attempt with just the net args — the
+    // YouTube player-client ladder is meaningless for another extractor and re-looping it
+    // would only re-download. YouTube: probe each client rung until one succeeds.
+    const stdout = opts.sourceUrl
+      ? await (async () => {
+          const { stdout, stderr, code } = await this.run(
+            buildArgs(this.netArgs()),
+            timeoutMs,
+            onLine,
+          );
+          if (code !== 0) throw classifyYtdlpError(stderr, code);
+          return stdout;
+        })()
+      : await this.withClientFallback(async (client) => {
+          const { stdout, stderr, code } = await this.run(
+            buildArgs(this.extractorArgs(client)),
+            timeoutMs,
+            onLine,
+          );
+          if (code !== 0) throw classifyYtdlpError(stderr, code);
+          return stdout;
+        });
 
     const files = await readdir(outDir);
     // Never select a partial/intermediate artifact. A previous client's timed-out attempt is

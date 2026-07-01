@@ -29,6 +29,8 @@ interface DownloadProgress {
 interface DownloadOptions {
   durationSec?: number | null;
   onProgress?: (p: DownloadProgress) => void;
+  /** Canonical media URL for a non-YouTube track (SoundCloud); absent = derive from videoId. */
+  sourceUrl?: string;
 }
 
 /**
@@ -67,15 +69,6 @@ const AUTOPLAY_REQUESTER: Requester = {
  * have already played (which would otherwise spin without ever queueing a new track).
  */
 export const AUTOPLAY_MAX_CHAIN = 50;
-
-/**
- * Low-water mark for PROACTIVE autoplay: when the number of UPCOMING tracks falls to this
- * many or fewer (and autoplay is on), the controller tops the queue up ahead of time so
- * there is no silent gap when the user-supplied queue drains. 1 means "top up once only
- * one track is left on deck". The reactive empty-queue path (tryAutoplayLocked) still
- * covers the case where the queue genuinely hits zero.
- */
-export const AUTOPLAY_LOW_WATER = 1;
 
 /** Audio post-processing options handed to the resource factory for a single track. */
 export interface AudioOptions {
@@ -295,17 +288,17 @@ export class GuildController extends EventEmitter {
     };
     this.now = deps.now ?? (() => Date.now());
     this.queue = deps.queue ?? new GuildQueue();
-    this.queue.on("prefetch", (videoId: string | null) => {
-      if (videoId) void this.prefetch(videoId);
+    this.queue.on("prefetch", (meta: TrackMeta | null) => {
+      if (meta) void this.prefetch(meta);
     });
     this.queue.on("changed", () => {
       void this.maybeStart();
-      // PROACTIVE autoplay: every queue mutation (advance/remove/enqueue) is a chance for the
-      // upcoming runway to have dropped to the low-water mark. When it has — and a track is
-      // still playing with autoplay on — top the queue up ahead of time so a draining queue
-      // never becomes a silent gap. Best-effort + guarded (in-flight + chain cap) so it can't
-      // spin; a real user enqueue resets the chain via enqueue(), as before.
-      this.maybeTopUpAutoplay();
+      // Autoplay/auto-discover is REACTIVE ONLY: it fills in a track solely when the queue has
+      // genuinely run dry (handled on track-end via tryAutoplayLocked). We deliberately do NOT
+      // pre-fill the upcoming list while a track is still playing — doing so would park a
+      // discover track AHEAD of a song the user queues next, so their song wouldn't play next
+      // and Skip would land on the discover track instead. Keeping it reactive means a
+      // user-queued song is always next, and discover only appears when nothing is queued after.
       // Re-broadcast to the panel on every queue mutation (add/remove/reorder/advance).
       this.emit("changed");
     });
@@ -404,7 +397,7 @@ export class GuildController extends EventEmitter {
       const current = this.queue.current;
       if (!session || !current) return;
       const positionMs = this.positionMs();
-      const path = await this.ensureDownloaded(current.meta.videoId);
+      const path = await this.ensureDownloaded(current.meta, false);
       if (this.session !== session) return; // torn down while awaiting the download
       current.audio = this.deps.cache.getAudio(current.meta.videoId);
       this.deps.cache.pin(current.meta.videoId);
@@ -709,7 +702,7 @@ export class GuildController extends EventEmitter {
       if (!Number.isFinite(positionMs) || positionMs < 0 || positionMs > max) {
         throw new RangeError("positionMs out of range");
       }
-      const path = await this.ensureDownloaded(current.meta.videoId);
+      const path = await this.ensureDownloaded(current.meta, false);
       current.audio = this.deps.cache.getAudio(current.meta.videoId);
       this.deps.cache.pin(current.meta.videoId);
       this.pinned.add(current.meta.videoId);
@@ -932,10 +925,7 @@ export class GuildController extends EventEmitter {
       // fetched (resolving → downloading → processing) rather than looking frozen. The
       // downloading phase + percent is set inside ensureDownloaded (only on a cache miss).
       this.setPreparing({ videoId: item.meta.videoId, title: item.meta.title, phase: "resolving" });
-      const path = await this.ensureDownloaded(item.meta.videoId, {
-        title: item.meta.title,
-        durationSec: item.meta.durationSec,
-      });
+      const path = await this.ensureDownloaded(item.meta, true);
       // Defense-in-depth: ensureDownloaded yields, so a teardown (leaveInternal) could have
       // replaced/destroyed the session while we awaited. Never play onto a stale session or
       // pin against a cleared `pinned` set. The stopEpoch check additionally catches an
@@ -1132,94 +1122,56 @@ export class GuildController extends EventEmitter {
   }
 
   /**
-   * Autoplay (PROACTIVE, low-water top-up): when UPCOMING has fallen to AUTOPLAY_LOW_WATER
-   * or fewer tracks while something is still playing and `settings.autoplay` is on, APPEND
-   * one fresh candidate to the END of the queue so the user-supplied queue draining never
-   * leaves a silent gap. Unlike tryAutoplayLocked this does NOT advance/skip — the current
-   * track keeps playing; the appended track simply becomes the next "up next".
-   *
-   * Reuses the EXACT same bookkeeping (source branch, seen-id de-dup, chain cap, in-flight
-   * guard) via nextAutoplayCandidate — only the queue mutation differs (add, no advance).
-   * Best-effort: a no-candidate / fetch failure is a silent no-op; the reactive empty-queue
-   * path still covers a true drain.
-   */
-  private async topUpAutoplayLocked(): Promise<void> {
-    if (!this.session) return;
-    if (!this._settings.autoplay) return;
-    // Only top up while a track is actually playing and the runway is LOW. An empty/idle
-    // queue is the reactive path's job (tryAutoplayLocked), not the top-up's.
-    if (!this.queue.current) return;
-    if (this.queue.snapshot().upcoming.length > AUTOPLAY_LOW_WATER) return;
-    if (this.autoplayInFlight) return;
-
-    this.autoplayInFlight = true;
-    // Capture the stop/teardown epoch before the candidate pull so a Stop during the await
-    // cancels the top-up append instead of refilling a queue the user just cleared.
-    const epoch = this.stopEpoch;
-    try {
-      const next = await this.nextAutoplayCandidate();
-      if (!next) return;
-      if (this.stopEpoch !== epoch) return; // stopped/torn-down while resolving
-      // Append only — the current track keeps playing; this becomes the next "up next".
-      await this.queue.add(next, AUTOPLAY_REQUESTER);
-    } finally {
-      this.autoplayInFlight = false;
-    }
-  }
-
-  /**
-   * Fire-and-forget proactive top-up off the queue "changed" stream. Serializes under the
-   * playback lock (so it can't interleave with an advance/teardown) and is fully
-   * best-effort — any failure is swallowed and the queue simply idles via the reactive path.
-   */
-  private maybeTopUpAutoplay(): void {
-    if (!this._settings.autoplay) return;
-    void this.lock.runExclusive(() => this.topUpAutoplayLocked());
-  }
-
-  /**
    * Ensure the track is on disk, returning its cached path. When `prepare` is supplied
    * (the play-for-playback path) and the file is NOT already cached, the live preparing
    * status advances to "downloading" and the download's onProgress streams into
    * `preparing.percent` (throttled). A cache hit skips the download (and the downloading
    * phase) entirely. The caller owns clearing/advancing the status afterwards.
    */
-  private async ensureDownloaded(
-    videoId: string,
-    prepare?: { title: string; durationSec: number | null },
-  ): Promise<string> {
-    const cached = this.deps.cache.get(videoId);
+  private async ensureDownloaded(meta: TrackMeta, withStatus: boolean): Promise<string> {
+    const cached = this.deps.cache.get(meta.videoId);
     if (cached) return cached;
-    if (prepare) {
-      this.setPreparing({ videoId, title: prepare.title, phase: "downloading", percent: 0 });
+    if (withStatus) {
+      this.setPreparing({
+        videoId: meta.videoId,
+        title: meta.title,
+        phase: "downloading",
+        percent: 0,
+      });
     }
     const { path, audio } = await this.deps.downloads.run(() =>
-      this.deps.youtube.download(videoId, this.deps.cacheDir, {
-        durationSec: prepare?.durationSec,
-        onProgress: prepare ? (p) => this.updatePreparingPercent(p.percent) : undefined,
+      this.deps.youtube.download(meta.videoId, this.deps.cacheDir, {
+        durationSec: meta.durationSec,
+        // Non-YouTube tracks (SoundCloud) carry the real URL here; YouTube leaves it undefined
+        // and download() reconstructs the watch URL from videoId.
+        sourceUrl: meta.sourceUrl,
+        onProgress: withStatus ? (p) => this.updatePreparingPercent(p.percent) : undefined,
       }),
     );
-    this.deps.cache.register(videoId, path, audio);
+    this.deps.cache.register(meta.videoId, path, audio);
     return path;
   }
 
-  private async prefetch(videoId: string): Promise<void> {
-    if (this.deps.cache.has(videoId)) return;
+  private async prefetch(meta: TrackMeta): Promise<void> {
+    if (this.deps.cache.has(meta.videoId)) return;
     try {
       const { path, audio } = await this.deps.downloads.run(() =>
-        this.deps.youtube.download(videoId, this.deps.cacheDir),
+        this.deps.youtube.download(meta.videoId, this.deps.cacheDir, {
+          durationSec: meta.durationSec,
+          sourceUrl: meta.sourceUrl,
+        }),
       );
-      this.deps.cache.register(videoId, path, audio);
+      this.deps.cache.register(meta.videoId, path, audio);
       // prefetch runs outside the lock and yields at the download await; a leaveInternal()
       // may have torn the session down (clearing `pinned`) while we waited. If so, don't
       // write into the now-orphaned pinned Set — drop the pin so the entry stays
       // LRU-evictable instead of being pinned forever.
       if (!this.session) {
-        this.deps.cache.unpin(videoId);
+        this.deps.cache.unpin(meta.videoId);
         return;
       }
-      this.deps.cache.pin(videoId);
-      this.pinned.add(videoId);
+      this.deps.cache.pin(meta.videoId);
+      this.pinned.add(meta.videoId);
     } catch {
       // prefetch is best-effort; a real failure surfaces when the track is played
     }

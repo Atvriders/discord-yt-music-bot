@@ -1,6 +1,7 @@
 import type { ActionRowBuilder, ButtonBuilder } from "discord.js";
 import type { Command } from "./command-parser.js";
 import { parseInput } from "../youtube/url-parser.js";
+import { resolveSpotifyQuery } from "../youtube/spotify.js";
 import { buildPicker } from "./picker.js";
 import { selectVoiceChannel } from "../orchestrator/voice-selection.js";
 import { YtError } from "../youtube/errors.js";
@@ -25,7 +26,14 @@ export interface HandlerContext {
   youtube: {
     resolve(videoId: string): Promise<TrackMeta>;
     search(query: string, limit: number): Promise<TrackMeta[]>;
+    /** Resolve a direct non-YouTube media URL (SoundCloud) to a playable track. */
+    resolveUrl(url: string): Promise<TrackMeta>;
   };
+  /**
+   * Resolve a Spotify track URL to a "<track> <artist>" YouTube search string (best-effort;
+   * null on failure). Defaults to the real spotify.ts resolver; injectable for tests.
+   */
+  spotify?: (url: string) => Promise<string | null>;
   requester: Requester;
   requesterChannelId: string | null;
   botChannelId: string | null;
@@ -41,7 +49,7 @@ export type HandlerResult =
 
 const HELP = [
   "**Commands**",
-  "`?play <youtube-url | search terms>` — queue a link, or search and pick",
+  "`?play <link | search terms>` — queue a YouTube/SoundCloud/Spotify link, or search and pick",
   "`?skip` `?pause` `?resume` `?stop` — playback control",
   "`?queue` `?np` — show the queue / now playing",
   "`?history` — show recently played tracks",
@@ -113,7 +121,52 @@ async function handlePlay(input: string, ctx: HandlerContext): Promise<HandlerRe
     return { type: "picker", content: picker.content, components: picker.components };
   }
 
-  // exact video
+  // Spotify: audio is DRM-locked, so resolve the track to a search string, find the closest
+  // YouTube video, and play THAT (the exact-link rule is relaxed here by explicit design).
+  if (parsed.kind === "spotify") {
+    const resolveSpotify = ctx.spotify ?? resolveSpotifyQuery;
+    let query: string | null;
+    try {
+      query = await resolveSpotify(parsed.url);
+    } catch {
+      query = null;
+    }
+    if (!query) {
+      return msg(
+        "❌ Couldn't read that Spotify track. Try the song's YouTube link, or search by name.",
+      );
+    }
+    let results: TrackMeta[];
+    try {
+      results = await ctx.youtube.search(query, 1);
+    } catch (err) {
+      return msg(
+        err instanceof YtError
+          ? `❌ Can't search right now (${err.kind}).`
+          : "❌ Search failed. Try again.",
+      );
+    }
+    const match = results[0];
+    if (!match) return msg(`❌ No YouTube match for that Spotify track (“${query}”).`);
+    return enqueueResolved(match, ctx, "🎧 Spotify → closest YouTube match");
+  }
+
+  // SoundCloud (direct URL): play the exact track via yt-dlp's resolver.
+  if (parsed.kind === "url") {
+    let meta: TrackMeta;
+    try {
+      meta = await ctx.youtube.resolveUrl(parsed.url);
+    } catch (err) {
+      return msg(
+        err instanceof YtError
+          ? `❌ Can't play that (${err.kind}).`
+          : "❌ Failed to load that link.",
+      );
+    }
+    return enqueueResolved(meta, ctx, "SoundCloud");
+  }
+
+  // exact YouTube video
   let meta: TrackMeta;
   try {
     meta = await ctx.youtube.resolve(parsed.videoId);
@@ -124,6 +177,19 @@ async function handlePlay(input: string, ctx: HandlerContext): Promise<HandlerRe
         : "❌ Failed to load that video.",
     );
   }
+  return enqueueResolved(meta, ctx);
+}
+
+/**
+ * Shared tail for every resolved track (YouTube video / SoundCloud / Spotify match): pick the
+ * voice target, join it, enqueue, and confirm. `note` is an optional parenthetical source
+ * label appended to the confirmation (e.g. "SoundCloud", "Spotify → YouTube match").
+ */
+async function enqueueResolved(
+  meta: TrackMeta,
+  ctx: HandlerContext,
+  note?: string,
+): Promise<HandlerResult> {
   const target = selectVoiceChannel({
     requesterChannelId: ctx.requesterChannelId,
     botChannelId: ctx.botChannelId,
@@ -151,7 +217,7 @@ async function handlePlay(input: string, ctx: HandlerContext): Promise<HandlerRe
     if (err instanceof YtError) return msg(`❌ ${err.message}`);
     throw err;
   }
-  return msg(`➕ Queued **${meta.title}**.`);
+  return msg(`➕ Queued **${meta.title}**.${note ? ` _(${note})_` : ""}`);
 }
 
 /**
