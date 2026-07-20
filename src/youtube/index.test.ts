@@ -504,6 +504,8 @@ describe("YouTubeService.download", () => {
     expect(args[printIdx + 1]).toContain("%(acodec)s");
     expect(args[args.length - 1]).toBe("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
     expect(args).not.toContain("--sponsorblock-remove");
+    // No -x conversion without sponsorblock → no quality flag either (plain bestaudio grab).
+    expect(args).not.toContain("--audio-quality");
   });
 
   it("returns null audio when yt-dlp prints no usable format", async () => {
@@ -532,6 +534,25 @@ describe("YouTubeService.download", () => {
     expect(args).toContain("--sponsorblock-remove");
     const sbIdx = args.indexOf("--sponsorblock-remove");
     expect(args[sbIdx + 1]).toBe("sponsor,music_offtopic");
+    // Conversion quality rides the configured bitrate (bitrate-form "NNNK"; the 0-10 VBR scale
+    // is a no-op for opus) — without it non-opus→opus conversions land at ffmpeg's 96k default.
+    const aqIdx = args.indexOf("--audio-quality");
+    expect(aqIdx).toBeGreaterThanOrEqual(0);
+    expect(args[aqIdx + 1]).toBe("256K");
+  });
+
+  it("honors AUDIO_BITRATE_KBPS for the sponsorblock conversion quality", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yt-"));
+    await writeFile(join(dir, "dQw4w9WgXcQ.opus"), "fakeaudio");
+    runMock.mockResolvedValue(ok(""));
+    const sbCfg = loadMediaConfig({
+      MAX_TRACK_DURATION_SEC: "3600",
+      SPONSORBLOCK_REMOVE: "sponsor",
+      AUDIO_BITRATE_KBPS: "320",
+    });
+    await new YouTubeService(sbCfg).download("dQw4w9WgXcQ", dir);
+    const args = runMock.mock.calls[0]![0] as string[];
+    expect(args[args.indexOf("--audio-quality") + 1]).toBe("320K");
   });
 
   it("uses the sourceUrl verbatim, outputs by the videoId key, and does not loop the client ladder", async () => {

@@ -659,6 +659,12 @@ export class YouTubeService {
           "-x",
           "--audio-format",
           "opus",
+          // Bitrate-form value ("NNNK" → ffmpeg -b:a NNNk for libopus). Without it, a
+          // non-opus→opus conversion lands at ffmpeg's 96k stereo DEFAULT — the lowest-quality
+          // files in the cache, replayed forever via passthrough. (The VBR-scale form 0–10 is a
+          // NO-OP for opus in yt-dlp.) Already-opus sources are still copied, not re-encoded.
+          "--audio-quality",
+          `${this.cfg.audioBitrateKbps}K`,
           "--sponsorblock-remove",
           this.cfg.sponsorblockRemove,
         );

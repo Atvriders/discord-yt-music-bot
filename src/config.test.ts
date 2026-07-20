@@ -21,6 +21,15 @@ describe("loadMediaConfig", () => {
     expect(c.ytCookiesText).toBeNull();
     expect(c.poTokenProviderUrl).toBeNull();
     expect(c.normalizeLoudness).toBe(false);
+    expect(c.audioBitrateKbps).toBe(256);
+  });
+
+  it("reads AUDIO_BITRATE_KBPS and validates its range", () => {
+    expect(loadMediaConfig({ AUDIO_BITRATE_KBPS: "320" }).audioBitrateKbps).toBe(320);
+    expect(() => loadMediaConfig({ AUDIO_BITRATE_KBPS: "abc" })).toThrow(/AUDIO_BITRATE_KBPS/);
+    expect(() => loadMediaConfig({ AUDIO_BITRATE_KBPS: "1.5" })).toThrow(/AUDIO_BITRATE_KBPS/);
+    expect(() => loadMediaConfig({ AUDIO_BITRATE_KBPS: "31" })).toThrow(/AUDIO_BITRATE_KBPS/);
+    expect(() => loadMediaConfig({ AUDIO_BITRATE_KBPS: "511" })).toThrow(/AUDIO_BITRATE_KBPS/);
   });
 
   it("reads YT_COOKIES (path) and YT_COOKIES_TEXT (inline content)", () => {
@@ -95,6 +104,7 @@ describe("materializeCookies", () => {
     sponsorblockRemove: null,
     playerClients: "tv",
     ytdlpTimeoutMs: 1,
+    audioBitrateKbps: 256,
   };
 
   it("returns null when neither a path nor inline text is set", async () => {

@@ -57,6 +57,9 @@ export function loadMediaConfig(env: Env = process.env): MediaConfig {
     sponsorblockRemove: strEnv(env, "SPONSORBLOCK_REMOVE"),
     playerClients: strEnv(env, "YT_PLAYER_CLIENTS") ?? "android_vr,web_embedded,tv",
     ytdlpTimeoutMs: intEnv(env, "YTDLP_TIMEOUT_MS", 60_000, { min: 1 }),
+    // 510 kbps is the practical Opus ceiling for 20ms stereo frames; 32 keeps obviously-broken
+    // values out while still allowing deliberate low-bandwidth deploys.
+    audioBitrateKbps: intEnv(env, "AUDIO_BITRATE_KBPS", 256, { min: 32, max: 510 }),
   };
 }
 

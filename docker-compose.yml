@@ -73,6 +73,18 @@ services:
       # Comma-separated; "" disables. Categories: https://wiki.sponsor.ajay.app/w/Segment_Categories
       SPONSORBLOCK_REMOVE: "sponsor,selfpromo,intro,outro,music_offtopic"
       NORMALIZE_LOUDNESS: "false"
+      # Opus send bitrate (kbps, 32-510) for RE-ENCODED audio: seeking, crossfade/loudnorm/FX,
+      # volume != 100, and SponsorBlock's non-opus conversions. HONEST NOTES:
+      #  - The Opus-passthrough fast path is unaffected: an already-opus download plays untouched
+      #    (best possible), so this can't exceed SOURCE quality — YouTube serves ~130-160k opus
+      #    normally; a YouTube Premium account's cookies unlock 256k opus automatically.
+      #  - Discord's voice-channel bitrate setting is a client-side hint; listeners receive what
+      #    the BOT sends (this value on re-encode paths).
+      #  - Higher = more listener downlink (~640 B/20ms packet at 256). Values near 510 can
+      #    fragment on low-MTU links (VPN/PPPoE).
+      #  - Older cached SponsorBlock conversions were made at 96k; clear the cache volume to
+      #    re-download them at this quality.
+      AUDIO_BITRATE_KBPS: "256"
 
       # YouTube configuration
       YT_PROXY: "" # optional residential/SOCKS proxy if your IP gets blocked by YouTube

@@ -110,7 +110,11 @@ async function main(): Promise<void> {
           if (!channel?.isVoiceBased()) throw new Error("target channel is not a voice channel");
           return createVoiceSession(channel, idleTimeoutMs);
         },
-        makeResource: (filePath, item, opts) => createPassthroughResource(filePath, item, opts),
+        makeResource: (filePath, item, opts) =>
+          createPassthroughResource(filePath, item, {
+            ...opts,
+            bitrateKbps: media.audioBitrateKbps,
+          }),
         prefetchDepth: botCfg.prefetchDepth,
         idleTimeoutMs: botCfg.idleTimeoutMs,
         settings: {

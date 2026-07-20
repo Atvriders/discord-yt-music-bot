@@ -14,6 +14,12 @@ export interface MediaConfig {
   sponsorblockRemove: string | null;
   playerClients: string;
   ytdlpTimeoutMs: number;
+  /**
+   * Opus encode bitrate (kbps) for every RE-ENCODE path: the ffmpeg transcode (seek / filters /
+   * non-opus files), the inline-volume PCM encoder, and yt-dlp's SponsorBlock/extract-audio
+   * conversion. The Opus-passthrough fast path is unaffected (source plays untouched).
+   */
+  audioBitrateKbps: number;
 }
 
 /**

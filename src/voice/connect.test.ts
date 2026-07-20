@@ -80,6 +80,15 @@ describe("createPassthroughResource", () => {
     expect(args).toContain("/cache/v.m4a");
     // Fallback emits Ogg/Opus (passthrough-equivalent), not raw PCM (no inline volume here).
     expect(args).toContain("libopus");
+    // With no bitrateKbps threaded, the historical 128k default applies.
+    expect(args[args.indexOf("-b:a") + 1]).toBe("128k");
+  });
+
+  it("encodes the ffmpeg transcode at the configured bitrateKbps", async () => {
+    await createPassthroughResource("/cache/v.webm", item, { seekMs: 5000, bitrateKbps: 320 });
+    const args = spawnMock.mock.calls[0]![1] as string[];
+    expect(args).toContain("libopus");
+    expect(args[args.indexOf("-b:a") + 1]).toBe("320k");
   });
 
   it("seeks via ffmpeg -ss placed BEFORE -i with millisecond precision", async () => {
@@ -133,6 +142,68 @@ describe("createPassthroughResource", () => {
       expect.anything(),
       expect.objectContaining({ inputType: "raw", inlineVolume: true }),
     );
+  });
+
+  it("applies the configured bitrate to the PCM path's opus encoder via the native CTL", async () => {
+    // The inline-volume path re-encodes PCM inside @discordjs/voice; prism's public
+    // setBitrate() clamps to 128k, so the code must reach the NATIVE encoder's
+    // applyEncoderCTL(4002, bps) for >128k to take effect.
+    const applyEncoderCTL = vi.fn();
+    createAudioResourceMock.mockImplementation((stream, opts) => ({
+      stream,
+      opts,
+      encoder: { encoder: { applyEncoderCTL } },
+    }));
+    await createPassthroughResource("/cache/v.webm", item, {
+      audio: { normalizeLoudness: false, crossfadeSec: 0, fx: "none", volumePct: 80 },
+      bitrateKbps: 256,
+    });
+    expect(applyEncoderCTL).toHaveBeenCalledWith(4002, 256_000);
+  });
+
+  it("falls back to the opusscript encoderCTL name when applyEncoderCTL is absent", async () => {
+    const encoderCTL = vi.fn();
+    createAudioResourceMock.mockImplementation((stream, opts) => ({
+      stream,
+      opts,
+      encoder: { encoder: { encoderCTL } },
+    }));
+    await createPassthroughResource("/cache/v.webm", item, {
+      audio: { normalizeLoudness: false, crossfadeSec: 0, fx: "none", volumePct: 80 },
+      bitrateKbps: 192,
+    });
+    expect(encoderCTL).toHaveBeenCalledWith(4002, 192_000);
+  });
+
+  it("a throwing encoder CTL is non-fatal (resource still returned)", async () => {
+    createAudioResourceMock.mockImplementation((stream, opts) => ({
+      stream,
+      opts,
+      encoder: {
+        encoder: {
+          applyEncoderCTL: vi.fn(() => {
+            throw new Error("ctl unavailable");
+          }),
+        },
+      },
+    }));
+    const resource = await createPassthroughResource("/cache/v.webm", item, {
+      audio: { normalizeLoudness: false, crossfadeSec: 0, fx: "none", volumePct: 80 },
+      bitrateKbps: 256,
+    });
+    expect(resource).toBeDefined();
+  });
+
+  it("does NOT touch the encoder on the Ogg transcode path (bitrate is ffmpeg's -b:a there)", async () => {
+    const applyEncoderCTL = vi.fn();
+    createAudioResourceMock.mockImplementation((stream, opts) => ({
+      stream,
+      opts,
+      encoder: { encoder: { applyEncoderCTL } },
+    }));
+    // Seek-only transcode: Ogg/Opus out of ffmpeg, no inline volume → no JS-side encoder work.
+    await createPassthroughResource("/cache/v.webm", item, { seekMs: 5000, bitrateKbps: 256 });
+    expect(applyEncoderCTL).not.toHaveBeenCalled();
   });
 
   it("reaps the ffmpeg child when its stdout closes (consumer done with the stream)", async () => {

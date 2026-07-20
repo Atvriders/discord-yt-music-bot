@@ -33,6 +33,11 @@ export interface ResourceOpts {
   seekMs?: number;
   /** Per-track audio post-processing (loudnorm / pseudo-crossfade). Omitted = no processing. */
   audio?: AudioOptions;
+  /**
+   * Opus encode bitrate in kbps for any RE-ENCODING path (ffmpeg transcode + the inline-volume
+   * PCM encoder). The Opus-passthrough fast path ignores it — the source plays untouched.
+   */
+  bitrateKbps?: number;
 }
 
 /**
@@ -166,11 +171,14 @@ export async function createPassthroughResource(
       )
     : null;
   const volumePct = opts.audio?.volumePct ?? 100;
+  // 128 fallback preserves historical behavior for callers that don't thread the config
+  // (unit fixtures); the real host wires media.audioBitrateKbps in.
+  const bitrateKbps = opts.bitrateKbps ?? 128;
   // Inline volume is enabled whenever volume != 100. It requires PCM (no Opus
   // passthrough), so it also forces the transcoded path.
   const inlineVolume = volumePct !== 100;
   if (seekMs > 0 || filter || inlineVolume) {
-    return createTranscodedResource(filePath, metadata, seekMs, filter, inlineVolume);
+    return createTranscodedResource(filePath, metadata, seekMs, filter, inlineVolume, bitrateKbps);
   }
   // FAST PATH: probe the container and pass the Opus stream straight through. demuxProbe
   // only classifies Ogg/Opus and WebM/Opus — a downloaded file in any OTHER container
@@ -183,7 +191,31 @@ export async function createPassthroughResource(
     return createAudioResource(stream, { inputType: type, inlineVolume: false, metadata });
   } catch (err) {
     log.warn({ err, filePath }, "demuxProbe failed; falling back to ffmpeg transcode");
-    return createTranscodedResource(filePath, metadata, 0, null, false);
+    return createTranscodedResource(filePath, metadata, 0, null, false, bitrateKbps);
+  }
+}
+
+/** libopus OPUS_SET_BITRATE ctl id — matches prism-media's CTL.BITRATE. */
+const OPUS_CTL_SET_BITRATE = 4002;
+
+/**
+ * Raw-PCM (inline-volume) path: @discordjs/voice re-encodes the PCM with prism-media's opus
+ * Encoder, whose public setBitrate() CLAMPS to [16k, 128k]. Reach through to the underlying
+ * opus binding — feature-detecting `applyEncoderCTL` (@discordjs/opus native) vs `encoderCTL`
+ * (opusscript), exactly as prism does internally — so a configured bitrate above 128k actually
+ * takes effect. Best-effort: on any failure (a future prism/@discordjs/voice internals change)
+ * the encoder just stays at libopus AUTO (~120k), which still plays fine — never a crash.
+ */
+function applyEncoderBitrate(resource: AudioResource, bitrateKbps: number): void {
+  try {
+    const enc = (resource as unknown as { encoder?: { encoder?: Record<string, unknown> } }).encoder
+      ?.encoder;
+    const ctl = (enc?.["applyEncoderCTL"] ?? enc?.["encoderCTL"]) as
+      | ((ctl: number, value: number) => void)
+      | undefined;
+    if (enc && ctl) ctl.call(enc, OPUS_CTL_SET_BITRATE, bitrateKbps * 1000);
+  } catch (err) {
+    log.warn({ err, bitrateKbps }, "failed to set opus encoder bitrate; using encoder default");
   }
 }
 
@@ -203,6 +235,7 @@ function createTranscodedResource(
   seekMs: number,
   filter: string | null,
   inlineVolume = false,
+  bitrateKbps = 128,
 ): AudioResource {
   const args = ["-loglevel", "error"];
   if (seekMs > 0) {
@@ -214,7 +247,9 @@ function createTranscodedResource(
     // Raw PCM for the volume transformer: s16le, stereo, 48 kHz (Discord's native rate).
     args.push("-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1");
   } else {
-    args.push("-c:a", "libopus", "-b:a", "128k", "-f", "ogg", "pipe:1");
+    // -vbr on / -compression_level 10 / -application audio are already ffmpeg libopus defaults;
+    // only the bitrate needs setting.
+    args.push("-c:a", "libopus", "-b:a", `${bitrateKbps}k`, "-f", "ogg", "pipe:1");
   }
   // Pipe (not ignore) stderr so transcode failures (bad filter, missing codec, corrupt
   // file, OOM) leave a trace instead of silently ending the stream → trackEnd. `-loglevel
@@ -283,6 +318,9 @@ function createTranscodedResource(
     inlineVolume,
     metadata,
   });
+  // On the Raw path @discordjs/voice built an opus ENCODER for the PCM — apply the configured
+  // bitrate to it (the Ogg path's bitrate was already set via ffmpeg's -b:a above).
+  if (inlineVolume) applyEncoderBitrate(resource, bitrateKbps);
   // Reap ffmpeg when the consumer is done with the stream.
   ff.stdout.on("close", () => {
     clearWatchdog();
