@@ -9,6 +9,8 @@ import type { Requester, TrackMeta } from "../types/index.js";
 import type { GuildSettings } from "../orchestrator/settings.js";
 import type { ControllerSnapshot } from "../orchestrator/index.js";
 import type { PlaylistSummary } from "../orchestrator/playlists.js";
+import type { CookieService, CookieHealth, CookieResult } from "../cookies/index.js";
+import { verifyPassword } from "../auth/password.js";
 
 interface Controller {
   ensureConnected(channelId: string): Promise<void>;
@@ -68,6 +70,69 @@ export interface RestDeps {
    * null on failure). Defaults to the real spotify.ts resolver; injectable for tests.
    */
   spotify?: (url: string) => Promise<string | null>;
+  /**
+   * The cookie console (src/cookies). Optional, and a structural Pick rather than the class, so
+   * a test app can be built without one — the routes then answer 503 with a content-free body
+   * instead of throwing.
+   */
+  cookies?: Pick<CookieService, "health" | "test" | "saveFromText" | "importFromBrowser">;
+  /**
+   * COOKIE_ADMIN_PASSWORD. Null/empty means the console is OFF and every /api/cookies route
+   * answers 404 — see requireCookieAdmin.
+   */
+  cookieAdminPassword?: string | null;
+}
+
+// A cookies.txt export of a logged-in Google profile is a few KB. 64 KB is more headroom than any
+// real jar needs and still bounded. COOKIE_BODY_LIMIT sits above it on purpose: the socket-level
+// cap only has to stop an absurd upload, so a slightly-oversized paste still reaches the handler
+// and gets the clear reason instead of a bare framework 413.
+const MAX_COOKIE_TEXT = 64 * 1024;
+const COOKIE_BODY_LIMIT = 128 * 1024;
+
+// What the routes report when `deps.cookies` is absent. Both are content-free by construction.
+const COOKIES_UNWIRED: CookieResult = {
+  ok: false,
+  reason: "the cookie console is not enabled on this server",
+};
+const COOKIES_UNWIRED_HEALTH: CookieHealth = {
+  configured: false,
+  source: "none",
+  updatedAt: null,
+  lastCheck: null,
+  browserProfileAvailable: false,
+};
+
+/**
+ * Gate for the COOKIE CONSOLE, on top of the ordinary Discord-session check.
+ *
+ * Signing in to this panel proves you share a guild with the bot — the right bar for
+ * pause/skip/queue, and completely the wrong one for a console that can replace the bot's
+ * signed-in Google session and spawn extractions. So the console carries its own credential,
+ * sent per request:
+ *   - COOKIE_ADMIN_PASSWORD unset -> 404. The console is OFF, so an operator who never configured
+ *     it cannot be surprised by it being reachable. Safe default rather than silent exposure.
+ *   - set, header missing/wrong   -> 403, compared in constant time.
+ * Returns true when the caller may proceed; otherwise it has already replied.
+ */
+async function requireCookieAdmin(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  expected: string | null | undefined,
+): Promise<boolean> {
+  // Absent, null or empty all mean the same thing: not configured, therefore OFF. An empty
+  // password is not a password, and defaulting to "open" is exactly the accident to avoid.
+  if (!expected) {
+    await reply.code(404).send({ error: "cookie console is disabled" });
+    return false;
+  }
+  const raw = req.headers["x-cookie-admin"];
+  const supplied = Array.isArray(raw) ? (raw[0] ?? "") : (raw ?? "");
+  if (!verifyPassword(supplied, expected)) {
+    await reply.code(403).send({ error: "cookie console password required" });
+    return false;
+  }
+  return true;
 }
 
 function sessionUser(req: FastifyRequest): (DiscordUser & { id: string }) | null {
@@ -661,4 +726,99 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
       return { ok: true, playlists: bot.hub.get(req.params.id).listPlaylists() };
     },
   );
+
+  // ── Cookie console ────────────────────────────────────────────────────────────────────────
+  // Deliberately NOT under /api/bots/:botId — every bot in the process shares one YouTubeService
+  // and therefore one jar, so this is a process-wide operator tool, not a per-bot control.
+  //
+  // The ordinary login guard applies, and one absolute rule sits on top of it: no response here —
+  // success, failure, or unexpected throw — may carry a single byte of cookie VALUE. Every body
+  // below is either a CookieHealth (booleans and timestamps) or a CookieResult whose `reason`
+  // comes from CookieService's own fixed vocabulary. An error's message is NEVER forwarded: a
+  // yt-dlp or fs failure can embed the jar path and the line it choked on, and this panel is
+  // internet-facing, so an echoed jar is an echoed Google account.
+
+  /**
+   * Run one CookieService call and turn ANY rejection into a CookieResult with a fixed reason.
+   * The service is written not to reject, so this is the belt to that suspenders — and it is the
+   * single place that guarantees an unexpected error's message never reaches the client. Takes a
+   * thunk, not a promise, so a synchronous throw is caught too. An admin endpoint that 500s while
+   * the owner is trying to get the bot playing again is worse than useless.
+   */
+  async function settleCookies(
+    work: () => Promise<CookieResult>,
+    fallback: string,
+  ): Promise<CookieResult> {
+    try {
+      return await work();
+    } catch {
+      return { ok: false, reason: fallback };
+    }
+  }
+
+  app.get("/api/cookies", async (req, reply) => {
+    if (!(await requireLogin(req, reply))) return;
+    if (!(await requireCookieAdmin(req, reply, deps.cookieAdminPassword))) return;
+    if (!deps.cookies) return reply.code(503).send(COOKIES_UNWIRED_HEALTH);
+    let health: CookieHealth;
+    try {
+      health = deps.cookies.health();
+    } catch {
+      // health() is documented as throw-free (a few stats, no network), but "is my bot about to
+      // go silent?" must never itself be answered with a 500 — report the nothing-known shape.
+      health = COOKIES_UNWIRED_HEALTH;
+    }
+    return reply.send(health);
+  });
+
+  app.post("/api/cookies/test", async (req, reply) => {
+    if (!(await requireLogin(req, reply))) return;
+    if (!(await requireCookieAdmin(req, reply, deps.cookieAdminPassword))) return;
+    if (!deps.cookies) return reply.code(503).send(COOKIES_UNWIRED);
+    // No body: a real extraction with whatever jar is live right now.
+    const svc = deps.cookies;
+    return reply.send(await settleCookies(() => svc.test(), "the cookie test could not be run"));
+  });
+
+  app.post<{ Body: { text?: unknown } }>(
+    "/api/cookies",
+    { bodyLimit: COOKIE_BODY_LIMIT },
+    async (req, reply) => {
+      if (!(await requireLogin(req, reply))) return;
+      if (!(await requireCookieAdmin(req, reply, deps.cookieAdminPassword))) return;
+      if (!deps.cookies) return reply.code(503).send(COOKIES_UNWIRED);
+      const text = req.body?.text;
+      // Validation replies keep the CookieResult shape (the console renders `reason` verbatim, so
+      // a bare { error } would surface as an empty failure) and describe only the SHAPE of the
+      // input — its type and its length — never any of its bytes. The paste itself goes straight
+      // to saveFromText, which owns normalizing, writing 0600, hot-applying and testing it.
+      if (typeof text !== "string") {
+        return reply
+          .code(400)
+          .send({ ok: false, reason: "text must be a string" } satisfies CookieResult);
+      }
+      if (text.length > MAX_COOKIE_TEXT) {
+        return reply.code(400).send({
+          ok: false,
+          reason: `text must be at most ${MAX_COOKIE_TEXT} characters`,
+        } satisfies CookieResult);
+      }
+      const svc = deps.cookies;
+      return reply.send(
+        await settleCookies(() => svc.saveFromText(text), "the cookies could not be saved"),
+      );
+    },
+  );
+
+  app.post("/api/cookies/import", async (req, reply) => {
+    if (!(await requireLogin(req, reply))) return;
+    if (!(await requireCookieAdmin(req, reply, deps.cookieAdminPassword))) return;
+    if (!deps.cookies) return reply.code(503).send(COOKIES_UNWIRED);
+    // No body: the profile to read is server-side config (COOKIE_BROWSER_PROFILE), never a
+    // client-supplied path — the browser sidecar is LAN-only and its location is not negotiable.
+    const svc = deps.cookies;
+    return reply.send(
+      await settleCookies(() => svc.importFromBrowser(), "the browser import could not be run"),
+    );
+  });
 }

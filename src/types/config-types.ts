@@ -10,6 +10,13 @@ export interface MediaConfig {
   ytCookiesFile: string | null;
   /** Inline Netscape cookies.txt CONTENT; materialized to a file at startup (see materializeCookies). */
   ytCookiesText: string | null;
+  /**
+   * COOKIE_BROWSER_PROFILE — the chromium sidecar's user-data-dir, mounted read-only into this
+   * container. It is the only source of the HttpOnly Google auth cookies (SID, HSID,
+   * __Secure-1PSID) that no page script and no `document.cookie` copy-paste can reach, so the
+   * cookie console's "Import from browser" button is off without it. null = paste-only console.
+   */
+  cookieBrowserProfile: string | null;
   poTokenProviderUrl: string | null;
   sponsorblockRemove: string | null;
   playerClients: string;
@@ -56,4 +63,15 @@ export interface WebConfig {
   allowedWsOrigins: string[];
   nodeEnv: string;
   secureCookies: boolean;
+  /**
+   * COOKIE_ADMIN_PASSWORD — the cookie console's OWN credential, required on every /api/cookies
+   * request on top of the ordinary Discord session.
+   *
+   * The panel is internet-facing and ANY Discord user who shares a guild with the bot can sign in
+   * to it. That is the right bar for pause/skip/queue and completely the wrong bar for a console
+   * that can overwrite the operator's signed-in Google session. null/empty = the console is OFF
+   * (every route 404s and the UI never appears), which is the safe default: an operator who never
+   * configured it cannot be surprised by it being reachable.
+   */
+  cookieAdminPassword: string | null;
 }

@@ -73,6 +73,9 @@ All configuration lives in the `environment:` block of `docker-compose.yml` — 
 | `YT_PLAYER_CLIENTS`      | no       | `android_vr,web_embedded,tv`        | yt-dlp player clients to try (see note below)                                                                                                                                                                                                                         |
 | `YT_PROXY`               | no       | —                                   | Residential/SOCKS proxy for yt-dlp, if your IP is blocked by YouTube                                                                                                                                                                                                  |
 | `YT_COOKIES`             | no       | —                                   | Path to a mounted Netscape `cookies.txt` (helps on flagged IPs)                                                                                                                                                                                                       |
+| `YT_COOKIES_TEXT`        | no       | —                                   | Inline cookies pasted into compose — a `cookies.txt` export **or** a one-line browser `Cookie:` header. A **seed only**: once the jar exists it is not re-applied on restart (see [Cookies & the cookie console](#cookies--the-cookie-console))                       |
+| `COOKIE_ADMIN_PASSWORD`  | no       | —                                   | Enables the in-panel **cookie console**. Unset = the console is OFF (routes `404`, UI hidden). Its own password, deliberately **not** the Discord login                                                                                                               |
+| `COOKIE_BROWSER_PROFILE` | no       | —                                   | The chromium sidecar's user-data-dir (read-only mount) for one-click cookie import. Unset = paste-only console                                                                                                                                                        |
 | `PO_TOKEN_PROVIDER_URL`  | no       | —                                   | PO-token provider URL; only set when running the `pot` sidecar                                                                                                                                                                                                        |
 | `SPONSORBLOCK_REMOVE`    | no       | —                                   | SponsorBlock categories to skip (e.g. `sponsor,intro,outro,selfpromo`)                                                                                                                                                                                                |
 | `NORMALIZE_LOUDNESS`     | no       | `false`                             | **Initial default** for the per-guild "normalize loudness" (EBU R128) toggle — the web panel overrides this per guild at runtime                                                                                                                                      |
@@ -156,6 +159,99 @@ docker compose --profile pot up -d
 and set `PO_TOKEN_PROVIDER_URL=http://bgutil-pot:4416`. With the default zero-PO-token clients you do **not** need this.
 
 ---
+
+## Cookies & the cookie console
+
+yt-dlp needs a signed-in YouTube session for two things: getting past **"Sign in to confirm you're
+not a bot"** on a flagged IP, and playing **age-restricted** videos whose uploader disabled
+embedding. That session expires every few weeks, which is why refreshing it used to mean editing
+`docker-compose.yml` and redeploying.
+
+### The jar is self-maintaining
+
+Given `--cookies`, yt-dlp does not merely _read_ the file — it writes the jar **back** after each
+run, so YouTube's constantly-rotating auth tokens (`__Secure-*SIDTS`, `SIDCC`, …) stay fresh on
+disk by themselves.
+
+`YT_COOKIES_TEXT` is therefore a **seed, not a source of truth**. It is written to
+`<CACHE_DIR>/yt-cookies.txt` on first boot and then left alone; a fingerprint of the pasted text
+is kept beside it (`yt-cookies.source`) so the file is only rewritten when _you_ change the paste.
+Re-applying it on every restart — which is what earlier versions did — threw away every rotated
+token and reset the session to a weeks-old paste, so it aged out and the bot landed back on the
+bot check. If the jar is deleted but the stamp survives, the seed is written again.
+
+An unwritable `CACHE_DIR` (ENOSPC, a bad bind-mount) **degrades to "no cookies"** and logs it; it
+never crashes the container.
+
+### The console
+
+Set `COOKIE_ADMIN_PASSWORD` to switch it on. Then, in the web panel, add `#cookies` to the URL and
+unlock it with that password. It gives you:
+
+- **Health** — is a jar configured, where it came from, when it was last written, and what the
+  last real extraction said.
+- **Test now** — resolves a real video (["Me at the zoo"](https://www.youtube.com/watch?v=jNQXAC9IVRw),
+  19 s) with the jar that is live right now, so "saved" never has to be taken on faith.
+- **Paste new cookies** — a `cookies.txt` export **or** a single-line browser `Cookie:` header.
+  Written `0600`, hot-applied to the running extractor (**no restart**), then tested.
+- **Import from browser** — see below.
+
+Security, deliberately:
+
+- **Its own password.** Signing in to the panel only proves you share a server with the bot —
+  the right bar for pause/skip, the wrong one for a tool that can replace the bot's Google
+  session. Unset = the routes `404` and the UI never renders, so a console you never configured
+  cannot be reachable. Compared in constant time; sent per request as `x-cookie-admin`.
+- **`#cookies` is discoverability, not access control.** It only decides whether the _password
+  prompt_ is shown. The password is the boundary and the server enforces it.
+- **No cookie value ever leaves the server.** Every response is health or a verdict drawn from a
+  fixed vocabulary; yt-dlp's stderr and error messages are never forwarded, because they embed
+  the jar path and the line they choked on.
+
+### Importing from the sign-in browser (the HttpOnly problem)
+
+The auth cookies that actually matter — `SID`, `HSID`, `__Secure-1PSID` — are **HttpOnly**. No
+page script can read them, so a `document.cookie` copy-paste from DevTools _cannot_ contain them
+(the console will save such a jar and warn you it has no sign-in cookie in it). The two ways to
+get them are a browser-extension `cookies.txt` export, or the sidecar:
+
+```bash
+# Bring up a LAN-only chromium, sign in to YouTube by hand (2FA works — a human is driving)
+LAN_IP=198.51.100.10 docker compose --profile browser up -d
+# → https://<LAN_IP>:8081  (self-signed cert; accept the warning)
+
+# Wait ~30s after signing in — chromium commits cookies on a timer, closing the tab does not
+# flush them — or: docker compose stop chromium
+# Then press "Import from browser" in the cookie console, and take the browser down again:
+docker compose --profile browser down
+```
+
+Notes that will save you an evening:
+
+- **Never publish the sidecar on `0.0.0.0` or route it through your tunnel.** It is a logged-in
+  Google session in a full browser behind one password. The default binds it to loopback.
+- **`PUID`/`PGID` must be `10001`** (the bot's app uid). Chromium's profile dir is mode `0700`,
+  so a mismatched uid makes it unreadable and the import button stays off.
+- **HTTPS on 3001, not HTTP on 3000.** Over plain HTTP to a LAN IP the page is not a secure
+  context, WebCodecs is dead, and signing in by hand is miserable.
+- An import **never** overwrites a working jar unless it proves the profile was signed in.
+  `--cookies-from-browser P --cookies OUT` writes `OUT` _after_ the HTTP request, so `OUT` always
+  ends up holding the ~8 cookies youtube.com hands an anonymous visitor — meaning a
+  "did we get a file?" check passes even for a profile with nothing in it. The import stages to a
+  temp file and promotes it only if yt-dlp reports a non-zero count read from the profile _and_ a
+  real `google.com`/`youtube.com` auth cookie with a non-empty value is present. Otherwise the
+  staged file is discarded and the live jar is untouched.
+
+### Troubleshooting
+
+| Symptom                                                  | Cause                                                                                                         |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Console doesn't appear at all                            | `COOKIE_ADMIN_PASSWORD` is unset — routes `404` by design.                                                    |
+| Prompt doesn't appear                                    | Add `#cookies` to the panel URL.                                                                              |
+| Import button missing                                    | `COOKIE_BROWSER_PROFILE` unset, or no chromium cookie DB under it (sidecar down, wrong dir, or PUID ≠ 10001). |
+| "that profile is not signed in to YouTube"               | Sign in inside the sidecar, then wait ~30 s (or `docker compose stop chromium`) before importing.             |
+| "saved, but this jar carries no YouTube sign-in cookies" | You pasted `document.cookie`. The auth cookies are HttpOnly — use an export or the sidecar import.            |
+| "some cookies could not be decrypted and were dropped"   | The sidecar acquired a keyring and is writing v11 cookies; it must run with `--password-store=basic`.         |
 
 ## Deployment Notes & Gotchas
 

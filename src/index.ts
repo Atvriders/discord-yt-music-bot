@@ -5,7 +5,9 @@ import {
   materializeCookies,
   type BotInstance,
 } from "./config.js";
-import { YouTubeService } from "./youtube/index.js";
+import { YouTubeService, setCookiesFile } from "./youtube/index.js";
+import { runYtDlp } from "./youtube/ytdlp.js";
+import { CookieService, defaultJarPath } from "./cookies/index.js";
 import { AudioCache } from "./cache/index.js";
 import { Semaphore } from "./util/semaphore.js";
 import { GuildController, type DownloadResult } from "./orchestrator/index.js";
@@ -51,6 +53,29 @@ async function main(): Promise<void> {
   // Shared across every bot: extraction, the download cache + concurrency limiter, saved
   // playlists (a playlist belongs to a guild, not a bot), and the live-updates broadcaster.
   const youtube = new YouTubeService(media);
+
+  // The cookie console. It gives the operator a paste box and — when the LAN-only chromium
+  // sidecar's profile volume is mounted — a one-click import of the session they signed into by
+  // hand, so refreshing YouTube auth stops meaning "edit docker-compose and redeploy".
+  // `jarPath` is the EFFECTIVE cookie file: the explicit YT_COOKIES mount when there is one,
+  // otherwise the <CACHE_DIR>/yt-cookies.txt materializeCookies just wrote — so the console
+  // reports on and rewrites the very file the extractor reads. `applyCookies` is the
+  // YouTubeService module setter, which is what makes a saved/imported jar take effect on the
+  // NEXT yt-dlp run: no restart, no compose edit, no silent bot. One console for all bots — they
+  // share this YouTubeService and therefore this jar.
+  const cookies = new CookieService({
+    cacheDir: media.cacheDir,
+    jarPath: media.ytCookiesFile ?? defaultJarPath(media.cacheDir),
+    youtube,
+    browserProfile: media.cookieBrowserProfile,
+    applyCookies: setCookiesFile,
+    run: runYtDlp,
+    // The browser import spawns a yt-dlp of its own; give it the operator's configured budget
+    // rather than the module default so a slow first extraction isn't cut short.
+    ytdlpTimeoutMs: media.ytdlpTimeoutMs,
+    now: () => Date.now(),
+  });
+
   const cache = new AudioCache(media.cacheDir, media.cacheMaxBytes);
   await cache.init();
   const downloads = new Semaphore(botCfg.maxConcurrentDownloads);
@@ -224,6 +249,7 @@ async function main(): Promise<void> {
     youtube,
     adminIds,
     searchLimit: media.searchResultCount,
+    cookies,
     broadcaster,
     gatewayReady: () => registry.list().every((b) => b.client.isReady()),
   });

@@ -74,7 +74,12 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     uptimeSec: Math.floor(process.uptime()),
   }));
   registerAuthRoutes(app, deps.cfg);
-  registerRest(app, deps);
+  // The cookie console's password lives on WebConfig; default the REST-level knob from it so
+  // main() does not have to thread it separately, while a test app can still pass its own.
+  registerRest(app, {
+    ...deps,
+    cookieAdminPassword: deps.cookieAdminPassword ?? deps.cfg.cookieAdminPassword,
+  });
   registerWebsocket(app, {
     // The REST-narrowed registry type exposes the controller as the REST surface (no `on`);
     // the WS surface needs `on`/`snapshot`. The real GuildController has both, so this cast

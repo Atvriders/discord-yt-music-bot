@@ -392,6 +392,7 @@ body::after {
    -------------------------------------------------------------------------- */
 input[type="text"],
 input[type="search"],
+input[type="password"],
 input:not([type]),
 select,
 textarea {

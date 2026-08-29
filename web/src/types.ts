@@ -65,3 +65,36 @@ export interface VoiceChannel { id: string; name: string; }
 export interface TextChannel { id: string; name: string; }
 // A saved, per-guild playlist summary (mirrors the backend PlaylistSummary).
 export interface PlaylistSummary { name: string; trackCount: number; savedAt: number; }
+
+// ── Cookie console (mirrors src/cookies/index.ts) ──────────────────────────────────────────
+// These endpoints answer with HEALTH and VERDICTS only. No cookie name and no cookie value is
+// ever part of a response, by construction on the server — so nothing the panel renders here
+// can leak the signed-in Google session.
+
+/** Where the jar in place came from. "env" = the deploy config (YT_COOKIES / YT_COOKIES_TEXT). */
+export type CookieSource = "env" | "paste" | "browser" | "none";
+
+/** GET /api/cookies — everything the operator console is allowed to know. */
+export interface CookieHealth {
+  /** A cookie jar exists on disk. */
+  configured: boolean;
+  source: CookieSource;
+  /** Epoch ms the jar was last written by the console (null for an env/mounted jar). */
+  updatedAt: number | null;
+  /** The last REAL extraction probe, or null if it has never been run. */
+  lastCheck: { at: number; ok: boolean; reason: string | null } | null;
+  /** The chromium sidecar profile is mounted and readable — enables the import button. */
+  browserProfileAvailable: boolean;
+}
+
+/**
+ * POST /api/cookies, /api/cookies/test, /api/cookies/import. `reason` is operator-facing prose
+ * from the server's own fixed vocabulary. `warning` rides ALONGSIDE a success: the operation
+ * worked and there is still something the operator needs to hear (a jar with no sign-in cookie,
+ * an import that dropped cookies it could not decrypt).
+ */
+export interface CookieResult {
+  ok: boolean;
+  reason: string | null;
+  warning?: string | null;
+}

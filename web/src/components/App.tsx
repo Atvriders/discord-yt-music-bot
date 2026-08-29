@@ -10,6 +10,7 @@ import type {
 import { api, ApiError, type ControlAction } from "../lib/api.js";
 import { useGuildState } from "../lib/useGuildState.js";
 import { Grain } from "./Grain.js";
+import { Cookies } from "./Cookies.js";
 import { LoginGate } from "./LoginGate.js";
 import { ServerSelector } from "./ServerSelector.js";
 import { NowPlaying } from "./NowPlaying.js";
@@ -680,6 +681,14 @@ export function App() {
             </div>
           </>
         )}
+        {/* Maintenance, not playback: the cookie console sits last, collapsed, below everything
+            else — and OUTSIDE the guild-scoped block, because every bot in the process shares one
+            extractor and therefore one cookie jar. It owns its own state and only reads
+            /api/cookies once the operator opens it, so an ordinary member's page load never
+            touches that endpoint (and sees nothing at all unless the console is configured). */}
+        <div className="reveal" style={{ animationDelay: "360ms" }}>
+          <Cookies />
+        </div>
         <footer
           className="reveal text-center font-mono text-xs pt-4"
           style={{ color: "var(--color-ink-faint)", animationDelay: "380ms", letterSpacing: "0.02em" }}

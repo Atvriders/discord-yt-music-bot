@@ -1,4 +1,6 @@
 import type {
+  CookieHealth,
+  CookieResult,
   GuildSettings,
   Me,
   PlaylistSummary,
@@ -23,7 +25,14 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, { credentials: "include", ...init });
   if (!res.ok) {
     let detail = res.statusText;
-    try { detail = ((await res.json()) as { error?: string }).error ?? detail; } catch { /* ignore */ }
+    try {
+      // The cookie console answers with `{ ok, reason }` — a short, deliberately safe explanation
+      // ("sign-in / bot check", "no cookies found in that text"). Reading only `error` threw all
+      // of that away and showed a bare status line, which is useless exactly when an operator is
+      // trying to work out why YouTube is refusing them.
+      const body = (await res.json()) as { error?: string; reason?: string };
+      detail = body.error ?? body.reason ?? detail;
+    } catch { /* ignore */ }
     throw new ApiError(res.status, detail);
   }
   // Some endpoints (e.g. logout) return an empty 204 body; calling res.json() on
@@ -102,7 +111,33 @@ export const api = {
       { method: "DELETE" },
     ),
   logout: () => post<void>("/auth/logout"),
+  // --- Cookie console. Process-wide (every bot shares one jar), so these are NOT bot-scoped.
+  // They return HEALTH/RESULT ONLY: no cookie name or value is ever part of a response, so
+  // nothing here can leak the signed-in Google session. test/import run a REAL yt-dlp
+  // extraction, so their promises can take many seconds.
+  //
+  // Every call carries the console's OWN password in x-cookie-admin. A Discord login only proves
+  // you share a guild with the bot — right for pause/skip, wrong for a tool that can replace the
+  // operator's YouTube session. The server answers 404 when the console is not configured at all
+  // and 403 when the password is missing or wrong.
+  cookies: (admin: string) => req<CookieHealth>("/api/cookies", adminInit(admin)),
+  cookiesTest: (admin: string) => req<CookieResult>("/api/cookies/test", adminPost(admin)),
+  cookiesSave: (admin: string, text: string) =>
+    req<CookieResult>("/api/cookies", adminPost(admin, { text })),
+  cookiesImport: (admin: string) => req<CookieResult>("/api/cookies/import", adminPost(admin)),
 };
+
+/** GET carrying the console password. Kept in memory / sessionStorage only — never a cookie. */
+function adminInit(admin: string): RequestInit {
+  return { headers: { "x-cookie-admin": admin } };
+}
+function adminPost(admin: string, body?: unknown): RequestInit {
+  return {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-cookie-admin": admin },
+    body: JSON.stringify(body ?? {}),
+  };
+}
 
 // The live-state WebSocket URL for a (bot, guild). Previously `/ws?guildId=…`; now the
 // botId is threaded in too so the server knows which bot's player to stream.

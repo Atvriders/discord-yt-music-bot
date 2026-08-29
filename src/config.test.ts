@@ -100,6 +100,7 @@ describe("materializeCookies", () => {
     ytProxy: null,
     ytCookiesFile: null as string | null,
     ytCookiesText: null as string | null,
+    cookieBrowserProfile: null as string | null,
     poTokenProviderUrl: null,
     sponsorblockRemove: null,
     playerClients: "tv",

@@ -106,6 +106,25 @@ services:
       #   .youtube.com	TRUE	/	TRUE	1799999999	SID	<paste-value>
       #   # …or just one line: the whole browser Cookie header:
       #   # YSC=<v>; __Secure-1PSID=<v>; HSID=<v>; SID=<v>; …
+      #  (c) OR — much less of a chore — turn on the COOKIE CONSOLE below and paste/import from
+      #      the web panel at any time, with no redeploy. YT_COOKIES_TEXT is only the SEED: once
+      #      a jar exists, yt-dlp keeps rotating it in place and this value is NOT re-applied on
+      #      restart (it is re-applied only when you change it), so the session stays alive
+      #      instead of resetting to a weeks-old paste every time the container comes up.
+
+      # ── Cookie console (web panel → "Cookie console") ────────────────────────────────────
+      # Its OWN password. UNSET = the console is OFF: every /api/cookies route 404s and the UI
+      # never appears. Signing in to the panel only proves you share a server with the bot —
+      # right for pause/skip, wrong for a tool that can replace the bot's Google session — so
+      # this does not ride on the Discord login. Use a long random value.
+      # Once set, open the panel, add #cookies to the URL, and unlock with this password.
+      COOKIE_ADMIN_PASSWORD: "" # CHANGE_ME to enable the cookie console
+      # The chromium sidecar's user-data-dir, inside the read-only mount below. linuxserver sets
+      # HOME=/config and chromium defaults to $HOME/.config/chromium, so that dir is the one
+      # holding "Default/Cookies". If an image update moves it, find the real one
+      # (`docker compose exec chromium find /config -name Cookies`) and point this at its
+      # user-data-dir. Empty = the Import button is simply off; paste still works.
+      COOKIE_BROWSER_PROFILE: "/browser-profile/.config/chromium"
       # Zero-PO-token clients — reliable on most hosts. Only use "web,mweb" if you also run the
       # bgutil PO-token sidecar (`--profile pot`) and set PO_TOKEN_PROVIDER_URL below; otherwise
       # those clients silently fail to extract audio. (The bgutil yt-dlp plugin ships in the image.)
@@ -114,7 +133,9 @@ services:
       # MUST match PUBLIC_BASE_URL exactly, or the live-updates WebSocket is rejected (no live panel)
       ALLOWED_WS_ORIGINS: "http://localhost:8080"
     ports: ["8080:8080"]
-    volumes: ["cache:/data/cache"]
+    volumes:
+      - "cache:/data/cache"
+      - "browser-profile:/browser-profile:ro" # the sidecar owns this profile; we only read it
     restart: unless-stopped
     healthcheck:
       test:
@@ -136,5 +157,42 @@ services:
     profiles: ["pot"]
     restart: unless-stopped
     expose: ["4416"]
+
+  # Optional sign-in browser: docker compose --profile browser up -d
+  # Log into YouTube in it by hand (2FA works — a human is driving), then WAIT ~30s (chromium
+  # commits cookies on a timer; closing the tab does not flush) or `docker compose stop chromium`,
+  # then press "Import from browser" in the bot's cookie console, and take it down again:
+  # docker compose --profile browser down
+  # This is the ONLY way to get the HttpOnly auth cookies (SID / HSID / __Secure-1PSID); they are
+  # not in `document.cookie`, so a DevTools copy-paste can never contain them.
+  chromium:
+    image: lscr.io/linuxserver/chromium:latest
+    profiles: ["browser"]
+    environment:
+      PUID: "10001" # must match the bot's app uid — chromium's profile dir is mode 0700
+      PGID: "10001"
+      TZ: "Etc/UTC"
+      CUSTOM_USER: "CHANGE_ME" # basic auth on the browser UI; not the cookie-console password
+      PASSWORD: "CHANGE_ME"
+      # --password-store=basic is not optional: with a keyring available chromium writes v11
+      # cookies the bot cannot decrypt, and yt-dlp drops them SILENTLY — you get a jar that looks
+      # fine and is missing exactly the auth cookies you signed in for. (The console warns when it
+      # sees that happen.) The URL is the start page.
+      CHROME_CLI: "--password-store=basic https://www.youtube.com/"
+    # LAN-ONLY. Never publish on 0.0.0.0 and never route this through your tunnel/reverse proxy:
+    # it is a logged-in Google session in a full browser behind one password. Substitute your
+    # host's LAN address (LAN_IP=198.51.100.10 docker compose --profile browser up -d); the
+    # default keeps it on loopback, reachable only over an SSH tunnel.
+    # 3001 is the image's HTTPS listener (3000 is plain HTTP). The cert is self-signed, so you
+    # WILL get a certificate warning on https://<LAN_IP>:8081 — accept it. Over plain HTTP on a
+    # LAN IP the page is not a secure context, and WebCodecs — the desktop's video and audio —
+    # is dead, which makes signing in to YouTube by hand miserable.
+    ports: ["${LAN_IP:-127.0.0.1}:8081:3001"]
+    volumes: ["browser-profile:/config"] # shared, read-write here / read-only in the bot
+    shm_size: "1gb" # the image needs this for real sites (YouTube)
+    mem_limit: 2g
+    restart: "no" # a maintenance tool, not a service — up to sign in, then down
+
 volumes:
   cache:
+  browser-profile:

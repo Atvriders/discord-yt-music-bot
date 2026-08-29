@@ -290,11 +290,46 @@ function toMeta(j: RawInfo): TrackMeta {
   };
 }
 
+/**
+ * The cookie file every SUBSEQUENT yt-dlp run should use, once the cookie console has written one.
+ *
+ * `undefined` is the untouched state and is NOT the same as `null`: untouched falls back to the
+ * configured MediaConfig.ytCookiesFile, whereas `null` is an explicit "run with no cookies at all"
+ * that the console can set deliberately. Module-level rather than per-instance because there is
+ * exactly one jar on disk and every bot in the process shares it.
+ */
+let hotCookiesFile: string | null | undefined;
+
+/**
+ * Point every SUBSEQUENT yt-dlp invocation at `path` — or, with `null`, at no cookies at all —
+ * without a restart. This is the whole point of the cookie console: the operator pastes or
+ * imports a fresh session and the next resolve/search/related/download is already authenticated
+ * with it, instead of the bot staying signed-out until someone edits docker-compose and
+ * redeploys. Runs already in flight keep the args they were spawned with; nothing is interrupted.
+ */
+export function setCookiesFile(path: string | null): void {
+  hotCookiesFile = path;
+}
+
+/** Test-only: forget any hot-applied jar and fall back to config. */
+export function resetCookiesFileForTests(): void {
+  hotCookiesFile = undefined;
+}
+
 export class YouTubeService {
   constructor(
     private readonly cfg: MediaConfig,
     private readonly run: RunFn = runYtDlp,
   ) {}
+
+  /**
+   * The jar in force RIGHT NOW: whatever the console last applied, else the configured file.
+   * Read per invocation (never cached in the constructor) so a paste/import takes effect on the
+   * very next yt-dlp run.
+   */
+  private cookiesFile(): string | null {
+    return hotCookiesFile !== undefined ? hotCookiesFile : this.cfg.ytCookiesFile;
+  }
 
   /**
    * Source-agnostic network args (proxy + cookies) applied to EVERY yt-dlp invocation,
@@ -305,7 +340,8 @@ export class YouTubeService {
   private netArgs(): string[] {
     const args: string[] = [];
     if (this.cfg.ytProxy) args.push("--proxy", this.cfg.ytProxy);
-    if (this.cfg.ytCookiesFile) args.push("--cookies", this.cfg.ytCookiesFile);
+    const cookies = this.cookiesFile();
+    if (cookies) args.push("--cookies", cookies);
     return args;
   }
 
@@ -462,6 +498,13 @@ export class YouTubeService {
         "--flat-playlist",
         "--no-warnings",
         "--no-progress",
+        // Search is a yt-dlp invocation like any other and must carry the operator's proxy and
+        // cookie jar. It was the ONE call site that did not: on a flagged IP, resolve/download
+        // ran authenticated while a "?play <song name>" search hit the bot check signed-out, so
+        // the picker came up empty for a bot that could play any link you gave it by hand.
+        // (No extractor-args here on purpose — a flat-playlist search never touches a player,
+        // so a player_client is meaningless; the proxy and the jar are the parts that matter.)
+        ...this.netArgs(),
         "--",
         `ytsearch${limit}:${query}`,
       ],
@@ -573,6 +616,9 @@ export class YouTubeService {
           "--flat-playlist",
           "--no-warnings",
           "--no-progress",
+          // Same as search(): the autoplay artist lookup is a real request to YouTube and needs
+          // the proxy and cookie jar too, or autoplay quietly dries up on a flagged IP.
+          ...this.netArgs(),
           "--",
           `ytsearch${limit}:${query}`,
         ],

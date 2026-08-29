@@ -1,8 +1,9 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { MediaConfig, BotConfig, BotInstance, WebConfig } from "./types/config-types.js";
 import { parseAdminIds } from "./auth/authz.js";
-import { LEVELS, isValidLevel } from "./util/logger.js";
+import { LEVELS, isValidLevel, getRootLogger } from "./util/logger.js";
 
 export type { MediaConfig, BotConfig, BotInstance, WebConfig } from "./types/config-types.js";
 
@@ -53,6 +54,11 @@ export function loadMediaConfig(env: Env = process.env): MediaConfig {
     // Inline cookies.txt CONTENT (pasted straight into compose) — materialized to a file at
     // startup (see materializeCookies) since yt-dlp's --cookies only accepts a path.
     ytCookiesText: strEnv(env, "YT_COOKIES_TEXT"),
+    // The chromium sign-in sidecar's user-data-dir (read-only mount). Unset (the default) is
+    // not an error and never fails startup: it just means the cookie console's browser-import
+    // half is off, which health() reports live so the UI can disable the button instead of
+    // offering an action that cannot work.
+    cookieBrowserProfile: strEnv(env, "COOKIE_BROWSER_PROFILE"),
     poTokenProviderUrl: strEnv(env, "PO_TOKEN_PROVIDER_URL"),
     sponsorblockRemove: strEnv(env, "SPONSORBLOCK_REMOVE"),
     playerClients: strEnv(env, "YT_PLAYER_CLIENTS") ?? "android_vr,web_embedded,tv",
@@ -111,9 +117,49 @@ export async function materializeCookies(media: MediaConfig): Promise<string | n
   if (media.ytCookiesFile) return media.ytCookiesFile;
   const text = media.ytCookiesText?.trim();
   if (!text) return null;
-  await mkdir(media.cacheDir, { recursive: true });
+  // Keep in step with COOKIE_JAR_FILE / defaultJarPath in src/cookies/index.ts — the console
+  // reports on and rewrites the very file the extractor reads. (config.ts cannot import that
+  // module: cookies/index.ts imports toNetscapeCookies from here.) config.cookiejar.test.ts
+  // asserts the two agree.
   const path = join(media.cacheDir, "yt-cookies.txt");
-  await writeFile(path, toNetscapeCookies(text), { mode: 0o600 });
+  // Fingerprint of the PASTED text, so we can tell "the operator pasted new cookies" apart from
+  // "this is the same paste as last boot".
+  const stampPath = join(media.cacheDir, "yt-cookies.source");
+  const stamp = createHash("sha256").update(text).digest("hex").slice(0, 16);
+  try {
+    await mkdir(media.cacheDir, { recursive: true });
+    // DO NOT clobber a cookie jar yt-dlp has been maintaining. Given --cookies, yt-dlp does not
+    // merely read the file: it writes the jar BACK after each run, so YouTube's constantly-rotating
+    // auth tokens (__Secure-*SIDTS, SIDCC, …) stay fresh on disk by themselves. Rewriting the file
+    // from YT_COOKIES_TEXT on every boot threw all of that away and reset the session to the
+    // ORIGINAL paste — which ages out after a couple of weeks and lands the bot back on
+    // "Sign in to confirm you're not a bot". Keeping the rotated jar is what makes the session
+    // self-maintaining instead of a recurring manual chore, and it matters MORE here than
+    // anywhere: this container restarts on every image pull, and each restart used to roll the
+    // session back to whatever was pasted into compose however many weeks ago.
+    const rotated = await stat(path).then(
+      () => true,
+      () => false,
+    );
+    const prevStamp = await readFile(stampPath, "utf8").then(
+      (v) => v.trim(),
+      () => null,
+    );
+    if (rotated && prevStamp === stamp) return path;
+    // Either there is no jar yet, or the operator pasted DIFFERENT cookies — their paste wins.
+    await writeFile(path, toNetscapeCookies(text), { mode: 0o600 });
+    await writeFile(stampPath, `${stamp}\n`, { mode: 0o600 });
+  } catch (err) {
+    // A FULL DISK (ENOSPC) or an unwritable CACHE_DIR must NOT take the bot down — this throwing
+    // out of main() would crash-loop the container over a cookie file. Degrade instead: yt-dlp
+    // runs WITHOUT cookies, which is fine on an unflagged IP and only costs the "Sign in to
+    // confirm you're not a bot" bypass (and age-restricted playback) until it is fixed.
+    getRootLogger().error(
+      { err, path },
+      "could not write the cookies file (disk full or CACHE_DIR unwritable?) — yt-dlp will run WITHOUT cookies",
+    );
+    return null;
+  }
   return path;
 }
 
@@ -232,5 +278,9 @@ export function loadWebConfig(env: Env = process.env): WebConfig {
       .filter(Boolean),
     nodeEnv,
     secureCookies: nodeEnv === "production",
+    // Opt-in by design: unset means the cookie console is OFF, not open. There is deliberately
+    // no default and no fallback to SESSION_SECRET — a console that can replace the bot's Google
+    // session must be switched on explicitly, by someone who chose a password for it.
+    cookieAdminPassword: strEnv(env, "COOKIE_ADMIN_PASSWORD"),
   };
 }
