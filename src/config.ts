@@ -88,19 +88,144 @@ export function loadMediaConfig(env: Env = process.env): MediaConfig {
  *    youtube.com origin (domain ".youtube.com", path "/", Secure). Header cookies carry no expiry,
  *    so a far-future one is stamped in.
  */
-export function toNetscapeCookies(text: string): string {
-  const t = text.trim().replace(/^cookie:\s*/i, "");
-  // Already Netscape: tab-separated fields or the file header present → use as-is (+ header).
-  if (t.includes("\t") || /^#\s*(netscape|http\s+cookie)/i.test(t)) {
-    const withHeader = /^#\s*(netscape|http\s+cookie)/i.test(t)
-      ? t
-      : `# Netscape HTTP Cookie File\n${t}`;
-    return withHeader.endsWith("\n") ? withHeader : `${withHeader}\n`;
+/**
+ * One Netscape cookie line. Field order is fixed by the format:
+ * domain / include-subdomains / path / secure / expiry / name / value.
+ */
+function netscapeLine(
+  domain: string,
+  includeSub: boolean,
+  path: string,
+  secure: boolean,
+  expiry: number | string,
+  name: string,
+  value: string,
+): string {
+  return [
+    domain,
+    includeSub ? "TRUE" : "FALSE",
+    path || "/",
+    secure ? "TRUE" : "FALSE",
+    String(expiry),
+    name,
+    value,
+  ].join("\t");
+}
+
+const NETSCAPE_HEADER = "# Netscape HTTP Cookie File";
+/** ~2033. A browser `Cookie:` header and some JSON exports carry no usable per-cookie expiry. */
+const DEFAULT_EXPIRY = "2000000000";
+
+/**
+ * A cookie exported as JSON — the shape the popular "Cookie-Editor" / "EditThisCookie" style
+ * extensions produce. Only the fields we can map are read; anything else is ignored.
+ */
+interface JsonCookie {
+  name?: unknown;
+  value?: unknown;
+  domain?: unknown;
+  path?: unknown;
+  secure?: unknown;
+  expirationDate?: unknown;
+  expires?: unknown;
+}
+
+/**
+ * Convert a JSON cookie export to Netscape, or null when the text is not a JSON export we
+ * understand (so the caller can try the other shapes).
+ *
+ * Worth supporting because it is one of the two things a cookie extension will hand you, and
+ * pasting it used to produce the flatly untrue "no cookies found in that text" — the cookies
+ * were right there, in a format nothing on this path spoke.
+ */
+function fromJsonCookies(text: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
   }
-  // Otherwise treat it as a "Cookie:" request header and convert each name=value pair.
-  const EXPIRY = "2000000000"; // ~2033; a browser Cookie header has no per-cookie expiry
-  const out = ["# Netscape HTTP Cookie File"];
-  for (const pair of t.split(";")) {
+  const list: unknown = Array.isArray(parsed)
+    ? parsed
+    : ((parsed as { cookies?: unknown })?.cookies ?? null);
+  if (!Array.isArray(list)) return null;
+  const out = [NETSCAPE_HEADER];
+  for (const raw of list) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const c = raw as JsonCookie;
+    const name = typeof c.name === "string" ? c.name : null;
+    if (name === null || name === "") continue;
+    const value = typeof c.value === "string" ? c.value : "";
+    const domain = typeof c.domain === "string" && c.domain ? c.domain : ".youtube.com";
+    const path = typeof c.path === "string" && c.path ? c.path : "/";
+    // A session cookie (no expiry) is written far-future rather than 0: yt-dlp discards
+    // expiry-0 entries, and a session cookie is exactly what a fresh sign-in produces.
+    const expRaw = typeof c.expirationDate === "number" ? c.expirationDate : c.expires;
+    const exp =
+      typeof expRaw === "number" && Number.isFinite(expRaw) && expRaw > 0
+        ? Math.floor(expRaw)
+        : DEFAULT_EXPIRY;
+    out.push(
+      netscapeLine(domain, domain.startsWith("."), path, c.secure !== false, exp, name, value),
+    );
+  }
+  return out.length > 1 ? `${out.join("\n")}\n` : null;
+}
+
+/**
+ * Clean up text that is ALREADY meant to be a Netscape jar, returning null when nothing usable
+ * survives (so the caller can fall through to the other parsers).
+ *
+ * Two jobs, and the second is the important one:
+ *
+ *  - REPAIR lines whose tabs were eaten. Copying a cookies.txt out of a viewer, a chat window or
+ *    a textarea very often turns the tabs into spaces, and the result *looks* perfect to a human
+ *    while being unparseable to yt-dlp.
+ *  - DROP lines that cannot be repaired. This matters more than it sounds: yt-dlp's cookie
+ *    loader raises on the FIRST malformed line and refuses the ENTIRE file, so one stray line
+ *    does not cost you one cookie — it costs you every cookie, and (until the cookies_invalid
+ *    classification) reported itself as a mystery "unknown" on every extraction the bot ran.
+ */
+function repairNetscape(text: string): string | null {
+  const out = [NETSCAPE_HEADER];
+  let cookies = 0;
+  for (const raw of text.split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    if (line.trim() === "") continue;
+    // The file header is re-added above; other comments are dropped as noise. `#HttpOnly_` is
+    // NOT a comment — it is the prefix on precisely the auth cookies that matter — so it has to
+    // be excluded from this test before anything else looks at the line.
+    const isHttpOnly = line.startsWith("#HttpOnly_");
+    if (!isHttpOnly && line.startsWith("#")) continue;
+    if (line.includes("\t")) {
+      // The line IS tab-delimited, so its field count is authoritative: exactly 7 or it is
+      // malformed. Never fall through to the whitespace repair here — that would split an
+      // 8-field line (a stray tab, a pasted table) into six fields plus a value silently
+      // welded together from the rest, producing a jar that PARSES and authenticates nothing.
+      // A wrong cookie the probe might wave through is worse than a rejected paste.
+      if (line.split("\t").length === 7) {
+        out.push(line);
+        cookies += 1;
+      }
+      continue;
+    }
+    // No tabs at all: they were eaten in transit. A Netscape VALUE may legitimately contain
+    // spaces, so the first six fields are taken as tokens and the rest is rejoined as the value.
+    const tok = line.split(/\s+/).filter((x) => x !== "");
+    if (tok.length < 7) continue;
+    const flagsLookRight =
+      /^(TRUE|FALSE)$/i.test(tok[1] ?? "") && /^(TRUE|FALSE)$/i.test(tok[3] ?? "");
+    if (!flagsLookRight || !/^-?\d+$/.test(tok[4] ?? "")) continue;
+    out.push([...tok.slice(0, 6), tok.slice(6).join(" ")].join("\t"));
+    cookies += 1;
+  }
+  return cookies > 0 ? `${out.join("\n")}\n` : null;
+}
+
+/** Convert a browser `Cookie:` REQUEST header ("name=value; name=value; …") to Netscape. */
+function fromCookieHeader(text: string): string {
+  const out = [NETSCAPE_HEADER];
+  for (const pair of text.split(";")) {
     const eq = pair.indexOf("=");
     if (eq === -1) continue;
     const name = pair.slice(0, eq).trim();
@@ -108,9 +233,48 @@ export function toNetscapeCookies(text: string): string {
     if (!name) continue;
     // Secure=TRUE is correct for YouTube's https-only auth cookies (and required for the
     // __Secure-/__Host- prefixed ones) so yt-dlp sends them.
-    out.push([".youtube.com", "TRUE", "/", "TRUE", EXPIRY, name, value].join("\t"));
+    out.push(netscapeLine(".youtube.com", true, "/", true, DEFAULT_EXPIRY, name, value));
   }
   return `${out.join("\n")}\n`;
+}
+
+/**
+ * Normalize pasted cookie text to Netscape cookies.txt (what yt-dlp's --cookies wants). Accepts
+ * every shape an operator plausibly arrives with, because the alternative is a console that
+ * says "no cookies found in that text" about text that visibly contains cookies:
+ *
+ *  - an exported `cookies.txt` (tab-separated Netscape lines) — INCLUDING one whose tabs were
+ *    turned into spaces somewhere between the export and the paste box;
+ *  - a JSON export from a cookie-manager extension;
+ *  - a raw browser `Cookie:` REQUEST header ("name=value; name=value; …" on one line, e.g. from
+ *    DevTools → Network → a youtube.com request → Request Headers). The header form is converted
+ *    assuming the youtube.com origin (domain ".youtube.com", path "/", Secure), since that is the
+ *    request it was copied from; header cookies carry no expiry, so a far-future one is stamped.
+ *
+ * Whatever comes out is a jar yt-dlp can actually parse, or (for unusable input) a header-only
+ * file with no cookie lines — which the caller detects with `countCookieLines` and rejects
+ * BEFORE it can overwrite a working jar.
+ */
+export function toNetscapeCookies(text: string): string {
+  const t = text.trim().replace(/^cookie:\s*/i, "");
+  if (t === "") return `${NETSCAPE_HEADER}\n`;
+
+  // JSON export from a cookie-manager extension.
+  if (t.startsWith("[") || t.startsWith("{")) {
+    const jar = fromJsonCookies(t);
+    if (jar !== null) return jar;
+  }
+
+  // Netscape rows, tabs intact or not. This is tried UNCONDITIONALLY rather than only when the
+  // text contains a tab or the file header: an export whose tabs were eaten AND whose header
+  // line did not survive the copy has neither marker, and gating on them sent exactly that
+  // paste to the header parser, which read the whole row as one giant cookie name. The repair
+  // is strict enough to be safe as a first guess — it demands TRUE/FALSE flags and a numeric
+  // expiry in the right columns — so a genuine `Cookie:` header falls straight through it.
+  const jar = repairNetscape(t);
+  if (jar !== null) return jar;
+
+  return fromCookieHeader(t);
 }
 
 export async function materializeCookies(media: MediaConfig): Promise<string | null> {

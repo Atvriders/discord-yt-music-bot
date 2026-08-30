@@ -10,6 +10,13 @@ export enum YtErrorKind {
   RateLimited = "rate_limited",
   Timeout = "timeout",
   TooLong = "too_long",
+  /**
+   * yt-dlp refused the COOKIE FILE itself and never got as far as the video. This is not a
+   * YouTube verdict, it is a malformed jar on our side — and it fails EVERY call, so it has to
+   * be told apart from a generic Unknown (which is retryable and would grind the whole client
+   * ladder against an error no client swap can fix).
+   */
+  CookiesInvalid = "cookies_invalid",
   Unknown = "unknown",
 }
 
@@ -25,6 +32,14 @@ export class YtError extends Error {
 
 // Ordered most-specific / highest-priority first.
 const RULES: ReadonlyArray<[YtErrorKind, RegExp]> = [
+  // FIRST, because it fires before yt-dlp ever contacts YouTube: given an unparseable --cookies
+  // file it aborts at startup, so every other rule below would be matching against an error that
+  // has nothing to do with the video. Left as Unknown this cost a full ladder of retries and
+  // reported "unknown" to the operator, which is exactly the dead end this kind exists to end.
+  [
+    YtErrorKind.CookiesInvalid,
+    /does not look like a netscape format cookies file|unable to load cookies|failed to (parse|load) cookies|could not load cookies|unable to open cookies file/i,
+  ],
   [YtErrorKind.IpBlocked, /not a bot|ip is likely being blocked/i],
   [
     YtErrorKind.PoTokenSabr,
@@ -64,6 +79,9 @@ export function classifyYtdlpError(stderr: string, code: number | null): YtError
  * first-choice client is broken by a YouTube-side change.
  */
 const TERMINAL_KINDS: ReadonlySet<YtErrorKind> = new Set([
+  // A jar yt-dlp cannot parse fails identically on every client, so retrying the ladder only
+  // multiplies the wait before the operator sees the one message that would help them.
+  YtErrorKind.CookiesInvalid,
   YtErrorKind.Private,
   YtErrorKind.Unavailable,
   YtErrorKind.MembersOnly,

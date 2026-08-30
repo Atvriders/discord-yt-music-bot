@@ -275,7 +275,9 @@ describe("CookieService.saveFromText", () => {
     const res = await svc.saveFromText(junk);
 
     expect(res.ok).toBe(false);
-    expect(res.reason).toBe("no cookies found in that text");
+    // Prefix, not the whole string: the reason goes on to name the formats that ARE accepted,
+    // and that guidance should be free to improve without breaking this test.
+    expect(res.reason).toMatch(/^no cookies found in that text/);
     // The reason is a literal WE wrote: not one byte of the paste, not even a length or a prefix.
     // Checked word by word, so a future "reason" that helpfully quotes the input fails here.
     for (const word of junk.split(/\s+/)) expect(res.reason).not.toContain(word);
@@ -290,7 +292,8 @@ describe("CookieService.saveFromText", () => {
     const { svc, applyCookies } = await make();
     for (const junk of ["", "   \n\t\n ", "# Netscape HTTP Cookie File\n"]) {
       const res = await svc.saveFromText(junk);
-      expect(res).toEqual({ ok: false, reason: "no cookies found in that text" });
+      expect(res.ok).toBe(false);
+      expect(res.reason).toMatch(/^no cookies found in that text/);
     }
     expect(applyCookies).not.toHaveBeenCalled();
   });
@@ -371,6 +374,13 @@ describe("CookieService.test", () => {
       [new YtError(YtErrorKind.RateLimited, "x"), "rate-limited by YouTube"],
       [new YtError(YtErrorKind.Timeout, "x"), "yt-dlp timed out"],
       [new YtError(YtErrorKind.PoTokenSabr, "x"), "extraction blocked (po_token / sabr)"],
+      // Not a YouTube verdict: yt-dlp refused the JAR and never reached the video, so the
+      // reason has to name the file and say that playback is down until it is replaced —
+      // "unknown" sent the operator hunting YouTube-side problems that did not exist.
+      [
+        new YtError(YtErrorKind.CookiesInvalid, "x"),
+        "yt-dlp cannot read this cookie file (not valid Netscape format) — playback is broken until it is replaced",
+      ],
       [new YtError(YtErrorKind.Unavailable, "x"), "unavailable"],
       [
         Object.assign(new Error("spawn yt-dlp ENOENT"), { code: "ENOENT" }),
@@ -660,7 +670,9 @@ describe("cookie line validation is exact", () => {
       "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2000000000\tSID\tv\tEXTRA\n";
     const res = await svc.saveFromText(mangled);
     expect(res.ok).toBe(false);
-    expect(res.reason).toBe("no cookies found in that text");
+    // Prefix, not the whole string: the reason goes on to name the formats that ARE accepted,
+    // and that guidance should be free to improve without breaking this test.
+    expect(res.reason).toMatch(/^no cookies found in that text/);
     expect(applyCookies).not.toHaveBeenCalled(); // and nothing was applied to the live station
   });
 });

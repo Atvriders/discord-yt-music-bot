@@ -217,7 +217,8 @@ export function extractedCookieCount(stdout: string): number | null {
 
 /** Reasons that are ALWAYS these exact strings — no interpolation of anything external. */
 const REASON_WRITE_FAILED = "could not write the cookie jar (disk full or CACHE_DIR unwritable?)";
-const REASON_NO_COOKIES = "no cookies found in that text";
+const REASON_NO_COOKIES =
+  "no cookies found in that text — paste a cookies.txt export, a cookie-extension JSON export, or the one-line \"Cookie:\" request header from DevTools → Network → a youtube.com request (the Console's document.cookie and the Application tab's cookie TABLE are not accepted formats)";
 const REASON_INTERNAL = "internal error";
 const REASON_PROFILE_UNREADABLE = "the browser profile is not readable (is the sidecar up?)";
 
@@ -269,6 +270,11 @@ function probeReason(err: unknown): string {
         return "yt-dlp timed out";
       case YtErrorKind.PoTokenSabr:
         return "extraction blocked (po_token / sabr)";
+      // Not a YouTube verdict at all: yt-dlp rejected the jar and never reached the video. Say
+      // so plainly, because the operator's next action is "re-paste it", not "try again later" —
+      // and because in this state EVERY extraction fails, not just this probe.
+      case YtErrorKind.CookiesInvalid:
+        return "yt-dlp cannot read this cookie file (not valid Netscape format) — playback is broken until it is replaced";
       default:
         // Kinds like unavailable/private say the PROBE VIDEO is the problem, not the cookies.
         return err.kind;
@@ -558,9 +564,19 @@ export class CookieService {
       await this.youtube.resolve(PROBE_VIDEO_ID);
       result = { ok: true, reason: null };
     } catch (err) {
-      // DELIBERATELY not logging `err`: a yt-dlp failure carries its stderr slice, and this is
-      // the one code path guaranteed to have been run with an authenticated jar.
       result = { ok: false, reason: probeReason(err) };
+      // Log the failure SERVER-SIDE, at warn, with the yt-dlp message intact.
+      //
+      // The module's rule is that a cookie value never reaches a CLIENT — not that the operator
+      // may never diagnose their own bot. Withholding this from the log too is what turned a
+      // failing probe into a dead end: the console could only ever say "unknown", and the one
+      // place the real reason existed was thrown away. yt-dlp does not echo cookie values in its
+      // errors (it names the jar PATH, which is already all over these logs), so `docker compose
+      // logs bot` is the right place for it, and the HTTP response still carries only the kind.
+      getRootLogger().warn(
+        { err, reason: result.reason },
+        "cookie probe failed — this is the yt-dlp error behind the console's message",
+      );
     }
     this.lastCheck = { at: this.now(), ok: result.ok, reason: result.reason };
     return result;

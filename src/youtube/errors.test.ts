@@ -83,3 +83,39 @@ describe("isRetryableAcrossClients", () => {
     expect(isRetryableAcrossClients(new Error("spawn ENOENT"))).toBe(true);
   });
 });
+
+describe("cookies_invalid — a jar yt-dlp cannot parse is not a YouTube verdict", () => {
+  // Given an unparseable --cookies file yt-dlp aborts before contacting YouTube, so EVERY call
+  // fails identically. Classified as Unknown it was retryable, so the ladder burned through
+  // every player_client and still reported the useless "unknown" to the operator.
+  const MESSAGES = [
+    "ERROR: '/data/cache/yt-cookies.txt' does not look like a Netscape format cookies file",
+    "ERROR: Unable to load cookies: invalid Netscape format cookies file",
+    "ERROR: unable to open cookies file",
+    "ERROR: failed to parse cookies",
+  ];
+
+  it("classifies every spelling yt-dlp uses", () => {
+    for (const stderr of MESSAGES) {
+      expect(classifyYtdlpError(stderr, 1).kind).toBe(YtErrorKind.CookiesInvalid);
+    }
+  });
+
+  it("is TERMINAL — no player_client swap can fix a broken file", () => {
+    expect(isRetryableAcrossClients(classifyYtdlpError(MESSAGES[0]!, 1))).toBe(false);
+  });
+
+  it("wins over the other rules, since it fires before YouTube is even reached", () => {
+    // A cookie-load abort can carry incidental text that trips a looser rule; the file is still
+    // the thing to fix.
+    const stderr =
+      "ERROR: does not look like a Netscape format cookies file (sign in to confirm you're not a bot)";
+    expect(classifyYtdlpError(stderr, 1).kind).toBe(YtErrorKind.CookiesInvalid);
+  });
+
+  it("does not fire on an ordinary extraction failure that merely says 'cookies'", () => {
+    const stderr =
+      "ERROR: Sign in to confirm you're not a bot. Use --cookies for the authentication.";
+    expect(classifyYtdlpError(stderr, 1).kind).toBe(YtErrorKind.IpBlocked);
+  });
+});
