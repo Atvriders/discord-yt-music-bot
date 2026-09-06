@@ -1990,3 +1990,82 @@ describe("recovering from a lost voice connection", () => {
     expect(ctrl.snapshot().paused).toBe(true);
   });
 });
+
+describe("autoplay does not repeat itself", () => {
+  // The reported symptom: autoplay kept picking the SAME song over and over and stacking
+  // duplicates of it into the queue. A YouTube Mix is deterministic for a given seed, so the
+  // moment the de-dup forgets what it already played, the very first entry gets picked again —
+  // and `autoplaySeen` is in-memory only and is CLEARED by every session teardown (a dropped
+  // voice connection, which this bot had been doing constantly). The queue's own history
+  // survives a teardown, so it is the durable record of what has already been played.
+  const EMINEM = "eminem00001";
+
+  function alwaysSameRelated() {
+    return makeController({
+      settings: { autoplay: true },
+      // Whatever the seed, the Mix offers the same track first — which is how a real YouTube
+      // Mix behaves: it is deterministic for a given seed.
+      relatedFn: async () => [meta(EMINEM), meta("otherrrrrr1"), meta("otherrrrrr2")],
+    });
+  }
+
+  const tick = async (n = 3) => {
+    for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0));
+  };
+
+  it("does not re-serve a track already in HISTORY after a teardown wipes its memory", async () => {
+    const { ctrl, session } = alwaysSameRelated();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("userrrrrrrr"), requester);
+    await tick();
+
+    session.emit("trackEnd"); // → autoplay picks EMINEM and plays it
+    await tick();
+    expect(ctrl.snapshot().current?.meta.videoId).toBe(EMINEM);
+    session.emit("trackEnd"); // EMINEM finishes → lands in history
+    await tick();
+    expect(ctrl.snapshot().history.map((i) => i.meta.videoId)).toContain(EMINEM);
+
+    // The voice connection drops: the teardown clears the in-memory autoplaySeen set.
+    session.emit("idle");
+    await tick();
+
+    // Back again, another song, another autoplay turn.
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("secondddddd"), requester);
+    await tick();
+    session.emit("trackEnd");
+    await tick();
+
+    // The queue's own history SURVIVES a teardown, so "we already played this" is still
+    // knowable. Serving it again is what made the bot loop one song forever.
+    const snap = ctrl.snapshot();
+    const all = [...snap.history, ...snap.upcoming, ...(snap.current ? [snap.current] : [])];
+    expect(all.filter((i) => i.meta.videoId === EMINEM)).toHaveLength(1);
+  });
+
+  it("never auto-queues a track that is already sitting in the queue", async () => {
+    // "it queues the same song in the queue as well by itself" — a track the user can already
+    // see coming up must never be added a second time by autoplay.
+    const { ctrl, session } = alwaysSameRelated();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("userrrrrrrr"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    // The user queues the Eminem track themselves, behind the current one.
+    await ctrl.enqueue(meta(EMINEM), requester);
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Current ends → Eminem is promoted and plays → queue is now empty → autoplay runs, and
+    // its Mix offers that same Eminem track first.
+    session.emit("trackEnd");
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    session.emit("trackEnd");
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    const snap = ctrl.snapshot();
+    const all = [...snap.history, ...snap.upcoming, ...(snap.current ? [snap.current] : [])];
+    expect(all.filter((i) => i.meta.videoId === EMINEM)).toHaveLength(1);
+  });
+});

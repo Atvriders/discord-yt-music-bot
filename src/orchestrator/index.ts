@@ -942,12 +942,22 @@ export class GuildController extends EventEmitter {
       // player and cleared on stop / drain / teardown. A PAUSED track still has one, so pausing
       // and then queueing does not hijack the session.
       if (this.currentResource) return;
-      // Nothing is playing. If a stale `current` survived a teardown, RESUME it rather than
-      // stranding the track the user was cut off during; on failure discard it (it never
-      // played, so it must not be archived to history) and try the next one.
+      // Nothing is playing. A stale `current` may have survived a teardown — but whether it
+      // deserves to be resumed depends on WHO asked for it:
+      //
+      //  - a track the USER chose was interrupted by a fault, not by their choice, so resume it
+      //    and let the new request queue behind it;
+      //  - an AUTOPLAY track is filler. Resuming it means someone asks for a song and the bot
+      //    answers by restarting the algorithmic pick it had been playing, pushing what they
+      //    actually asked for to the back of the queue. That is not a resume, it is ignoring
+      //    the request — so a dead session's filler is discarded, never replayed.
       let item = this.queue.current;
+      if (item?.requester.source === "autoplay") {
+        item = await this.queue.discardCurrent();
+      }
       while (item) {
         if (await this.playItemLocked(item)) return;
+        // Failed to play: it never played, so discard rather than archive it to history.
         item = await this.queue.discardCurrent();
       }
       if (this.queue.snapshot().upcoming.length === 0) return;
@@ -1186,8 +1196,23 @@ export class GuildController extends EventEmitter {
     } catch {
       return null; // source lookup failed — fall back to idle
     }
+    // What counts as "already had this one". `autoplaySeen` is in-memory ONLY and is cleared by
+    // every session teardown — and a teardown is not a rare event, it is what a dropped voice
+    // connection does. Once it was wiped, the next pick started again from the top of the Mix,
+    // which is deterministic for a given seed: the bot served the same song over and over and
+    // stacked copies of it into the queue.
+    //
+    // The QUEUE survives a teardown, so it is the durable record. Folding in its history,
+    // upcoming and current also means autoplay can never hand back something the user is
+    // already going to hear — including a track they queued themselves.
+    const snap = this.queue.snapshot();
+    const known = new Set<string>(this.autoplaySeen);
+    if (snap.current) known.add(snap.current.meta.videoId);
+    for (const i of snap.upcoming) known.add(i.meta.videoId);
+    for (const i of snap.history) known.add(i.meta.videoId);
+
     const next = candidates.find(
-      (c) => c.videoId && !c.isLive && !this.autoplaySeen.has(c.videoId) && isLikelySingleSong(c),
+      (c) => c.videoId && !c.isLive && !known.has(c.videoId) && isLikelySingleSong(c),
     );
     if (!next) return null;
 
