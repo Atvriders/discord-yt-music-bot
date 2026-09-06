@@ -82,17 +82,17 @@ All configuration lives in the `environment:` block of `docker-compose.yml` — 
 
 ### Web panel (also required for the panel)
 
-| Variable                | Required | Default                           | Description                                                                                                                                 |
-| ----------------------- | -------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `DISCORD_CLIENT_ID`     | yes      | —                                 | OAuth2 application Client ID                                                                                                                |
-| `DISCORD_CLIENT_SECRET` | yes      | —                                 | OAuth2 application Client Secret                                                                                                            |
-| `PUBLIC_BASE_URL`       | yes      | —                                 | Public HTTPS origin (e.g. `https://music.example.com`); no trailing slash                                                                   |
-| `OAUTH_REDIRECT_URI`    | no       | `<PUBLIC_BASE_URL>/auth/callback` | Must exactly match a Discord OAuth2 redirect URI                                                                                            |
-| `SESSION_SECRET`        | yes      | —                                 | Random string ≥ 32 chars used to sign session cookies (NOT your token)                                                                      |
-| `PORT`                  | no       | `8080`                            | Port the HTTP server listens on                                                                                                             |
-| `HOST`                  | no       | `0.0.0.0`                         | Interface to bind                                                                                                                           |
-| `TRUST_PROXY`           | no       | `false`                           | Set `true` **only** behind a trusted reverse proxy that sets `X-Forwarded-For`; otherwise clients can spoof XFF and bypass the rate limiter |
-| `ALLOWED_WS_ORIGINS`    | no       | `<PUBLIC_BASE_URL>`               | Comma-separated origins allowed to open the live WebSocket                                                                                  |
+| Variable                | Required | Default                           | Description                                                                                                                                                                        |
+| ----------------------- | -------- | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DISCORD_CLIENT_ID`     | yes      | —                                 | OAuth2 application Client ID                                                                                                                                                       |
+| `DISCORD_CLIENT_SECRET` | yes      | —                                 | OAuth2 application Client Secret                                                                                                                                                   |
+| `PUBLIC_BASE_URL`       | yes      | —                                 | Public HTTPS origin (e.g. `https://music.example.com`); no trailing slash                                                                                                          |
+| `OAUTH_REDIRECT_URI`    | no       | `<PUBLIC_BASE_URL>/auth/callback` | Must exactly match a Discord OAuth2 redirect URI                                                                                                                                   |
+| `SESSION_SECRET`        | yes      | —                                 | Random string ≥ 32 chars used to sign session cookies (NOT your token)                                                                                                             |
+| `PORT`                  | no       | `8080`                            | Port the HTTP server listens on                                                                                                                                                    |
+| `HOST`                  | no       | `0.0.0.0`                         | Interface to bind                                                                                                                                                                  |
+| `TRUST_PROXY`           | no       | `false`                           | Set `true` **only** behind a trusted reverse proxy that sets `X-Forwarded-For`; otherwise clients can spoof XFF and bypass the rate limiter                                        |
+| `ALLOWED_WS_ORIGINS`    | no       | —                                 | **Extra** origins allowed to open the live WebSocket, comma-separated. `PUBLIC_BASE_URL` is always allowed on its own; only set this to also reach the panel from a second address |
 
 > Generate `SESSION_SECRET` with `openssl rand -base64 32`. Never reuse your bot token for it.
 
@@ -258,7 +258,14 @@ Notes that will save you an evening:
 These are the things that most commonly break a self-host:
 
 - **The cache volume must be writable by the container's non-root user.** The container starts as root only long enough to `chown` `/data/cache` (via a `gosu` entrypoint), then drops to an unprivileged user — so a named volume _or_ a bind-mounted host directory works automatically. If you previously had a root-owned volume causing `EACCES` (silent no-audio + snapshot crash-loop), pulling the current image fixes it.
-- **`ALLOWED_WS_ORIGINS` must equal `PUBLIC_BASE_URL` exactly.** The live "now playing" box, progress bar, and queue are driven entirely by a WebSocket; if the browser's `Origin` isn't allowlisted, the upgrade is rejected (`403 bad_origin`) and the panel never updates — even though Discord audio plays fine.
+- **The live panel rides a WebSocket, and a rejected upgrade is the usual reason it looks dead.** The now-playing box, progress bar and queue are pushed over it. `PUBLIC_BASE_URL` is always an allowed origin, so this should not happen on a correctly-set deployment — but if the browser's `Origin` is something else (a second hostname, a LAN IP), add it to `ALLOWED_WS_ORIGINS` or the upgrade is rejected with `403 bad_origin`. The rejection is logged with both the Origin it saw and the list it checked:
+
+  ```
+  docker compose logs bot | grep -i "rejected a WebSocket"
+  ```
+
+  The panel still shows the correct track while the socket is down — it falls back to polling — so a stale-looking panel with working audio points here.
+
 - **`YT_PLAYER_CLIENTS` should stay on the zero-PO-token defaults** (`android_vr,web_embedded,tv`). Using `web`/`mweb` requires the PO-token sidecar above, or extraction silently fails (resolves metadata but downloads nothing → no audio).
 - **Your proxy/CDN must forward WebSocket upgrades** (see the nginx snippet below). Behind **Cloudflare**, ensure zone **Network → WebSockets** is **On** (default). With a **Cloudflare Tunnel**, WebSockets are forwarded automatically — just avoid forcing an HTTP/2 origin connection, which breaks the `Upgrade`.
 - **Voice "Speak" permission** — if the bot is in the channel but silent with no error, check it has **Connect + Speak** there.

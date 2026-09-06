@@ -52,3 +52,49 @@ describe("loadWebConfig", () => {
     expect(() => loadWebConfig({ ...base, PORT: "0" })).toThrow(/PORT/);
   });
 });
+
+describe("allowedWsOrigins — the panel can never reject its own page", () => {
+  const base = {
+    DISCORD_CLIENT_ID: "1",
+    DISCORD_CLIENT_SECRET: "s",
+    PUBLIC_BASE_URL: "https://ytbot.example.com",
+    SESSION_SECRET: "x".repeat(32),
+  };
+
+  it("allows PUBLIC_BASE_URL with nothing else configured", () => {
+    expect(loadWebConfig(base).allowedWsOrigins).toEqual(["https://ytbot.example.com"]);
+  });
+
+  it("STILL allows PUBLIC_BASE_URL when ALLOWED_WS_ORIGINS names something else", () => {
+    // The exact live failure: compose shipped ALLOWED_WS_ORIGINS="http://localhost:8080", which
+    // REPLACED the real origin, so the server rejected the socket from the very page it served
+    // and the panel sat there with an empty now-playing box. The var is additive now.
+    const cfg = loadWebConfig({ ...base, ALLOWED_WS_ORIGINS: "http://localhost:8080" });
+    expect(cfg.allowedWsOrigins).toContain("https://ytbot.example.com");
+    expect(cfg.allowedWsOrigins).toContain("http://localhost:8080");
+  });
+
+  it("adds extra origins for a second address", () => {
+    const cfg = loadWebConfig({
+      ...base,
+      ALLOWED_WS_ORIGINS: "http://192.0.2.10:8080, https://alt.example.com",
+    });
+    expect(cfg.allowedWsOrigins).toEqual([
+      "https://ytbot.example.com",
+      "http://192.0.2.10:8080",
+      "https://alt.example.com",
+    ]);
+  });
+
+  it("does not list the same origin twice", () => {
+    const cfg = loadWebConfig({ ...base, ALLOWED_WS_ORIGINS: "https://ytbot.example.com" });
+    expect(cfg.allowedWsOrigins).toEqual(["https://ytbot.example.com"]);
+  });
+
+  it("ignores blank entries and trailing slashes", () => {
+    // A pasted origin with a trailing slash never matches a browser Origin header, which has
+    // none — a silent mismatch that looks identical to a typo.
+    const cfg = loadWebConfig({ ...base, ALLOWED_WS_ORIGINS: " , https://alt.example.com/ ,, " });
+    expect(cfg.allowedWsOrigins).toEqual(["https://ytbot.example.com", "https://alt.example.com"]);
+  });
+});

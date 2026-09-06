@@ -130,8 +130,11 @@ services:
       # those clients silently fail to extract audio. (The bgutil yt-dlp plugin ships in the image.)
       YT_PLAYER_CLIENTS: "android_vr,web_embedded,tv"
       PO_TOKEN_PROVIDER_URL: "" # only set (e.g. http://bgutil-pot:4416) when running `--profile pot`
-      # MUST match PUBLIC_BASE_URL exactly, or the live-updates WebSocket is rejected (no live panel)
-      ALLOWED_WS_ORIGINS: "http://localhost:8080"
+      # EXTRA origins allowed to open the live-updates WebSocket, comma-separated. You almost
+      # certainly do not need this: PUBLIC_BASE_URL is ALWAYS allowed on its own, so the panel
+      # can never reject the page it just served. Only set it to reach the panel from a SECOND
+      # address too (an alternate hostname, a LAN IP), and list those addresses here.
+      # ALLOWED_WS_ORIGINS: "http://192.0.2.10:8080"
     ports: ["8080:8080"]
     volumes:
       - "cache:/data/cache"

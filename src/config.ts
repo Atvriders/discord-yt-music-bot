@@ -436,10 +436,20 @@ export function loadWebConfig(env: Env = process.env): WebConfig {
     // proxy. Defaulting to true let unauthenticated clients spoof XFF and mint unlimited
     // rate-limit buckets (the keyGenerator falls back to req.ip).
     trustProxy: strEnv(env, "TRUST_PROXY") === "true",
-    allowedWsOrigins: (strEnv(env, "ALLOWED_WS_ORIGINS") ?? publicBaseUrl)
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean),
+    // The panel's OWN origin is always allowed, whatever else is configured.
+    //
+    // ALLOWED_WS_ORIGINS used to REPLACE this value, and the shipped compose set it to
+    // "http://localhost:8080" — so every real deployment silently rejected the live socket from
+    // the very page it was serving, with an empty now-playing box and no explanation. Rejecting
+    // PUBLIC_BASE_URL is never a thing anyone wants: that origin IS this app. The env var is now
+    // purely ADDITIVE, for the genuine case of extra origins (an alternate hostname, a LAN IP).
+    allowedWsOrigins: Array.from(
+      new Set(
+        [publicBaseUrl, ...(strEnv(env, "ALLOWED_WS_ORIGINS") ?? "").split(",")]
+          .map((s) => s.trim().replace(/\/$/, ""))
+          .filter(Boolean),
+      ),
+    ),
     nodeEnv,
     secureCookies: nodeEnv === "production",
     // Opt-in by design: unset means the cookie console is OFF, not open. There is deliberately
