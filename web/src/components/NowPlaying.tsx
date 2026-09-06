@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CurrentItem } from "../types.js";
 import { fmtAudio, fmtTime } from "../lib/format.js";
+import { useTrackLevels } from "../lib/useTrackLevels.js";
 import { Visualizer } from "./Visualizer.js";
 import { Lyrics } from "./Lyrics.js";
 
@@ -47,6 +48,22 @@ export function NowPlaying({
   onSeek?: (positionMs: number) => void | Promise<void>;
 }) {
   const displayedMs = useDisplayedMs(item?.positionMs ?? 0, item?.durationMs ?? 0, paused, receivedAt);
+  // The real analysed spectrum for this track (null while it loads, or when the server has
+  // nothing to offer — a live stream, a track still downloading).
+  const levels = useTrackLevels(
+    item?.meta.videoId ?? null,
+    item?.durationMs ? item.durationMs / 1000 : 0,
+  );
+  // The meter samples the position 60×/s, which must NOT go through React state. This hands it
+  // the same extrapolation `displayedMs` uses, as a function it can call inside its own frame
+  // loop — so the bars stay locked to the audio without re-rendering the panel.
+  const positionMs = item?.positionMs ?? 0;
+  const durationMs = item?.durationMs ?? 0;
+  const getPositionMs = useCallback((): number => {
+    const raw = paused ? positionMs : positionMs + (Date.now() - receivedAt);
+    const upper = durationMs > 0 ? durationMs : Infinity;
+    return Math.max(0, Math.min(raw, upper));
+  }, [paused, positionMs, receivedAt, durationMs]);
 
   if (!item) {
     return (
@@ -80,11 +97,14 @@ export function NowPlaying({
       </section>
     );
   }
-  const { meta, requester, durationMs } = item;
+  const { meta, requester } = item;
   const audioLabel = fmtAudio(item.audio);
   return (
-    <section className="card hero-glow p-7 sm:p-8">
-      <div className="relative z-10 flex gap-6">
+    <section className="card hero-glow p-5 sm:p-6">
+      {/* items-start: a stretch-aligned row made the art wrapper as tall as the whole card, and
+          its inset rim-light then drew a large empty frame below the artwork — the single
+          biggest source of dead space in the hero. */}
+      <div className="relative z-10 flex items-start gap-5">
         {/* Album art seated in a machined faceplate slot — inset rim, contact shadow.
             yt-dlp doesn't always return a thumbnail (older uploads / some search entries);
             render a styled placeholder rather than an <img src=""> (which the browser
@@ -124,11 +144,11 @@ export function NowPlaying({
         <div className="min-w-0 flex-1">
           {/* Lit "on air" brand-plate label — red tick + ember-soft silkscreen. */}
           <p className="eyebrow" style={{ color: "var(--color-ember-soft)" }}>Now playing</p>
-          <h1 className="font-display text-3xl sm:text-4xl leading-tight mt-2 truncate" title={meta.title}>{meta.title}</h1>
-          <p className="mt-1 text-sm" style={{ color: "var(--color-ink-dim)" }}>{meta.channel}</p>
+          <h1 className="font-display text-2xl sm:text-3xl leading-tight mt-1.5 truncate" title={meta.title}>{meta.title}</h1>
+          <p className="mt-0.5 text-sm" style={{ color: "var(--color-ink-dim)" }}>{meta.channel}</p>
           {audioLabel && (
             <p
-              className="mt-3 font-mono text-xs tracking-wide inline-flex items-center"
+              className="mt-2 font-mono text-xs tracking-wide inline-flex items-center"
               style={{
                 color: "var(--color-ink-faint)",
                 padding: "0.2rem 0.6rem",
@@ -141,7 +161,9 @@ export function NowPlaying({
             </p>
           )}
           {/* The hero's lit VU needle array. */}
-          <div className="mt-4"><Visualizer playing={playing} /></div>
+          <div className="mt-3">
+            <Visualizer playing={playing} levels={levels} getPositionMs={getPositionMs} />
+          </div>
           <ProgressBar
             durationMs={durationMs}
             displayedMs={displayedMs}
@@ -151,7 +173,7 @@ export function NowPlaying({
           />
           {/* Requester strip — a small engraved credit line on the deck. */}
           <div
-            className="flex items-center gap-2 mt-4 pt-4"
+            className="flex items-center gap-2 mt-3 pt-3"
             style={{ borderTop: "1px solid var(--color-line)" }}
           >
             <img src={requester.avatarUrl} alt="" width={22} height={22} className="rounded-full" style={{ boxShadow: "0 0 0 1px var(--color-line)" }} />

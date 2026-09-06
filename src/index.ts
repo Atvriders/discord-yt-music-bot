@@ -8,6 +8,7 @@ import {
 import { YouTubeService, setCookiesFile } from "./youtube/index.js";
 import { runYtDlp } from "./youtube/ytdlp.js";
 import { CookieService, defaultJarPath } from "./cookies/index.js";
+import { LevelsService } from "./levels/index.js";
 import { AudioCache } from "./cache/index.js";
 import { Semaphore } from "./util/semaphore.js";
 import { GuildController, type DownloadResult } from "./orchestrator/index.js";
@@ -79,6 +80,13 @@ async function main(): Promise<void> {
   const cache = new AudioCache(media.cacheDir, media.cacheMaxBytes);
   await cache.init();
   const downloads = new Semaphore(botCfg.maxConcurrentDownloads);
+
+  // Real levels for the panel's meter: analysed from the CACHED AUDIO FILE on first request and
+  // cached beside it, so the bars read the actual song and playback is never delayed by it.
+  const levels = new LevelsService({
+    cacheDir: media.cacheDir,
+    filePathFor: (videoId) => cache.get(videoId),
+  });
   // Process-wide download dedup shared by EVERY bot's controllers — they share the cache +
   // cacheDir, so two bots that cache-miss the same videoId must share one yt-dlp download.
   const sharedInFlightDownloads = new Map<string, Promise<DownloadResult>>();
@@ -250,6 +258,7 @@ async function main(): Promise<void> {
     adminIds,
     searchLimit: media.searchResultCount,
     cookies,
+    levels,
     broadcaster,
     gatewayReady: () => registry.list().every((b) => b.client.isReady()),
   });

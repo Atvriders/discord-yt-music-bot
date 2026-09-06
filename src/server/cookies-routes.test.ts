@@ -291,3 +291,94 @@ describe("cookie console — failure modes never leak and never 500", () => {
     expect(res.json()).toEqual({ ok: true, reason: null, warning });
   });
 });
+
+describe("levels endpoint", () => {
+  const LEVELS = { fps: 10, bands: 40, data: new Uint8Array(120).fill(7) };
+
+  function buildLevels(over: { levels?: unknown; userId?: string | null } = {}) {
+    const get = vi.fn(async () => LEVELS);
+    const deps = {
+      registry: { list: vi.fn(() => []), get: vi.fn(() => undefined) },
+      youtube: { resolve: vi.fn(), search: vi.fn(), resolveUrl: vi.fn() },
+      adminIds: new Set<string>(),
+      searchLimit: 5,
+      levels: over.levels === null ? undefined : (over.levels ?? { get }),
+    };
+    const app = Fastify();
+    app.decorateRequest("session", null as never);
+    const userId = over.userId === undefined ? USER : over.userId;
+    app.addHook("onRequest", async (req) => {
+      (req as { session: unknown }).session = userId ? { userId } : {};
+    });
+    registerRest(app, deps as never);
+    return { app, get };
+  }
+
+  it("serves the timeline as raw bytes with the shape in headers", async () => {
+    const { app, get } = buildLevels();
+    const res = await app.inject({ method: "GET", url: "/api/levels/aaaaaaaaaaa?durationSec=210" });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toContain("application/octet-stream");
+    // The client needs both to index the buffer; without them the bytes are meaningless.
+    expect(res.headers["x-levels-fps"]).toBe("10");
+    expect(res.headers["x-levels-bands"]).toBe("40");
+    expect(res.rawPayload.length).toBe(120);
+    expect(get).toHaveBeenCalledWith("aaaaaaaaaaa", 210);
+  });
+
+  it("requires a session", async () => {
+    const { app } = buildLevels({ userId: null });
+    expect((await app.inject({ method: "GET", url: "/api/levels/aaaaaaaaaaa" })).statusCode).toBe(
+      401,
+    );
+  });
+
+  it("never lets a path-shaped videoId reach the analyser", async () => {
+    // The id is interpolated into a filename, so the guard is about what gets THROUGH, not about
+    // which rejection code comes back: the router turns away anything with a slash or a `..`
+    // before the handler runs, and the handler's own pattern catches the rest.
+    const { app, get } = buildLevels();
+    for (const bad of ["..", "a/b", "../../etc/passwd", "a.b", "x".repeat(80)]) {
+      const res = await app.inject({
+        method: "GET",
+        url: `/api/levels/${encodeURIComponent(bad)}`,
+      });
+      expect(res.statusCode).toBeGreaterThanOrEqual(400);
+      expect(res.statusCode).toBeLessThan(500);
+    }
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("400s a single-segment id that is still not a valid key", async () => {
+    const { app, get } = buildLevels();
+    expect((await app.inject({ method: "GET", url: "/api/levels/a.b" })).statusCode).toBe(400);
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("404s when the track has no analysis rather than inventing one", async () => {
+    const { app } = buildLevels({ levels: { get: vi.fn(async () => null) } });
+    expect((await app.inject({ method: "GET", url: "/api/levels/aaaaaaaaaaa" })).statusCode).toBe(
+      404,
+    );
+  });
+
+  it("404s (never 500s) when the analyser throws", async () => {
+    const { app } = buildLevels({
+      levels: {
+        get: vi.fn(async () => {
+          throw new Error("ffmpeg exploded");
+        }),
+      },
+    });
+    const res = await app.inject({ method: "GET", url: "/api/levels/aaaaaaaaaaa" });
+    expect(res.statusCode).toBe(404);
+    expect(res.body).not.toContain("ffmpeg");
+  });
+
+  it("404s when no analyser is wired at all", async () => {
+    const { app } = buildLevels({ levels: null });
+    expect((await app.inject({ method: "GET", url: "/api/levels/aaaaaaaaaaa" })).statusCode).toBe(
+      404,
+    );
+  });
+});

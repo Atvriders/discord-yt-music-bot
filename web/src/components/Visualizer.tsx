@@ -1,96 +1,138 @@
+import { useEffect, useRef } from "react";
+import { sampleLevels, type TrackLevels } from "../lib/useTrackLevels.js";
+
 /**
- * Visualizer — a purely DECORATIVE, SYNTHETIC equalizer-bar animation.
+ * Levels — a REAL spectrum meter for the track that is playing.
  *
- * IMPORTANT / HONEST CONSTRAINT: this does NOT analyze any real audio. The
- * Discord bot streams audio into a Discord voice channel, not into this web
- * page, so the browser has no audio signal to read. These bars are driven by
- * fixed per-bar CSS keyframe animations and reflect ONLY the snapshot
- * playing/paused state: they animate while a track is playing and
- * flatten/freeze when paused or stopped. The motion is faked for vibe.
+ * The page has no audio to analyse: the bot streams into a Discord voice channel, not into this
+ * browser. So the SERVER analyses the cached audio file into a per-band energy timeline (see
+ * src/levels) and this reads that timeline at the current playback position. The bars are the
+ * actual song — bass on the left, treble on the right — in step with what the channel hears.
  *
- * Respects prefers-reduced-motion: when reduced motion is requested the bars
- * render in a static, mid-height "frozen" pose with no animation.
+ * When there is no timeline (still downloading, a live stream, an analysis that failed) the
+ * meter does NOT invent motion. It sits at a dim floor and says so, because a meter that dances
+ * to nothing is worse than one that admits it has no signal.
  */
 
-// Per-bar tuning: distinct animation duration + delay so the wave looks
-// organic rather than a single synchronized pulse. Heights are CSS custom
-// props consumed by the .viz-bar keyframes in index.css.
-const BARS = [
-  { dur: "0.62s", delay: "0s", peak: "100%", base: "30%" },
-  { dur: "0.78s", delay: "0.09s", peak: "72%", base: "22%" },
-  { dur: "0.55s", delay: "0.18s", peak: "92%", base: "34%" },
-  { dur: "0.85s", delay: "0.04s", peak: "60%", base: "20%" },
-  { dur: "0.7s", delay: "0.22s", peak: "100%", base: "28%" },
-  { dur: "0.6s", delay: "0.12s", peak: "80%", base: "26%" },
-  { dur: "0.9s", delay: "0.27s", peak: "66%", base: "18%" },
-  { dur: "0.5s", delay: "0.07s", peak: "96%", base: "32%" },
-  { dur: "0.75s", delay: "0.16s", peak: "70%", base: "24%" },
-  { dur: "0.66s", delay: "0.02s", peak: "88%", base: "30%" },
-] as const;
+/** Bars across the meter. Must match BANDS in src/levels. */
+const BARS = 40;
 
-export function Visualizer({ playing }: { playing: boolean }) {
+/**
+ * Meter ballistics. Real VU hardware rises fast and falls slowly; matching that stops the bars
+ * strobing on every transient and is most of what makes this read as an instrument.
+ */
+const ATTACK = 0.55;
+const RELEASE = 0.14;
+
+export function Visualizer({
+  playing,
+  levels,
+  getPositionMs,
+}: {
+  /** Whether a track is actively playing — a paused deck holds its last reading. */
+  playing: boolean;
+  /** The analysed timeline for the current track, or null when none is available. */
+  levels: TrackLevels | null;
+  /** Live playback position, read per animation frame (never via React state). */
+  getPositionMs: () => number;
+}) {
+  const barsRef = useRef<(HTMLSpanElement | null)[]>([]);
+  // The values the bars are currently DISPLAYING, so ballistics can ease toward each new frame.
+  const shownRef = useRef<Float32Array>(new Float32Array(BARS));
+  // Kept in refs so the animation loop never restarts on a re-render (which would reset the
+  // easing and make the meter stutter every time the panel updates).
+  const levelsRef = useRef(levels);
+  const playingRef = useRef(playing);
+  const posRef = useRef(getPositionMs);
+  levelsRef.current = levels;
+  playingRef.current = playing;
+  posRef.current = getPositionMs;
+
+  const hasSignal = levels !== null;
+
+  useEffect(() => {
+    const reduce =
+      typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    const frame = new Float32Array(BARS);
+    let raf = 0;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const paint = (): void => {
+      const lv = levelsRef.current;
+      const shown = shownRef.current;
+      // A real reading, or the floor when there is nothing to read.
+      const live = lv !== null && playingRef.current && sampleLevels(lv, posRef.current(), frame);
+      for (let b = 0; b < BARS; b++) {
+        const target = live ? (frame[b] ?? 0) : 0;
+        const cur = shown[b] ?? 0;
+        // Rise quickly, fall gently.
+        shown[b] = cur + (target - cur) * (target > cur ? ATTACK : RELEASE);
+        const el = barsRef.current[b];
+        if (el) {
+          // Reveal the column from the bottom. clip-path (not height) so this never triggers
+          // layout, and not scaleY either — scaling would squash the amber→red gradient into
+          // every column so a quiet band looked exactly as hot as a loud one. A small floor
+          // keeps the meter reading as an instrument at rest rather than as an empty box.
+          const v = 0.03 + (shown[b] ?? 0) * 0.97;
+          el.style.clipPath = `inset(${((1 - v) * 100).toFixed(2)}% 0 0 0)`;
+        }
+      }
+    };
+
+    if (reduce) {
+      // Honor the preference without going dark: refresh slowly instead of every frame.
+      timer = setInterval(paint, 400);
+      paint();
+    } else {
+      const loop = (): void => {
+        paint();
+        raf = requestAnimationFrame(loop);
+      };
+      raf = requestAnimationFrame(loop);
+    }
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      if (timer !== null) clearInterval(timer);
+    };
+  }, []);
+
   return (
     <div role="presentation" aria-hidden="true">
-      {/* Carved VU-meter housing: a recessed well machined into the faceplate,
-          with an engraved silkscreen label + a mono "signal" readout that lights
-          red when the deck is powered (playing). */}
       <div
         style={{
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          marginBottom: "0.4rem",
+          marginBottom: "0.35rem",
         }}
       >
         <span className="eyebrow">Levels</span>
         <span
           className="font-mono"
+          data-testid="levels-readout"
           style={{
-            fontSize: "0.62rem",
+            fontSize: "0.6rem",
             letterSpacing: "0.04em",
-            color: playing ? "var(--color-ember-soft)" : "var(--color-ink-faint)",
-            textShadow: playing ? "0 0 8px rgba(255,0,0,.45)" : "none",
+            color: hasSignal && playing ? "var(--color-ember-soft)" : "var(--color-ink-faint)",
+            textShadow: hasSignal && playing ? "0 0 8px rgba(255,0,0,.45)" : "none",
             transition: "color var(--dur-fast) var(--ease-mech)",
           }}
         >
-          {playing ? "● SIGNAL" : "○ SILENT"}
+          {/* Says what is true: whether these bars are reading the actual track. */}
+          {!hasSignal ? "○ NO SIGNAL" : playing ? "● SIGNAL" : "○ HOLD"}
         </span>
       </div>
-
-      {/* The lit needle array. The recessed surround reads as carved into the
-          plate; the bars (.viz / .viz-bar / .viz-on) are the backlit VU columns.
-          Class names + per-bar custom props are unchanged so motion + tests hold. */}
-      <div
-        style={{
-          padding: "0.45rem 0.7rem 0.3rem",
-          borderRadius: "var(--radius-sm)",
-          background: "linear-gradient(180deg, #0a0809, var(--color-sunken))",
-          boxShadow: "var(--shadow-inset)",
-        }}
-      >
-        <div
-          className={`viz${playing ? " viz-on" : ""}`}
-          role="presentation"
-          aria-hidden="true"
-          data-testid="visualizer"
-          data-playing={playing ? "true" : "false"}
-          title="Decorative visualizer (synthetic — not the real audio)"
-        >
-          {BARS.map((b, i) => (
-            <span
-              key={i}
-              className="viz-bar"
-              style={
-                {
-                  animationDuration: b.dur,
-                  animationDelay: b.delay,
-                  "--viz-peak": b.peak,
-                  "--viz-base": b.base,
-                } as React.CSSProperties
-              }
-            />
-          ))}
-        </div>
+      <div className={`viz${hasSignal && playing ? " viz-on" : ""}`} data-testid="viz">
+        {Array.from({ length: BARS }, (_, i) => (
+          <span
+            key={i}
+            className="viz-bar"
+            ref={(el) => {
+              barsRef.current[i] = el;
+            }}
+          />
+        ))}
       </div>
     </div>
   );

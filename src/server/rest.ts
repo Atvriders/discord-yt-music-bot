@@ -11,6 +11,7 @@ import type { ControllerSnapshot } from "../orchestrator/index.js";
 import type { PlaylistSummary } from "../orchestrator/playlists.js";
 import type { CookieService, CookieHealth, CookieResult } from "../cookies/index.js";
 import { verifyPassword } from "../auth/password.js";
+import type { LevelsService } from "../levels/index.js";
 
 interface Controller {
   ensureConnected(channelId: string): Promise<void>;
@@ -81,6 +82,11 @@ export interface RestDeps {
    * answers 404 — see requireCookieAdmin.
    */
   cookieAdminPassword?: string | null;
+  /**
+   * Real per-band levels for a track, used to drive the panel's meter. Optional: without it the
+   * route 404s and the panel falls back to its idle meter.
+   */
+  levels?: Pick<LevelsService, "get">;
 }
 
 // A cookies.txt export of a logged-in Google profile is a few KB. 64 KB is more headroom than any
@@ -821,4 +827,42 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
       await settleCookies(() => svc.importFromBrowser(), "the browser import could not be run"),
     );
   });
+
+  // ── Track levels ──────────────────────────────────────────────────────────────────────────
+  // The real per-band energy timeline for one track, so the panel's meter reads the actual song
+  // instead of animating a fixed loop. Not bot- or guild-scoped: it is a property of the AUDIO,
+  // keyed by videoId, and every guild playing that track wants the identical bytes.
+  //
+  // Served as raw octets rather than JSON — it is already a byte-per-band array, and base64 would
+  // add a third to a payload that can reach a couple of hundred KB on a long set. Immutable for a
+  // given id, so it is cached hard by the browser and fetched once per track.
+  app.get<{ Params: { videoId: string }; Querystring: { durationSec?: string } }>(
+    "/api/levels/:videoId",
+    async (req, reply) => {
+      if (!(await requireLogin(req, reply))) return;
+      if (!deps.levels) return reply.code(404).send({ error: "levels_unavailable" });
+      // The id indexes a cache and is interpolated into a filename, so it is constrained to the
+      // shape of a real key (11-char YouTube id, or our synthetic "sc_<id>") — never a path.
+      const { videoId } = req.params;
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(videoId)) {
+        return reply.code(400).send({ error: "bad_video_id" });
+      }
+      const durationSec = Number(req.query.durationSec ?? 0);
+      let levels: Awaited<ReturnType<LevelsService["get"]>> = null;
+      try {
+        levels = await deps.levels.get(videoId, Number.isFinite(durationSec) ? durationSec : 0);
+      } catch {
+        levels = null; // a meter is never worth a 500
+      }
+      // Not analysable (not downloaded yet, a live stream, a decode failure). The panel treats
+      // this as "no data" and shows its idle meter rather than inventing motion.
+      if (!levels) return reply.code(404).send({ error: "no_levels" });
+      return reply
+        .header("content-type", "application/octet-stream")
+        .header("cache-control", "private, max-age=86400, immutable")
+        .header("x-levels-fps", String(levels.fps))
+        .header("x-levels-bands", String(levels.bands))
+        .send(Buffer.from(levels.data));
+    },
+  );
 }
