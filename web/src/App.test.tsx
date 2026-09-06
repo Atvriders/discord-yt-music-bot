@@ -407,14 +407,18 @@ describe("App", () => {
     vi.stubGlobal("WebSocket", FakeWS as unknown as typeof WebSocket);
 
     let stateCalls = 0;
+    // The panel POLLS /state whenever the socket is not live, so this mock has to behave like a
+    // real server rather than always answering "already removed": it reports the queued song
+    // until the removal actually happens. (A mock that answers post-removal from the start would
+    // make the song vanish on the first poll and the test would pass for the wrong reason.)
+    let removed = false;
     vi.stubGlobal("fetch", vi.fn((url: string) => {
       if (url.includes("/api/me")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ user: { id: "1", username: "dj", avatarUrl: "" }, bots: [{ id: "B1", name: "Fleet Bot", guilds: [{ id: "G1", name: "Booth" }] }] }) });
       if (url.includes("/voice-channels")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ channels: [], currentChannelId: null }) });
-      if (url.endsWith("/queue/remove")) return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ ok: true }) });
+      if (url.endsWith("/queue/remove")) { removed = true; return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ ok: true }) }); }
       if (url.endsWith("/api/bots/B1/guilds/G1/state")) {
         stateCalls++;
-        // Post-removal snapshot: empty queue.
-        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: [], history: [], paused: false, idleTimeoutSec: 300 }) });
+        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: removed ? [] : [qItem("bbb", "Queued Song")], history: [], paused: false, idleTimeoutSec: 300 }) });
       }
       return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ current: null, upcoming: [], history: [], paused: false }) });
     }));

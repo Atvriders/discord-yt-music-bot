@@ -317,6 +317,33 @@ export function App() {
     } catch { /* a refetch failure is non-fatal; the mutation already succeeded */ }
   }, [botId, guildId, live]);
 
+  // The WebSocket is the LIVE source of truth, but it is not the only one — and when it cannot
+  // connect the panel used to show nothing at all. There was exactly one REST fallback and it
+  // ran only AFTER a queue mutation, so a blocked socket meant an empty now-playing box and a
+  // status pill stuck on "connecting" until the user happened to queue something, at which
+  // point the state appeared out of nowhere. Poll REST for as long as the socket is down, so
+  // the panel always shows what is actually playing. Stops the moment the WS goes live.
+  const liveRefresh = live.refresh;
+  const liveStatus = live.status;
+  useEffect(() => {
+    if (!botId || !guildId || liveStatus === "live") return;
+    let cancelled = false;
+    const pull = async (): Promise<void> => {
+      try {
+        const snap = await api.state(botId, guildId);
+        if (!cancelled) liveRefresh(snap);
+      } catch {
+        /* non-fatal: the socket may simply be mid-reconnect */
+      }
+    };
+    void pull(); // immediately — a dead socket must never mean a blank panel
+    const iv = setInterval(() => void pull(), 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(iv);
+    };
+  }, [botId, guildId, liveStatus, liveRefresh]);
+
   // Generation token: bumps on every bot/guild switch. An in-flight resolve/pick that
   // started under an older generation must not write its result into the new (bot, guild).
   const genRef = useRef(0);

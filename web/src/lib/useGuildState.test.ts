@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, act } from "@testing-library/react";
-import { useGuildState, reconnectDelayMs } from "./useGuildState.js";
+import { useGuildState, reconnectDelayMs, OPEN_TIMEOUT_MS } from "./useGuildState.js";
 import type { Snapshot } from "../types.js";
 
 // Minimal controllable WebSocket double. Tracks every instance so a test can assert
@@ -281,5 +281,42 @@ describe("useGuildState reconnect", () => {
     expect(FakeWS.instances).toHaveLength(2);
     act(() => FakeWS.instances[1]!.open());
     expect(FakeWS.instances[1]!.sent).toContain(JSON.stringify({ subscribe: "g1", botId: "b2" }));
+  });
+});
+
+describe("a handshake that never completes", () => {
+  it("gives up and retries instead of hanging on 'connecting' forever", () => {
+    // A reverse proxy that accepts the TCP connection but never completes the Upgrade (a tunnel
+    // or vhost without WebSocket support) fires neither "error" nor "close". Nothing scheduled a
+    // reconnect, so the panel sat on "connecting" indefinitely and — because the REST fallback
+    // keys off a non-live status — showed no track at all.
+    const { result } = renderHook(() => useGuildState("1", "234567890123456789"));
+    expect(FakeWS.instances).toHaveLength(1);
+    expect(result.current.status).toBe("connecting");
+
+    // The socket just sits there, never opening.
+    act(() => {
+      vi.advanceTimersByTime(OPEN_TIMEOUT_MS + 10);
+    });
+    expect(result.current.status).toBe("closed");
+
+    // …and the normal backoff takes over, so it keeps trying.
+    act(() => {
+      vi.advanceTimersByTime(reconnectDelayMs(0) + 10);
+    });
+    expect(FakeWS.instances.length).toBeGreaterThan(1);
+  });
+
+  it("does not fire the timeout for a socket that opens normally", () => {
+    const { result } = renderHook(() => useGuildState("1", "234567890123456789"));
+    act(() => {
+      FakeWS.instances[0]!.open();
+    });
+    act(() => {
+      vi.advanceTimersByTime(OPEN_TIMEOUT_MS * 3);
+    });
+    // Still the one socket, and no spurious close was dispatched.
+    expect(FakeWS.instances).toHaveLength(1);
+    expect(result.current.status).not.toBe("closed");
   });
 });

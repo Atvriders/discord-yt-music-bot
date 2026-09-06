@@ -30,6 +30,16 @@ export const initialWsState: WsState = {
 // Backoff schedule: 1s, 2s, 4s, 8s, capped at ~15s. Index grows per failed attempt.
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_CAP_MS = 15000;
+/**
+ * How long a socket gets to finish its handshake before we give up on it.
+ *
+ * A socket that never opens does NOT necessarily fail: a reverse proxy that accepts the TCP
+ * connection but never completes the Upgrade (a tunnel or nginx vhost without WebSocket support)
+ * leaves the browser in CONNECTING indefinitely — no "error", no "close", so no reconnect is ever
+ * scheduled and the panel sits on "connecting" forever. Treating that as a failure is what lets
+ * the backoff (and the REST fallback that keys off a non-live status) actually kick in.
+ */
+export const OPEN_TIMEOUT_MS = 10000;
 export function reconnectDelayMs(attempt: number): number {
   return Math.min(RECONNECT_CAP_MS, RECONNECT_BASE_MS * 2 ** Math.max(0, attempt));
 }
@@ -138,7 +148,25 @@ export function useGuildState(botId: string | null, guildId: string | null): WsS
       const ws = new WebSocket(wsUrl(activeBotId, activeGuildId)) as Tracked;
       socket = ws;
 
+      // Fail a handshake that never completes (see OPEN_TIMEOUT_MS) so it becomes a normal
+      // retryable failure instead of an invisible permanent hang.
+      let openTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+        openTimer = null;
+        if (ws._dead || ws !== socket) return;
+        ws._dead = true;
+        try { ws.close(); } catch { /* ignore */ }
+        dispatch({ closed: true });
+        scheduleReconnect();
+      }, OPEN_TIMEOUT_MS);
+      const clearOpenTimer = () => {
+        if (openTimer !== null) {
+          clearTimeout(openTimer);
+          openTimer = null;
+        }
+      };
+
       ws.addEventListener("open", () => {
+        clearOpenTimer();
         if (ws._dead) return;
         attempt = 0; // a healthy connection resets the backoff
         ws.send(JSON.stringify({ subscribe: activeGuildId, botId: activeBotId }));
@@ -155,6 +183,7 @@ export function useGuildState(botId: string | null, guildId: string | null): WsS
         dispatch({ raw });
       });
       const onDown = () => {
+        clearOpenTimer();
         if (ws._dead || ws !== socket) return; // a stale/replaced socket
         ws._dead = true;
         dispatch({ closed: true });
