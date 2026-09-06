@@ -344,6 +344,53 @@ describe("App", () => {
     requester: { discordUserId: "1", displayName: "dj", avatarUrl: "", source: "web" },
   });
 
+  it("the seek bar stays operable when the live socket is NOT connected", async () => {
+    // Seeking is a plain REST call, so it never needed the socket — but the scrubber used to be
+    // gated on `live.status === "live"`. Once the REST fallback started rendering the track
+    // through a socket that could not connect, the bar was VISIBLE and completely inert:
+    // clicking it did nothing at all, because a non-interactive bar is a role="progressbar"
+    // whose pointer handler returns immediately.
+    class DeadWS {
+      // Never opens, never errors — the panel stays on connecting/closed the whole test.
+      addEventListener() {}
+      send() {}
+      close() {}
+    }
+    vi.stubGlobal("WebSocket", DeadWS as unknown as typeof WebSocket);
+
+    let seekedTo: number | null = null;
+    vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
+      const ok = (json: unknown) => Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => json });
+      if (url.includes("/api/me")) return ok({ user: { id: "1", username: "dj", avatarUrl: "" }, bots: [{ id: "B1", name: "Fleet Bot", guilds: [{ id: "G1", name: "Booth" }] }] });
+      if (url.includes("/voice-channels")) return ok({ channels: [], currentChannelId: null });
+      if (url.endsWith("/seek")) {
+        seekedTo = (JSON.parse(String(init?.body ?? "{}")) as { positionMs?: number }).positionMs ?? null;
+        return ok({ ok: true });
+      }
+      if (url.endsWith("/api/bots/B1/guilds/G1/state")) {
+        return ok({ current: { ...qItem("aaa", "Now Playing"), positionMs: 0, durationMs: 200_000 }, upcoming: [], history: [], paused: false, idleTimeoutSec: 300 });
+      }
+      return ok({ current: null, upcoming: [], history: [], paused: false });
+    }));
+
+    render(<App />);
+    // The REST fallback puts the track on screen even though the socket is dead…
+    // (DeadWS never opens, so the socket status can never reach "live" in this test.)
+    expect(await screen.findByText("Now Playing")).toBeTruthy();
+
+    // …and the bar must be a real, operable slider rather than a read-only progressbar.
+    const slider = await screen.findByRole("slider", { name: /seek/i });
+    (slider as Element & { setPointerCapture?: (id: number) => void }).setPointerCapture ??= () => {};
+    slider.getBoundingClientRect = () => ({ width: 1000, left: 0, top: 0, right: 1000, bottom: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) });
+
+    // A click at 25% of a 200s track seeks to 50s.
+    act(() => {
+      slider.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true, clientX: 250 }));
+      slider.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, cancelable: true, clientX: 250 }));
+    });
+    await waitFor(() => expect(seekedTo).toBe(50_000));
+  });
+
   it("BUG 1: surfaces the failure (not a swallowed error) when removing a queue item fails", async () => {
     const wsRef: { current: { deliver: (s: unknown) => void } | null } = { current: null };
     vi.stubGlobal("WebSocket", makeFakeWS({

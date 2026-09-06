@@ -626,7 +626,12 @@ export function App() {
               paused={paused}
               playing={!!snap?.current && !paused}
               receivedAt={live.receivedAt}
-              canSeek={live.status === "live" && !!snap?.current}
+              // Seeking is a plain REST call (POST /seek) — it never needed the WebSocket.
+              // Requiring a LIVE socket meant that whenever the socket could not connect the
+              // scrubber silently went read-only: with the REST fallback now showing the track
+              // correctly, the bar was visible and inert, which reads as "seek is broken". The
+              // real requirements are a track to seek within and permission to control it.
+              canSeek={live.status !== "forbidden" && !!snap?.current}
               onSeek={onSeek}
             />
             </div>
