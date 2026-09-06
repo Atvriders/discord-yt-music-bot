@@ -931,7 +931,25 @@ export class GuildController extends EventEmitter {
   private async maybeStart(): Promise<void> {
     return this.lock.runExclusive(async () => {
       if (!this.session) return;
-      if (this.queue.current) return; // already playing
+      // `queue.current` is NOT proof that anything is playing, and reading it that way is what
+      // left the bot sitting silently in a channel it had just rejoined. A session torn down
+      // mid-track — a lost voice connection, which is exactly what happens to a connection left
+      // idle — clears `currentResource` but deliberately leaves the QUEUE alone, so `current`
+      // survives pointing at a track on a destroyed session. Every later request then hit
+      // "already playing" and returned without starting anything, and only Stop could clear it.
+      //
+      // `currentResource` is the honest signal: it is set the moment a resource is handed to the
+      // player and cleared on stop / drain / teardown. A PAUSED track still has one, so pausing
+      // and then queueing does not hijack the session.
+      if (this.currentResource) return;
+      // Nothing is playing. If a stale `current` survived a teardown, RESUME it rather than
+      // stranding the track the user was cut off during; on failure discard it (it never
+      // played, so it must not be archived to history) and try the next one.
+      let item = this.queue.current;
+      while (item) {
+        if (await this.playItemLocked(item)) return;
+        item = await this.queue.discardCurrent();
+      }
       if (this.queue.snapshot().upcoming.length === 0) return;
       await this.playNextLocked();
     });

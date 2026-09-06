@@ -53,6 +53,15 @@ export class VoicePermissionError extends Error {
   }
 }
 
+/**
+ * How long a reconnect that has STARTED gets to actually land before the session is written off.
+ *
+ * Discord voice reconnects resolve in seconds; a connection still not Ready after this is not
+ * slow, it is dead. Generous enough to ride out a server region move, short enough that a user
+ * who asks for a song is not left staring at a bot that will never answer.
+ */
+const RECONNECT_READY_TIMEOUT_MS = 20_000;
+
 /** Real connection: join + wait Ready (incl. DAVE handshake) + subscribe a player. */
 export async function createVoiceSession(
   channel: VoiceBasedChannel,
@@ -111,23 +120,53 @@ export async function createVoiceSession(
   // is mid-reconnect (a server move / brief blip) — ride it out. If neither resolves (a 4014
   // kick / fatal adapter failure) destroy the connection and tear the session down cleanly so
   // playback doesn't hang forever with the idle timer cancelled.
+  //
+  // …and then WATCH THE RECONNECT THROUGH TO READY. "The library is trying" is not the same as
+  // "the connection came back", and treating it as such is what wedged bots that had been
+  // sitting idle in a channel: a silent voice connection is the one Discord drops, the retry
+  // stalled in Signalling/Connecting, nothing was watching any more, and the session stayed
+  // alive around a connection that could never carry audio again. Because
+  // GuildController.ensureConnected() short-circuits on `if (this.session) return`, that dead
+  // session is never replaced — so every later request is fed to it and the bot just sits there.
+  // (Autoplay masked it: continuous audio keeps the connection alive, so it rarely dropped.)
+  let watching = false;
+  const teardown = (why: string): void => {
+    log.warn({ channelId: channel.id, why }, "voice connection unrecoverable; tearing down");
+    try {
+      connection.destroy();
+    } catch {
+      // already destroyed
+    }
+    session.signalConnectionLost();
+  };
   connection.on("stateChange", (_old: unknown, next: { status: string }) => {
     if (next.status !== VoiceConnectionStatus.Disconnected) return;
+    // A flapping connection re-enters Disconnected repeatedly; one watcher is enough, and
+    // stacking them would race several teardowns for the same outage.
+    if (watching) return;
+    watching = true;
     void (async () => {
       try {
-        await Promise.race([
-          entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
-          entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
-        ]);
-        // Reconnect in progress — let the library finish.
-      } catch {
-        // Unrecoverable: drop the dead connection and tear the session down via the idle path.
         try {
-          connection.destroy();
+          await Promise.race([
+            entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
+            entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
+          ]);
         } catch {
-          // already destroyed
+          // Never even started reconnecting: a 4014 kick or a fatal adapter failure.
+          teardown("no reconnect attempt within 5s");
+          return;
         }
-        session.signalConnectionLost();
+        // A reconnect is UNDERWAY. It still has to land, and if it does not, this session is
+        // finished — tearing it down is what lets ensureConnected() build a working one on the
+        // next request, which is the difference between "the bot rejoins" and "the bot is stuck".
+        try {
+          await entersState(connection, VoiceConnectionStatus.Ready, RECONNECT_READY_TIMEOUT_MS);
+        } catch {
+          teardown("reconnect never reached Ready");
+        }
+      } finally {
+        watching = false;
       }
     })();
   });

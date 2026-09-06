@@ -1916,3 +1916,77 @@ describe("GuildController autoplay single-song filter", () => {
     expect(ctrl.snapshot().current?.meta.videoId).toBe("sssssssssss");
   });
 });
+
+describe("recovering from a lost voice connection", () => {
+  it("plays the next request after the connection dropped MID-TRACK", async () => {
+    // A connection lost while a track is playing tears the session down via the idle path
+    // (signalConnectionLost -> "idle" -> leaveInternal). leaveInternal deliberately leaves the
+    // QUEUE alone — but the track that was playing is still queue.current, and maybeStart()
+    // reads a non-null current as "already playing" and returns without starting anything.
+    // So the bot rejoins the channel on the next request and then sits there in silence.
+    const { ctrl, session } = makeController();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(session.play).toHaveBeenCalledTimes(1);
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+
+    // The voice connection dies mid-song.
+    session.emit("idle");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(session.destroy).toHaveBeenCalled();
+
+    // The user asks for another song. This is the whole point: it must actually play.
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Playback actually restarts — the whole point. The track the drop cut off RESUMES (the
+    // user did not ask to lose it) and the new request waits its turn behind it.
+    expect(session.play).toHaveBeenCalledTimes(2);
+    const snap = ctrl.snapshot();
+    expect(snap.current?.meta.videoId).toBe("aaaaaaaaaaa");
+    expect(snap.upcoming.map((i) => i.meta.videoId)).toEqual(["bbbbbbbbbbb"]);
+  });
+
+  it("plays a new request after the connection dropped while the queue was IDLE", async () => {
+    // The reported symptom: the bot sits idle in a channel, the silent connection is dropped,
+    // and from then on nothing the user asks for plays. Here `current` is already null (the
+    // queue drained normally), so this pins the plain path back to playing.
+    const { ctrl, session } = makeController();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    session.emit("trackEnd"); // drains the queue → idle, current becomes null
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ctrl.snapshot().current).toBeNull();
+
+    session.emit("idle"); // the idle connection is dropped
+    await new Promise((r) => setTimeout(r, 0));
+
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(session.play).toHaveBeenCalledTimes(2);
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("bbbbbbbbbbb");
+  });
+
+  it("does not hijack a PAUSED session when a new track is queued", async () => {
+    // The guard now keys on `currentResource`, which a paused track still has — so pausing and
+    // then queueing must leave the paused track exactly where it is.
+    const { ctrl, session } = makeController();
+    await ctrl.ensureConnected("C1");
+    await ctrl.enqueue(meta("aaaaaaaaaaa"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+    ctrl.pause();
+    await ctrl.enqueue(meta("bbbbbbbbbbb"), requester);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(session.play).toHaveBeenCalledTimes(1);
+    expect(ctrl.snapshot().current?.meta.videoId).toBe("aaaaaaaaaaa");
+    expect(ctrl.snapshot().paused).toBe(true);
+  });
+});
