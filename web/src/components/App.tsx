@@ -616,8 +616,6 @@ export function App() {
             <div className="reveal" style={{ animationDelay: "120ms" }}>
             <NowPlaying
               item={snap?.current ?? null}
-              botId={botId}
-              guildId={guildId}
               // Use the local optimistic `paused` (not the snapshot's) so the progress bar
               // freezes in lockstep with the Visualizer (`playing`) and the Controls label
               // during the optimistic window. The serverPaused effect (above) reconciles

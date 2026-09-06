@@ -84,9 +84,6 @@ export const api = {
   reorder: (b: string, g: string, itemId: string, toIndex: number) => post<{ ok: boolean }>(`${base(b, g)}/queue/reorder`, { itemId, toIndex }),
   shuffle: (b: string, g: string) => post<{ ok: boolean }>(`${base(b, g)}/shuffle`),
   jump: (b: string, g: string, itemId: string) => post<{ ok: boolean }>(`${base(b, g)}/jump`, { itemId }),
-  // Best-effort lyrics for the current track. `lyrics` is null when none are found
-  // (plain text match, NOT time-synced).
-  lyrics: (b: string, g: string) => req<{ lyrics: string | null; source: string }>(`${base(b, g)}/lyrics`),
   getSettings: (b: string, g: string) => req<{ settings: GuildSettings }>(`${base(b, g)}/settings`),
   setSettings: (b: string, g: string, patch: Partial<GuildSettings>) =>
     post<{ settings: GuildSettings }>(`${base(b, g)}/settings`, patch),

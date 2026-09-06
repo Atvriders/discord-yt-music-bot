@@ -3,7 +3,6 @@ import { parseInput } from "../youtube/url-parser.js";
 import { canControl } from "../auth/authz.js";
 import { avatarUrl, type DiscordUser } from "../auth/oauth.js";
 import { YtError } from "../youtube/errors.js";
-import { fetchLyrics, type LyricsResult } from "../youtube/lyrics.js";
 import { resolveSpotifyQuery } from "../youtube/spotify.js";
 import type { Requester, TrackMeta } from "../types/index.js";
 import type { GuildSettings } from "../orchestrator/settings.js";
@@ -61,11 +60,6 @@ export interface RestDeps {
   };
   adminIds: ReadonlySet<string>;
   searchLimit: number;
-  /**
-   * Best-effort lyrics resolver for the current track (defaults to the lyrics.ovh-backed
-   * `fetchLyrics`). Injectable so tests can stub it without hitting the network.
-   */
-  lyrics?: (meta: TrackMeta) => Promise<LyricsResult>;
   /**
    * Resolve a Spotify track URL to a "<track> <artist>" YouTube search string (best-effort;
    * null on failure). Defaults to the real spotify.ts resolver; injectable for tests.
@@ -236,23 +230,6 @@ export function registerRest(app: FastifyInstance, deps: RestDeps): void {
       const bot = await requireControl(req, reply, req.params.botId, req.params.id);
       if (!bot) return;
       return bot.hub.get(req.params.id).snapshot();
-    },
-  );
-
-  // Best-effort lyrics for the currently-playing track. Always 200: returns
-  // { lyrics: null } when nothing is playing or no match is found (NOT time-synced —
-  // a plain text match keyed on the derived artist/title). Rate-limited because each
-  // call may hit the external lyrics.ovh API.
-  const lyricsOf = deps.lyrics ?? fetchLyrics;
-  app.get<{ Params: { botId: string; id: string } }>(
-    "/api/bots/:botId/guilds/:id/lyrics",
-    { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
-    async (req, reply) => {
-      const bot = await requireControl(req, reply, req.params.botId, req.params.id);
-      if (!bot) return;
-      const current = bot.hub.get(req.params.id).snapshot().current;
-      if (!current) return { lyrics: null, source: "lyrics.ovh" } satisfies LyricsResult;
-      return lyricsOf(current.meta);
     },
   );
 

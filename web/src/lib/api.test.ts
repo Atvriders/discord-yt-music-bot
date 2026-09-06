@@ -154,16 +154,6 @@ describe("api client", () => {
     expect(JSON.parse(String((init as RequestInit).body))).toEqual({ itemId: "item-7" });
   });
 
-  it("lyrics GETs the route and surfaces the null (no-lyrics) branch", async () => {
-    const fn = mockOnce(true, { lyrics: null, source: "lyrics.ovh" });
-    const r = await api.lyrics("B1", "G1");
-    const [url, init] = fn.mock.calls[0]!;
-    expect(url).toBe("/api/bots/B1/guilds/G1/lyrics");
-    expect((init as RequestInit).method).toBeUndefined(); // GET
-    expect(r.lyrics).toBeNull();
-    expect(r.source).toBe("lyrics.ovh");
-  });
-
   it("listPlaylists GETs the route and returns the playlists", async () => {
     const fn = mockOnce(true, { playlists: [{ name: "chill", trackCount: 3, savedAt: 1 }] });
     const r = await api.listPlaylists("B1", "G1");

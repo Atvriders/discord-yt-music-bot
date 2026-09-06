@@ -3,7 +3,6 @@ import type { CurrentItem } from "../types.js";
 import { fmtAudio, fmtTime } from "../lib/format.js";
 import { useTrackLevels } from "../lib/useTrackLevels.js";
 import { Visualizer } from "./Visualizer.js";
-import { Lyrics } from "./Lyrics.js";
 
 // Display progress indicator. We extrapolate the elapsed position between WS state
 // updates so the bar MOVES smoothly. When `canSeek` is set the same bar becomes an
@@ -27,14 +26,8 @@ export function NowPlaying({
   receivedAt = 0,
   canSeek = false,
   onSeek,
-  botId,
-  guildId,
 }: {
   item: CurrentItem | null;
-  /** Active bot id — needed alongside guildId to fetch the Lyrics for this bot's track. */
-  botId?: string | null;
-  /** Active guild id — enables the best-effort Lyrics panel. Omit to hide it. */
-  guildId?: string | null;
   paused?: boolean;
   /**
    * Drives the decorative visualizer only: animate the synthetic bars while a
@@ -182,7 +175,6 @@ export function NowPlaying({
               <span className="font-mono" style={{ color: "var(--color-ink-faint)" }}> · {requester.source}</span>
             </span>
           </div>
-          {botId && guildId && <Lyrics botId={botId} guildId={guildId} videoId={meta.videoId} />}
         </div>
       </div>
     </section>
