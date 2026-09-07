@@ -24,6 +24,7 @@ import { buildApp } from "./server/app.js";
 import { GuildBroadcaster } from "./server/ws.js";
 import { createLogger, setRootLogger } from "./util/logger.js";
 import { installCrashHandlers, installSignalHandlers } from "./lifecycle.js";
+import { startLoopLagMonitor } from "./util/loop-lag.js";
 import { startupCanary } from "./canary.js";
 import {
   collectSnapshot,
@@ -40,6 +41,10 @@ async function main(): Promise<void> {
   // at the configured LOG_LEVEL instead of their own hardcoded-"info" instance.
   setRootLogger(log);
   installCrashHandlers(log);
+  // Audio is pumped from this event loop, so a block here IS a gap in the music. Always on: it
+  // costs nothing and it is the only way to tell "we starved the encoder" apart from "the
+  // network dropped" after the fact, when the only report is that the music froze.
+  startLoopLagMonitor();
 
   // The Fastify app is built only after login (it needs the gateway clients). Hoist it as a
   // nullable so the shutdown tasks registered below — BEFORE login — can close it if it

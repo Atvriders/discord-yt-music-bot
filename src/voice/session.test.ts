@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { EventEmitter } from "node:events";
 import { VoiceSession } from "./session.js";
+import { setRootLogger } from "../util/logger.js";
 
 // Fakes mirroring the subset of @discordjs/voice we use.
 class FakePlayer extends EventEmitter {
@@ -212,5 +213,75 @@ describe("VoiceSession", () => {
     });
     session.destroy();
     expect(onEnd).not.toHaveBeenCalled();
+  });
+});
+
+describe("stall reporting", () => {
+  // A track that freezes for a while and then carries on leaves NO other trace: the player
+  // recovers by itself, the queue never advances, and nothing throws. Timing the Buffering
+  // state is the only record that it happened, and how long it lasted.
+  let warnings: { obj: Record<string, unknown>; msg: string }[] = [];
+
+  beforeEach(() => {
+    warnings = [];
+    const fake = {
+      child: () => fake,
+      warn: (obj: Record<string, unknown>, msg: string) => warnings.push({ obj, msg }),
+      error: () => {},
+      info: () => {},
+      debug: () => {},
+    };
+    setRootLogger(fake as never);
+  });
+
+  it("reports how long playback was stalled, and where", () => {
+    const { player } = makeSession();
+    const t0 = Date.now();
+    vi.setSystemTime(t0);
+    player.transition("playing", "buffering");
+    vi.setSystemTime(t0 + 20_000); // the reported symptom: a twenty-second freeze
+    player.transition("buffering", "playing");
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]!.msg).toMatch(/playback STALLED/);
+    expect(warnings[0]!.obj.stalledMs).toBe(20_000);
+    expect(warnings[0]!.obj.channelId).toBe("C1");
+    expect(warnings[0]!.obj.resumedAs).toBe("playing");
+  });
+
+  it("stays quiet about a brief pass through buffering", () => {
+    // Every track start goes through Buffering; only an audible gap is worth a line.
+    const { player } = makeSession();
+    const t0 = Date.now();
+    vi.setSystemTime(t0);
+    player.transition("idle", "buffering");
+    vi.setSystemTime(t0 + 50);
+    player.transition("buffering", "playing");
+    expect(warnings).toHaveLength(0);
+  });
+
+  it("still reports a stall that ends by giving up (buffering -> idle)", () => {
+    const { player } = makeSession();
+    const t0 = Date.now();
+    vi.setSystemTime(t0);
+    player.transition("playing", "buffering");
+    vi.setSystemTime(t0 + 5_000);
+    player.transition("buffering", "idle");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]!.obj.resumedAs).toBe("idle");
+  });
+
+  it("times each stall independently rather than accumulating", () => {
+    const { player } = makeSession();
+    const t0 = Date.now();
+    vi.setSystemTime(t0);
+    player.transition("playing", "buffering");
+    vi.setSystemTime(t0 + 1_000);
+    player.transition("buffering", "playing");
+    vi.setSystemTime(t0 + 10_000);
+    player.transition("playing", "buffering");
+    vi.setSystemTime(t0 + 12_000);
+    player.transition("buffering", "playing");
+    expect(warnings.map((w) => w.obj.stalledMs)).toEqual([1_000, 2_000]);
   });
 });

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { setPriority } from "node:os";
 import { readFile, writeFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -215,6 +216,13 @@ function decodePcm(path: string, timeoutMs: number): Promise<Int16Array> {
     const ff = spawn("ffmpeg", [
       "-v",
       "error",
+      // ONE thread, and see the renice below. This decodes a whole track as fast as the box
+      // will allow, on the same machine that is streaming audio in real time from the same
+      // volume — left at full tilt it competes with playback for CPU and disk, and on a small
+      // host that shows up as the music stalling. It has no deadline (the meter can wait a few
+      // seconds), so it should never win that contest.
+      "-threads",
+      "1",
       "-i",
       path,
       "-ac",
@@ -225,6 +233,13 @@ function decodePcm(path: string, timeoutMs: number): Promise<Int16Array> {
       "s16le",
       "-",
     ]);
+    try {
+      // Lowest priority: the scheduler hands it only cycles nothing else wants. Best-effort —
+      // an unsupported platform or missing privileges just leaves it at the default.
+      if (ff.pid !== undefined) setPriority(ff.pid, 19);
+    } catch {
+      /* not fatal: the analysis is still correct, just less polite */
+    }
     const chunks: Buffer[] = [];
     let bytes = 0;
     let settled = false;

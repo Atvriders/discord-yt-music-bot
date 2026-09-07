@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { getRootLogger } from "../util/logger.js";
 
 export interface VoicePlayerLike extends EventEmitter {
   play(resource: unknown): void;
@@ -16,10 +17,20 @@ export interface VoiceSessionOptions {
 }
 
 const IDLE = "idle";
+/**
+ * The player state that means "the resource is not feeding me fast enough". @discordjs/voice
+ * parks here and sends nothing, which to a listener is the music simply stopping. Recovering
+ * on its own is what makes it so hard to catch after the fact — hence the timing log below.
+ */
+const BUFFERING = "buffering";
+/** Long enough to be an audible gap rather than a normal transition through Buffering. */
+const STALL_LOG_MS = 400;
 
 export class VoiceSession extends EventEmitter {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
+  /** When the player entered Buffering, so the stall can be reported with its duration. */
+  private bufferingSince: number | null = null;
   // Mutable so the idle timeout can be reconfigured at runtime (per-guild panel setting).
   private idleTimeoutMs: number;
 
@@ -27,6 +38,26 @@ export class VoiceSession extends EventEmitter {
     oldState: { status: string },
     newState: { status: string },
   ): void => {
+    // Time every stall in Buffering. A track that "randomly freezes for twenty seconds and then
+    // carries on" leaves no other trace: the player recovers by itself, the queue never
+    // advances, and nothing errors — so without this the only evidence is a listener's word.
+    // Paired with the event-loop lag monitor this separates the two causes that look identical
+    // from outside: a blocked event loop (we starved the encoder) versus a slow/stalled source
+    // (disk, ffmpeg, network).
+    if (newState.status === BUFFERING && oldState.status !== BUFFERING) {
+      this.bufferingSince = Date.now();
+    } else if (oldState.status === BUFFERING && newState.status !== BUFFERING) {
+      const ms = this.bufferingSince === null ? 0 : Date.now() - this.bufferingSince;
+      this.bufferingSince = null;
+      if (ms >= STALL_LOG_MS) {
+        getRootLogger()
+          .child({ mod: "voice/session" })
+          .warn(
+            { channelId: this.opts.channelId, stalledMs: ms, resumedAs: newState.status },
+            "playback STALLED: the audio source could not keep up (this is what a freeze sounds like)",
+          );
+      }
+    }
     if (newState.status === IDLE && oldState.status !== IDLE) {
       this.emit("trackEnd");
     }

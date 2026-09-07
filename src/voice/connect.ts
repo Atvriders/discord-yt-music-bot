@@ -129,6 +129,28 @@ export async function createVoiceSession(
   // GuildController.ensureConnected() short-circuits on `if (this.session) return`, that dead
   // session is never replaced — so every later request is fed to it and the bot just sits there.
   // (Autoplay masked it: continuous audio keeps the connection alive, so it rarely dropped.)
+  // Time every departure from Ready. A voice connection that drops and comes back leaves the
+  // music silent for exactly as long as it was away, then resumes as if nothing happened — the
+  // other thing a "random freeze" turns out to be. Logging the gap is what tells that apart
+  // from the player starving on its source.
+  let leftReadyAt: number | null = null;
+  connection.on("stateChange", (_old: unknown, next: { status: string }) => {
+    if (next.status === VoiceConnectionStatus.Ready) {
+      if (leftReadyAt !== null) {
+        log.warn(
+          { channelId: channel.id, offlineMs: Date.now() - leftReadyAt },
+          "voice connection was away and is back — the music was silent for this long",
+        );
+        leftReadyAt = null;
+      }
+      return;
+    }
+    // Destroyed is an intentional teardown, not an outage worth timing.
+    if (leftReadyAt === null && next.status !== VoiceConnectionStatus.Destroyed) {
+      leftReadyAt = Date.now();
+    }
+  });
+
   let watching = false;
   const teardown = (why: string): void => {
     log.warn({ channelId: channel.id, why }, "voice connection unrecoverable; tearing down");
