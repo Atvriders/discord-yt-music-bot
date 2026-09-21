@@ -150,7 +150,7 @@ const PROFILE_EMPTY =
 const NO_COOKIE_DB =
   "no chromium cookie database under that profile — is the sidecar up, and does its PUID match the bot's uid 10001?";
 const NO_AUTH_PASTE =
-  "saved, but this jar carries no YouTube sign-in cookies (SID / __Secure-1PSID) — it will not get you past a bot check";
+  "saved, but this jar carries no YouTube sign-in cookies (SID / __Secure-1PSID) — it will not get you past a bot check. A DevTools copy usually means either the page was not signed in, or the header was shortened on its way here; Import from browser avoids both";
 const UNDECRYPTABLE =
   "some cookies in that profile could not be decrypted and were dropped — the sidecar must run with --password-store=basic";
 
@@ -885,5 +885,58 @@ describe("the sidecar profile probe has three states", () => {
     // a browser keeps tens of thousands of cache files in.
     const { svc } = await make({ browserProfile: await profileWithDb("Default/Cache/Cookies") });
     expect(svc.health().browserProfileAvailable).toBe(false);
+  });
+});
+
+// A paste the BROWSER shortened for display. DevTools renders a long Cookie header with a
+// horizontal ellipsis standing in for the middle, and selecting that rendered text copies the
+// ellipsis rather than the bytes behind it. By weight a cookie header is mostly sign-in
+// material, so the hidden middle is exactly where SID / __Secure-1PSID live — what arrives is
+// the short anonymous cookies from each end and a hole where the session was.
+describe("a truncated paste is refused, not saved", () => {
+  // Shaped like the real report: anonymous cookies, an ellipsis mid-value, more anonymous
+  // cookies. Nothing here is a sign-in cookie, because the part that held them is gone.
+  const TRUNCATED =
+    "__Secure-YNID=21.YT=abcdef; GPS=1; YSC=LxUcNzhli3I; " +
+    "VISITOR_PRIVACY_METADAT…y1QeXRJQ2N5ZDRMUm4; ST-xuwub9=session_logininfo=AFmmF2s";
+
+  it("rejects it and says the paste was cut short", async () => {
+    const { svc, applyCookies, jarPath } = await make();
+    const res = await svc.saveFromText(TRUNCATED);
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/TRUNCATED/);
+    // The actionable half: how to copy it properly, and the route that sidesteps copying.
+    expect(res.reason).toMatch(/Copy value/);
+    expect(res.reason).toMatch(/Import from browser/);
+    // Nothing was written and nothing was applied — a jar that works is left alone.
+    expect(existsSync(jarPath)).toBe(false);
+    expect(applyCookies).not.toHaveBeenCalled();
+  });
+
+  it("does NOT clobber a working jar with the leftovers", async () => {
+    const cacheDir = await tmp();
+    const jarPath = defaultJarPath(cacheDir);
+    await writeFile(
+      jarPath,
+      `# Netscape HTTP Cookie File\n#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t2000000000\tSID\t${SECRET}\n`,
+    );
+    const { svc } = await make({ cacheDir, jarPath });
+    expect((await svc.saveFromText(TRUNCATED)).ok).toBe(false);
+    // The real session is still there, untouched.
+    expect(await readFile(jarPath, "utf8")).toContain(SECRET);
+  });
+
+  it("quotes none of the paste back", async () => {
+    const { svc } = await make();
+    const res = await svc.saveFromText(`SID=${SECRET}…rest`);
+    expect(res.reason).not.toContain(SECRET);
+  });
+
+  it("still accepts an ordinary paste that merely contains dots", async () => {
+    // Only the ellipsis CHARACTER is proof of truncation. Plain periods appear in real cookie
+    // values all the time and must not trip this.
+    const { svc } = await make();
+    const jar = `# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2000000000\tSID\ta.b.c...d\n`;
+    expect((await svc.saveFromText(jar)).ok).toBe(true);
   });
 });

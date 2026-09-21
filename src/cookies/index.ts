@@ -235,9 +235,22 @@ const REASON_PROFILE_EMPTY =
 const REASON_NO_COOKIE_DB =
   "no chromium cookie database under that profile — is the sidecar up, and does its PUID match the bot's uid 10001?";
 
+/**
+ * A paste that the BROWSER shortened for display.
+ *
+ * DevTools renders a long `Cookie:` header with a horizontal ellipsis standing in for the
+ * middle, and selecting that rendered text copies the ellipsis instead of the bytes it hides.
+ * A cookie header is mostly sign-in material by weight, so the elided middle is precisely where
+ * SID / __Secure-1PSID live: what arrives is the short anonymous cookies from each end and a
+ * hole where the session was. U+2026 can never appear in a real cookie (RFC 6265 values are
+ * US-ASCII), so finding one is proof, not a guess.
+ */
+const REASON_TRUNCATED =
+  'that paste is TRUNCATED — it contains a \u2026 where the browser shortened the value for display, and the sign-in cookies were in the part it hid. Right-click the Cookie header and choose "Copy value" (selecting the text copies what is shown, not what is there), or use Import from browser, which reads the cookies directly';
+
 /** Warnings: the operation WORKED, and the operator would still be misled by silence. */
 const WARNING_NO_AUTH_PASTE =
-  "saved, but this jar carries no YouTube sign-in cookies (SID / __Secure-1PSID) — it will not get you past a bot check";
+  "saved, but this jar carries no YouTube sign-in cookies (SID / __Secure-1PSID) — it will not get you past a bot check. A DevTools copy usually means either the page was not signed in, or the header was shortened on its way here; Import from browser avoids both";
 const WARNING_UNDECRYPTABLE =
   "some cookies in that profile could not be decrypted and were dropped — the sidecar must run with --password-store=basic";
 
@@ -384,6 +397,11 @@ export class CookieService {
    */
   saveFromText(text: string): Promise<CookieResult> {
     return this.exclusive("cookies:save", async () => {
+      // REFUSE a visibly-truncated paste before it can touch the jar. Saving it would replace a
+      // working session with the anonymous leftovers of one — the exact outcome the sign-in
+      // gate on the browser import exists to prevent — and the operator would be left reading
+      // "no sign-in cookies" while looking at a header that plainly contains them on screen.
+      if (text.includes("\u2026")) return { ok: false, reason: REASON_TRUNCATED };
       const jar = toNetscapeCookies(text);
       // Nothing usable in the paste (empty box, a screenshot's worth of prose, a JSON export we
       // don't speak). Say so without quoting a single character of what was pasted.
