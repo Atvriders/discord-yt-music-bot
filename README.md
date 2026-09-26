@@ -242,7 +242,9 @@ browser logged into your Google account on the public internet:
   ```
 
 Either way the certificate is self-signed — accept the warning. Sign in to YouTube (2FA works;
-a human is driving), wait ~30s (chromium commits cookies on a timer; closing the tab does not
+a human is driving), then go to **https://www.youtube.com/robots.txt** — YouTube rotates account
+cookies on any open YouTube tab, so a signed-in YouTube page left open keeps replacing the session
+the bot is about to copy. Wait ~30s (chromium commits cookies on a timer; closing the tab does not
 flush them), press **Import from browser** in the cookie console, then stop it again:
 
 ```bash

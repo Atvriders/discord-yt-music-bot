@@ -180,8 +180,12 @@ services:
       # --password-store=basic is not optional: with a keyring available chromium writes v11
       # cookies the bot cannot decrypt, and yt-dlp drops them SILENTLY — you get a jar that looks
       # fine and is missing exactly the auth cookies you signed in for. (The console warns when it
-      # sees that happen.) The URL is the start page.
-      CHROME_CLI: "--password-store=basic https://www.youtube.com/"
+      # sees that happen.)
+      # The start page is robots.txt, NOT youtube.com: YouTube rotates account cookies on any open
+      # YouTube tab (per the yt-dlp wiki), so a browser sitting on a YouTube page keeps replacing
+      # the session and the copy the bot imported goes stale. robots.txt runs no scripts. Sign in
+      # via youtube.com, then come back here before pressing Import.
+      CHROME_CLI: "--password-store=basic https://www.youtube.com/robots.txt"
     # NEVER on 0.0.0.0, a public address, or your tunnel/reverse proxy: it is a logged-in Google
     # session in a full browser behind one password. By default it binds to the server's
     # LOOPBACK, so it is not reachable from other computers — that is on purpose. To open it:
