@@ -455,14 +455,20 @@ describe("CookieService.importFromBrowser", () => {
     // …and the staged jar is PROMOTED over the live one on success, with the staging file cleaned up.
     expect(await readFile(jarPath, "utf8")).toBe(NETSCAPE_EXPORT);
     expect(existsSync(sawCookiesArg!)).toBe(false);
-    // Metadata only — never pull the audio just to harvest cookies.
-    expect(args).toContain("--skip-download");
-    expect(args).toContain("--simulate");
-    // …but NOT --no-warnings, which every other yt-dlp call in the bot passes. A cookie yt-dlp
-    // cannot decrypt is reported as a WARNING and then dropped silently, and that warning is the
-    // only way the success path can tell the operator their sidecar grew a keyring.
+    // NO URL, and nothing else that could reach the network. The export used to extract a probe
+    // video in the same run, and whatever YouTube did to the session in its response — expire,
+    // rotate, log out — was applied to the jar before it was saved. Reproduced for real: SID and
+    // __Secure-1PSID extracted from the profile, exit 0, and a saved jar holding only anonymous
+    // cookies. The session is proven by the probe afterwards, never during the export.
+    expect(args.some((a) => /^https?:/.test(a))).toBe(false);
+    expect(args).not.toContain("--simulate");
+    expect(args).not.toContain("--skip-download");
+    // A system/user yt-dlp config must not be able to add a URL (or move the output) behind us.
+    expect(args).toContain("--ignore-config");
+    // …and NOT --no-warnings, which every other yt-dlp call in the bot passes. A cookie yt-dlp
+    // cannot decrypt is reported and then dropped silently, and that report is the only way the
+    // success path can tell the operator their sidecar grew a keyring.
     expect(args).not.toContain("--no-warnings");
-    expect(args[args.length - 1]).toBe(`https://www.youtube.com/watch?v=${PROBE_VIDEO_ID}`);
     expect(timeoutMs).toBe(12_345);
     // Imported jars get the same treatment as pasted ones: 0600, hot-applied, then proven.
     expect(await mode(jarPath)).toBe("600");
@@ -938,5 +944,87 @@ describe("a truncated paste is refused, not saved", () => {
     const { svc } = await make();
     const jar = `# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2000000000\tSID\ta.b.c...d\n`;
     expect((await svc.saveFromText(jar)).ok).toBe(true);
+  });
+});
+
+// The export runs WITHOUT a URL so nothing reaches the network. yt-dlp then saves the jar and
+// exits 2 with its usage error — reproduced against the real binary: "Extracted 5 cookies from
+// chromium", exit 2, and a jar holding SID / __Secure-1PSID intact. That exit is success; every
+// other failure must still be one.
+describe("the network-free export", () => {
+  const NO_URL =
+    "Usage: yt-dlp [OPTIONS] URL [URL...]\n\nyt-dlp: error: You must provide at least one URL.\n";
+
+  async function importWith(result: Partial<YtDlpRun>, writeJar = true) {
+    const profile = await profileWithDb();
+    const cacheDir = await tmp();
+    const jarPath = defaultJarPath(cacheDir);
+    const run = vi.fn(async (args: string[]): Promise<YtDlpRun> => {
+      if (writeJar) await writeFile(args[args.indexOf("--cookies") + 1]!, NETSCAPE_EXPORT);
+      return okRun(result);
+    });
+    const { svc } = await make({ cacheDir, jarPath, browserProfile: profile, run });
+    return { res: await svc.importFromBrowser(), jarPath };
+  }
+
+  it("treats exit 2 with the no-URL usage error as a completed export", async () => {
+    const { res, jarPath } = await importWith({
+      code: 2,
+      stdout: "Extracting cookies from chromium\nExtracted 5 cookies from chromium\n",
+      stderr: NO_URL,
+    });
+    expect(res).toEqual({ ok: true, reason: null });
+    expect(await readFile(jarPath, "utf8")).toBe(NETSCAPE_EXPORT);
+  });
+
+  it("does NOT treat a different exit-2 usage error as success", async () => {
+    // Exit 2 is every argparse error. Only the one this export produces on purpose counts —
+    // a future flag rename must fail loudly, not promote whatever file happens to be there.
+    const { res, jarPath } = await importWith({
+      code: 2,
+      stderr: "yt-dlp: error: no such option: --cookies-from-browser\n",
+    });
+    expect(res.ok).toBe(false);
+    expect(existsSync(jarPath)).toBe(false);
+  });
+
+  it("still refuses a no-URL export whose profile was not signed in", async () => {
+    // Network-free does not mean unguarded: the sign-in gate is what stops an anonymous profile
+    // replacing a working session.
+    const profile = await profileWithDb();
+    const cacheDir = await tmp();
+    const jarPath = defaultJarPath(cacheDir);
+    const anonymous =
+      "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2000000000\tYSC\tabc\n";
+    const run = vi.fn(async (args: string[]): Promise<YtDlpRun> => {
+      await writeFile(args[args.indexOf("--cookies") + 1]!, anonymous);
+      return okRun({ code: 2, stdout: "Extracted 1 cookies from chromium\n", stderr: NO_URL });
+    });
+    const { svc } = await make({ cacheDir, jarPath, browserProfile: profile, run });
+    const res = await svc.importFromBrowser();
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/not signed in/);
+    expect(existsSync(jarPath)).toBe(false);
+  });
+
+  it("warns when the decrypt tally on STDOUT reports dropped cookies", async () => {
+    // yt-dlp reports the per-run tally on stdout and only the per-version warning on stderr.
+    // Looking at stderr alone, this — a session missing some of its cookies — passed silently.
+    const { res } = await importWith({
+      code: 2,
+      stdout: "Extracted 5 cookies from chromium (2 could not be decrypted)\n",
+      stderr: NO_URL,
+    });
+    expect(res.ok).toBe(true);
+    expect(res.warning).toMatch(/could not be decrypted/);
+  });
+
+  it("still warns on the stderr form too", async () => {
+    const { res } = await importWith({
+      code: 2,
+      stdout: "Extracted 5 cookies from chromium\n",
+      stderr: `WARNING: cannot decrypt v11 cookies: no key found\n${NO_URL}`,
+    });
+    expect(res.warning).toMatch(/could not be decrypted/);
   });
 });

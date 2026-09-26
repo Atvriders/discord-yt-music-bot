@@ -234,13 +234,15 @@ Notes that will save you an evening:
   so a mismatched uid makes it unreadable and the import button stays off.
 - **HTTPS on 3001, not HTTP on 3000.** Over plain HTTP to a LAN IP the page is not a secure
   context, WebCodecs is dead, and signing in by hand is miserable.
-- An import **never** overwrites a working jar unless it proves the profile was signed in.
-  `--cookies-from-browser P --cookies OUT` writes `OUT` _after_ the HTTP request, so `OUT` always
-  ends up holding the ~8 cookies youtube.com hands an anonymous visitor — meaning a
-  "did we get a file?" check passes even for a profile with nothing in it. The import stages to a
-  temp file and promotes it only if yt-dlp reports a non-zero count read from the profile _and_ a
-  real `google.com`/`youtube.com` auth cookie with a non-empty value is present. Otherwise the
-  staged file is discarded and the live jar is untouched.
+- **The import never touches the network.** It reads the profile and writes the jar, nothing
+  else — so what gets saved is exactly what the browser holds. (Earlier versions fetched a video
+  during the export, and whatever YouTube did to the session in that response — expire, rotate,
+  log out — was saved along with it: the sign-in cookies were read and then lost before the file
+  was written.) The session is tested afterwards, by the bot's own extractor.
+- An import **never** overwrites a working jar unless it proves the profile was signed in. It
+  stages to a temp file and promotes it only if yt-dlp reports a non-zero count read from the
+  profile _and_ a real `google.com`/`youtube.com` auth cookie with a non-empty value is present.
+  Otherwise the staged file is discarded and the live jar is untouched.
 
 ### Troubleshooting
 

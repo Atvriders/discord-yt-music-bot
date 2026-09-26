@@ -431,15 +431,21 @@ export class CookieService {
    * and does so as the very last step, which is what keeps a FAILED import from damaging a jar that
    * currently works.
    *
-   * Every check below exists because of one specific defect. `--cookies-from-browser P --cookies
-   * OUT` writes OUT *after* the HTTP request, so OUT always holds the eight cookies youtube.com
-   * hands an anonymous visitor (PREF, SOCS, __Secure-YNID, GPS, YSC, __Secure-ROLLOUT_TOKEN,
-   * VISITOR_INFO1_LIVE, VISITOR_PRIVACY_METADATA) even for a profile with nothing in it. "Is the
-   * staged file non-empty?" therefore ALWAYS passed: an import from a not-signed-in profile
-   * overwrote a working authenticated jar with an anonymous one, the probe passed too (PROBE_VIDEO_ID
-   * is public and needs no auth), and the console reported "imported and working" for the exact
-   * operation that had just destroyed the session. Nothing is promoted now until a real sign-in
-   * cookie is in the staged file.
+   * NO URL IS GIVEN, and that is deliberate. The export used to extract a probe video in the same
+   * run, which meant yt-dlp talked to YouTube with the session it had just read and applied
+   * whatever came back to the jar BEFORE saving it. Reproduced against a real Chromium profile and
+   * yt-dlp 2026.08: five cookies extracted, SID and __Secure-1PSID among them, exit 0 — and the
+   * saved jar held only the eight anonymous cookies youtube.com hands a visitor. Anything YouTube
+   * chose to expire, rotate or log out in its response was baked into the import, and a flagged IP
+   * (the reason anyone imports cookies in the first place) could fail the import outright. With no
+   * URL, yt-dlp reads the profile, writes the jar and stops: the file is exactly what the browser
+   * holds. It then exits 2 ("You must provide at least one URL") AFTER saving, which is accepted
+   * below only in that exact shape. The real test of the session is the probe afterwards, run by
+   * the configured extractor with its player clients, JS runtime, PO token and proxy.
+   *
+   * The gates that follow still stand between the staged file and the live jar: a profile that
+   * visited YouTube without signing in holds only anonymous cookies, and promoting those over a
+   * working session is the failure they exist to prevent.
    */
   importFromBrowser(): Promise<CookieResult> {
     return this.exclusive("cookies:import", async () => {
@@ -476,23 +482,20 @@ export class CookieService {
       try {
         run = await this.run(
           [
+            // A system or user yt-dlp config could add a URL (and with it the network round trip
+            // this export exists to avoid) or change where cookies are written. Never read one.
+            "--ignore-config",
             "--cookies-from-browser",
             `chromium:${profile}`,
             "--cookies",
             staged,
-            // Touch the network only as far as it takes to make yt-dlp load the browser jar and
-            // save it back to our file; we never want the audio here.
-            "--skip-download",
-            "--simulate",
-            "--no-playlist",
             // NOTE the absence of --no-warnings, which every other yt-dlp call in the bot passes.
-            // A cookie yt-dlp cannot decrypt is reported as a WARNING and then dropped silently,
-            // and that is precisely the failure that produces a jar which looks fine and is
-            // missing the auth cookies. We want those warnings on stderr so the success path can
-            // say so — the text itself never leaves this file, only WARNING_UNDECRYPTABLE does.
-            "--no-progress",
-            "--",
-            `https://www.youtube.com/watch?v=${PROBE_VIDEO_ID}`,
+            // A cookie yt-dlp cannot decrypt is reported (and then dropped silently), and that is
+            // precisely the failure that produces a jar which looks fine and is missing the auth
+            // cookies. We want those reports so the success path can say so — the text itself
+            // never leaves this file, only WARNING_UNDECRYPTABLE does.
+            //
+            // And no URL at all: see the method comment. Nothing here may reach the network.
           ],
           this.timeoutMs,
         );
@@ -501,18 +504,29 @@ export class CookieService {
         await this.discardStaged(staged);
         return { ok: false, reason: probeReason(err) };
       }
-      if (run.code !== 0) {
+      // With no URL, yt-dlp saves the jar and THEN exits 2 with its usage error. That exit — and
+      // only that exit, recognised by its message — means "export done". Any other non-zero code,
+      // or a 2 for some other usage error, is a real failure. Whichever way it went, the gates
+      // below still inspect the file itself before anything is promoted.
+      const exportDone =
+        run.code === 0 || (run.code === 2 && /provide at least one URL/i.test(run.stderr));
+      if (!exportDone) {
         await this.discardStaged(staged);
+        // Server-side only: the operator's one way to see WHY. yt-dlp prints no cookie values
+        // unless asked to with -v, which is never passed; this carries paths and counts.
+        getRootLogger().warn(
+          { code: run.code, stderr: run.stderr.slice(0, 2000) },
+          "browser cookie import: yt-dlp failed",
+        );
         return { ok: false, reason: importReason(run.stderr, run.code) };
       }
-      // yt-dlp exited clean. Three gates now stand between that and replacing a live session, in
-      // increasing order of how much of the staged file they have to look at. EVERY failure below
-      // discards the staged file and leaves the live jar exactly as it was.
+      // Three gates now stand between the export and replacing a live session, in increasing
+      // order of how much of the staged file they have to look at. EVERY failure below discards
+      // the staged file and leaves the live jar exactly as it was.
       //
-      // (a) yt-dlp's own count of what it read OUT OF THE PROFILE, before the request that
-      // contaminates the file with anonymous cookies. A zero here is conclusive. A missing line
-      // (older yt-dlp) parses to null, which means "don't know" and must fall through rather than
-      // read as zero.
+      // (a) yt-dlp's own count of what it read OUT OF THE PROFILE. A zero here is conclusive. A
+      // missing line (an older yt-dlp) parses to null, which means "don't know" and must fall
+      // through rather than read as zero.
       if (extractedCookieCount(run.stdout) === 0) {
         await this.discardStaged(staged);
         return { ok: false, reason: REASON_NOT_SIGNED_IN };
@@ -530,9 +544,9 @@ export class CookieService {
         await this.discardStaged(staged);
         return { ok: false, reason: REASON_PROFILE_EMPTY };
       }
-      // (c) THE FIX. Cookies, but no session: the eight anonymous ones satisfy (b) all by
-      // themselves. Only a google.com/youtube.com auth cookie carrying an actual value proves
-      // somebody was signed in when the profile was read.
+      // (c) Cookies, but no session: a profile that has visited YouTube WITHOUT signing in holds
+      // only anonymous cookies, which satisfy (b) by themselves. Only a google.com/youtube.com
+      // auth cookie carrying an actual value proves somebody was signed in.
       if (!hasAuthCookie(stagedJar)) {
         await this.discardStaged(staged);
         return { ok: false, reason: REASON_NOT_SIGNED_IN };
@@ -553,8 +567,14 @@ export class CookieService {
       // what did decrypt may be a perfectly good session. But the operator has to hear about it:
       // the usual cause is a sidecar that acquired a keyring and started writing v11 cookies
       // instead of the v10 "peanuts" that --password-store=basic produces, and the symptom is a
-      // session that half-works for a while. stderr itself never leaves this file.
-      if (UNDECRYPTABLE_RE.test(run.stderr)) return { ...result, warning: WARNING_UNDECRYPTABLE };
+      // session that half-works for a while. Neither stream ever leaves this file.
+      //
+      // BOTH streams: yt-dlp puts the per-run tally ("Extracted 5 cookies from chromium (2 could
+      // not be decrypted)") on STDOUT and only the per-version "cannot decrypt v11 cookies"
+      // warning on stderr. Checking stderr alone missed every partial failure the tally reports.
+      if (UNDECRYPTABLE_RE.test(run.stdout) || UNDECRYPTABLE_RE.test(run.stderr)) {
+        return { ...result, warning: WARNING_UNDECRYPTABLE };
+      }
       return result;
     });
   }
