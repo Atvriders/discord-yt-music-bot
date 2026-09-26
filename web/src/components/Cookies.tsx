@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { CookieHealth, CookieResult, CookieSource } from "../types.js";
+import type { BrowserProfileState, CookieHealth, CookieResult, CookieSource } from "../types.js";
 import { api, ApiError } from "../lib/api.js";
 
 /** Which operation currently owns the panel (null = idle). */
@@ -128,6 +128,70 @@ function requestMessage(e: unknown, fallback: string): string {
 function warningOf(r: CookieResult): string | null {
   const w = (r as { warning?: unknown }).warning;
   return typeof w === "string" && w.trim() !== "" ? w : null;
+}
+
+/** What each unavailable state means, in the order an operator would fix them. */
+const PROFILE_PROBLEM: Record<
+  Exclude<BrowserProfileState, "ok">,
+  { what: string; fix: string; command?: string }
+> = {
+  unconfigured: {
+    what: "Not set up on this server.",
+    fix: "Add COOKIE_BROWSER_PROFILE, the browser-profile volume on the bot, and the chromium service to docker-compose.yml (see the README), then recreate the bot.",
+  },
+  absent: {
+    what: "Nothing at the profile path yet.",
+    fix: "Start the sign-in browser and sign in to YouTube in it. If it is already running, its volume is not mounted into the bot.",
+    command: "docker compose --profile browser up -d",
+  },
+  unreadable: {
+    what: "The profile is there, but the bot is not allowed to read it.",
+    fix: "The sign-in browser must run with PUID and PGID set to 10001 (the bot's own uid) — Chromium makes its profile private to the user that owns it.",
+  },
+  "no-db": {
+    what: "The folder is readable, but there is no Chromium cookie database in it.",
+    fix: "Sign in to YouTube in the sign-in browser once. If you already have, COOKIE_BROWSER_PROFILE is pointing one level off — find the real one with:",
+    command: "docker compose exec chromium find /config -name Cookies",
+  },
+};
+
+function ProfileProblem({
+  state,
+  path,
+}: {
+  state: BrowserProfileState;
+  path: string | null;
+}) {
+  const p = PROFILE_PROBLEM[state === "ok" ? "unconfigured" : state];
+  return (
+    <div className="mt-2" role="status" data-state={state}>
+      <p className="text-sm" style={{ color: "var(--color-ink-dim)" }}>
+        {p.what}
+      </p>
+      <p className="mt-1.5 text-xs" style={{ color: "var(--color-ink-faint)" }}>
+        {p.fix}
+      </p>
+      {p.command && (
+        <code
+          className="mt-2 inline-block font-mono text-xs"
+          style={{
+            padding: "0.25rem 0.55rem",
+            borderRadius: "var(--radius-sm)",
+            background: "var(--color-sunken)",
+            boxShadow: "var(--shadow-inset)",
+            color: "var(--color-ink-dim)",
+          }}
+        >
+          {p.command}
+        </code>
+      )}
+      {path && (
+        <p className="mt-2 font-mono text-xs" style={{ color: "var(--color-ink-faint)" }}>
+          looking in {path}
+        </p>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -578,31 +642,46 @@ export function Cookies() {
             </button>
           </div>
 
-          {/* ---- Import from the sidecar (only when the profile is really there) --- */}
-          {view?.h.browserProfileAvailable && (
+          {/* ---- Import from the sign-in browser ------------------------------------
+              ALWAYS shown once health is known. It used to render only when the profile was
+              already readable, so in every case where the import could not work the operator
+              saw no button and no explanation — the reasons existed server-side and could only
+              be reached by pressing the button that had been hidden. Now each state says what
+              is wrong and what to do; the button appears only when pressing it can work. */}
+          {view && (
             <>
               <hr className="mt-6" style={rule} />
-              <div className="mt-5">
-                <span className="eyebrow">Browser profile</span>
-                <p className="mt-2 text-xs" style={{ color: "var(--color-ink-faint)" }}>
-                  Copies the YouTube cookies out of the signed-in browser sidecar&rsquo;s profile
-                  and applies them here — sign in over there first, then press this.
-                </p>
-                <button
-                  type="button"
-                  className="pill mt-4"
-                  disabled={busy !== null}
-                  aria-busy={busy === "import"}
-                  onClick={() => void run("import", () => api.cookiesImport(admin))}
-                >
-                  {busy === "import" ? (
-                    <>
-                      <span className="spinner" aria-hidden /> Importing…
-                    </>
-                  ) : (
-                    "Import from browser"
-                  )}
-                </button>
+              <div className="mt-5" data-testid="browser-profile">
+                <span className="eyebrow">Import from the sign-in browser</span>
+                {view.h.browserProfile?.state === "ok" || view.h.browserProfileAvailable ? (
+                  <>
+                    <p className="mt-2 text-xs" style={{ color: "var(--color-ink-faint)" }}>
+                      Copies the YouTube cookies out of the sign-in browser&rsquo;s profile and
+                      applies them here. Sign in over there first, wait about 30 seconds (Chromium
+                      saves cookies on a timer), then press this.
+                    </p>
+                    <button
+                      type="button"
+                      className="pill mt-4"
+                      disabled={busy !== null}
+                      aria-busy={busy === "import"}
+                      onClick={() => void run("import", () => api.cookiesImport(admin))}
+                    >
+                      {busy === "import" ? (
+                        <>
+                          <span className="spinner" aria-hidden /> Importing…
+                        </>
+                      ) : (
+                        "Import from browser"
+                      )}
+                    </button>
+                  </>
+                ) : (
+                  <ProfileProblem
+                    state={view.h.browserProfile?.state ?? "unconfigured"}
+                    path={view.h.browserProfile?.path ?? null}
+                  />
+                )}
               </div>
             </>
           )}

@@ -253,6 +253,7 @@ describe("CookieService.saveFromText", () => {
       updatedAt: null,
       lastCheck: null,
       browserProfileAvailable: false,
+      browserProfile: { state: "unconfigured", path: null },
     });
 
     await svc.saveFromText(HEADER_PASTE);
@@ -263,6 +264,7 @@ describe("CookieService.saveFromText", () => {
       updatedAt: 1234,
       lastCheck: { at: 1234, ok: true, reason: null },
       browserProfileAvailable: false,
+      browserProfile: { state: "unconfigured", path: null },
     });
   });
 
@@ -497,7 +499,8 @@ describe("CookieService.importFromBrowser", () => {
 
     expect(await svc.importFromBrowser()).toEqual({
       ok: false,
-      reason: "the browser profile is not readable (is the sidecar up?)",
+      reason:
+        "nothing at the browser profile path — start the sign-in browser (docker compose --profile browser up -d) and check its volume is mounted into the bot",
     });
     expect(run).not.toHaveBeenCalled();
     expect(svc.health().browserProfileAvailable).toBe(false);
@@ -639,6 +642,7 @@ describe("CookieService security: a cookie value never leaves the module", () =>
     const h = svc.health();
     expect(JSON.stringify(h)).not.toContain(SECRET);
     expect(Object.keys(h).sort()).toEqual([
+      "browserProfile",
       "browserProfileAvailable",
       "configured",
       "lastCheck",
@@ -874,13 +878,14 @@ describe("the sidecar profile probe has three states", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it('a path that is not there at all is "missing" — the sidecar-is-down reason', async () => {
+  it('a path that is not there at all is "absent" — start the sign-in browser', async () => {
     const { svc, run } = await make({ browserProfile: join(await tmp(), "never-mounted") });
 
     expect(svc.health().browserProfileAvailable).toBe(false);
     expect(await svc.importFromBrowser()).toEqual({
       ok: false,
-      reason: "the browser profile is not readable (is the sidecar up?)",
+      reason:
+        "nothing at the browser profile path — start the sign-in browser (docker compose --profile browser up -d) and check its volume is mounted into the bot",
     });
     expect(run).not.toHaveBeenCalled();
   });
@@ -1026,5 +1031,53 @@ describe("the network-free export", () => {
       stderr: `WARNING: cannot decrypt v11 cookies: no key found\n${NO_URL}`,
     });
     expect(res.warning).toMatch(/could not be decrypted/);
+  });
+});
+
+// health() used to report only a boolean, and the panel hid the whole import section whenever it
+// was false — so in every case the import could NOT work, the operator saw no button and no
+// reason. Each state has a different fix, so each must reach the panel as itself.
+describe("health() says WHY the browser import is unavailable", () => {
+  it("unconfigured: COOKIE_BROWSER_PROFILE is not set", async () => {
+    const { svc } = await make({ browserProfile: null });
+    expect(svc.health().browserProfile).toEqual({ state: "unconfigured", path: null });
+  });
+
+  it("absent: nothing at the path yet — the browser has not run, or the volume is not mounted", async () => {
+    const path = join(await tmp(), "never-created");
+    const { svc } = await make({ browserProfile: path });
+    expect(svc.health().browserProfile).toEqual({ state: "absent", path });
+    expect(svc.health().browserProfileAvailable).toBe(false);
+  });
+
+  it("unreadable: there, but owned by another uid — a PUID mismatch, not a stopped browser", async () => {
+    // Root reads anything, so this state cannot be produced when the suite runs as root.
+    if (process.getuid?.() === 0) return;
+    const parent = await tmp();
+    const path = join(parent, "chromium");
+    await mkdir(path);
+    await chmod(parent, 0o000); // Chromium makes its profile owner-only; this is what that looks like
+    try {
+      const { svc, run } = await make({ browserProfile: path });
+      expect(svc.health().browserProfile.state).toBe("unreadable");
+      const res = await svc.importFromBrowser();
+      expect(res.reason).toMatch(/PUID and PGID 10001/);
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      await chmod(parent, 0o755);
+    }
+  });
+
+  it("no-db: readable, but no Chromium cookie database where yt-dlp will look", async () => {
+    const path = await tmp();
+    const { svc } = await make({ browserProfile: path });
+    expect(svc.health().browserProfile).toEqual({ state: "no-db", path });
+  });
+
+  it("ok: a cookie database is where yt-dlp will read it", async () => {
+    const path = await profileWithDb();
+    const { svc } = await make({ browserProfile: path });
+    expect(svc.health().browserProfile).toEqual({ state: "ok", path });
+    expect(svc.health().browserProfileAvailable).toBe(true);
   });
 });

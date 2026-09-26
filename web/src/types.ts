@@ -85,7 +85,12 @@ export interface CookieHealth {
   lastCheck: { at: number; ok: boolean; reason: string | null } | null;
   /** The chromium sidecar profile is mounted and readable — enables the import button. */
   browserProfileAvailable: boolean;
+  /** Why the import is or is not available, so the panel can say so instead of hiding it. */
+  browserProfile: { state: BrowserProfileState; path: string | null };
 }
+
+/** Mirrors src/cookies — see there for what each state means and how to fix it. */
+export type BrowserProfileState = "unconfigured" | "absent" | "unreadable" | "no-db" | "ok";
 
 /**
  * POST /api/cookies, /api/cookies/test, /api/cookies/import. `reason` is operator-facing prose

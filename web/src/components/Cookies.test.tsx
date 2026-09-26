@@ -24,6 +24,7 @@ const HEALTH: CookieHealth = {
   updatedAt: Date.now() - 60_000,
   lastCheck: { at: Date.now() - 30_000, ok: true, reason: null },
   browserProfileAvailable: false,
+  browserProfile: { state: "absent", path: "/browser-profile/.config/chromium" },
 };
 
 function health(over: Partial<CookieHealth> = {}): CookieHealth {
@@ -125,7 +126,7 @@ describe("Cookies — the panel", () => {
   });
 
   it("shows the import button only when the sidecar profile is really readable", async () => {
-    vi.spyOn(api, "cookies").mockResolvedValue(health({ browserProfileAvailable: true }));
+    vi.spyOn(api, "cookies").mockResolvedValue(health({ browserProfileAvailable: true, browserProfile: { state: "ok", path: "/browser-profile/.config/chromium" } }));
     render(<Cookies />);
     fireEvent.click(await screen.findByRole("button", { name: /cookie console/i }));
     expect(await screen.findByRole("button", { name: /import from browser/i })).toBeTruthy();
@@ -192,7 +193,7 @@ describe("Cookies — the panel", () => {
   it("surfaces an import failure verbatim — the reason names the next action", async () => {
     const reason =
       "that profile is not signed in to YouTube — sign in inside the browser sidecar, wait ~30s";
-    vi.spyOn(api, "cookies").mockResolvedValue(health({ browserProfileAvailable: true }));
+    vi.spyOn(api, "cookies").mockResolvedValue(health({ browserProfileAvailable: true, browserProfile: { state: "ok", path: "/browser-profile/.config/chromium" } }));
     vi.spyOn(api, "cookiesImport").mockResolvedValue({ ok: false, reason });
     render(<Cookies />);
     fireEvent.click(await screen.findByRole("button", { name: /cookie console/i }));
@@ -236,5 +237,61 @@ describe("Cookies — the panel", () => {
     await waitFor(() =>
       expect((screen.getByRole("button", { name: /test now/i }) as HTMLButtonElement).disabled).toBe(false),
     );
+  });
+});
+
+describe("Cookies — the import section is never silently missing", () => {
+  // It used to render only when the profile was already readable, so every case where the import
+  // could not work showed NO button and NO reason. The reasons existed server-side and were only
+  // reachable by pressing the button that had been hidden.
+  beforeEach(() => {
+    sessionStorage.setItem("ytbot.cookieAdmin", "console-password");
+  });
+
+  const cases = [
+    { state: "unconfigured", path: null, expect: /Not set up/ },
+    { state: "absent", path: "/browser-profile/.config/chromium", expect: /Nothing at the profile path/ },
+    { state: "unreadable", path: "/browser-profile/.config/chromium", expect: /not allowed to read/ },
+    { state: "no-db", path: "/browser-profile/.config/chromium", expect: /no Chromium cookie database/ },
+  ] as const;
+
+  for (const c of cases) {
+    it(`explains "${c.state}" and offers no button that cannot work`, async () => {
+      vi.spyOn(api, "cookies").mockResolvedValue(
+        health({ browserProfileAvailable: false, browserProfile: { state: c.state, path: c.path } }),
+      );
+      render(<Cookies />);
+      fireEvent.click(await screen.findByRole("button", { name: /cookie console/i }));
+      const section = await screen.findByTestId("browser-profile");
+      expect(section.textContent).toMatch(c.expect);
+      expect(screen.queryByRole("button", { name: /import from browser/i })).toBeNull();
+      if (c.path) expect(section.textContent).toContain(c.path);
+    });
+  }
+
+  it("tells an operator whose browser is not running exactly what to run", async () => {
+    vi.spyOn(api, "cookies").mockResolvedValue(
+      health({
+        browserProfileAvailable: false,
+        browserProfile: { state: "absent", path: "/browser-profile/.config/chromium" },
+      }),
+    );
+    render(<Cookies />);
+    fireEvent.click(await screen.findByRole("button", { name: /cookie console/i }));
+    expect((await screen.findByTestId("browser-profile")).textContent).toContain(
+      "docker compose --profile browser up -d",
+    );
+  });
+
+  it("shows the Import button once the profile is really there", async () => {
+    vi.spyOn(api, "cookies").mockResolvedValue(
+      health({
+        browserProfileAvailable: true,
+        browserProfile: { state: "ok", path: "/browser-profile/.config/chromium" },
+      }),
+    );
+    render(<Cookies />);
+    fireEvent.click(await screen.findByRole("button", { name: /cookie console/i }));
+    expect(await screen.findByRole("button", { name: /import from browser/i })).toBeTruthy();
   });
 });

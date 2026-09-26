@@ -56,12 +56,35 @@ export const PROBE_VIDEO_ID = "jNQXAC9IVRw";
 /** Where the jar currently in place came from. "env" = compose (YT_COOKIES / YT_COOKIES_TEXT). */
 export type CookieSource = "env" | "paste" | "browser" | "none";
 
+/**
+ * Where the sign-in browser's profile stands, from the bot's side of the volume. Each state has
+ * a DIFFERENT fix, which is the whole reason this is not a boolean:
+ *
+ *  - "unconfigured" — COOKIE_BROWSER_PROFILE is not set: the deploy has no sidecar wired in.
+ *  - "absent"       — nothing at that path: the sign-in browser has not run yet, or the volume
+ *                     is not mounted into the bot.
+ *  - "unreadable"   — something is there but the bot may not read it: the sidecar is running as
+ *                     a different uid (its profile dir is 0700), so PUID/PGID must be 10001.
+ *  - "no-db"        — readable, but no Chromium cookie database where yt-dlp will look: the
+ *                     path is one level off, or the browser has never stored a cookie.
+ *  - "ok"           — a cookie database sits where yt-dlp will read it.
+ */
+export type BrowserProfileState = "unconfigured" | "absent" | "unreadable" | "no-db" | "ok";
+
 export interface CookieHealth {
   configured: boolean; // a cookie jar exists on disk
   source: CookieSource;
   updatedAt: number | null; // epoch ms the jar was last written by US
   lastCheck: { at: number; ok: boolean; reason: string | null } | null;
-  browserProfileAvailable: boolean; // the sidecar profile dir is mounted and readable
+  browserProfileAvailable: boolean; // shorthand for browserProfile.state === "ok"
+  /**
+   * WHY the import is or is not available. Previously only the boolean above reached the panel,
+   * which hid the whole import section whenever it was false — so the operator saw no button and
+   * no explanation, and every carefully-worded reason below was unreachable in exactly the cases
+   * it was written for. `path` is the operator's own COOKIE_BROWSER_PROFILE, shown so a path
+   * that is one directory off is visible at a glance; it holds no secret.
+   */
+  browserProfile: { state: BrowserProfileState; path: string | null };
 }
 
 export interface CookieResult {
@@ -220,7 +243,11 @@ const REASON_WRITE_FAILED = "could not write the cookie jar (disk full or CACHE_
 const REASON_NO_COOKIES =
   "no cookies found in that text — paste a cookies.txt export, a cookie-extension JSON export, or the one-line \"Cookie:\" request header from DevTools → Network → a youtube.com request (the Console's document.cookie and the Application tab's cookie TABLE are not accepted formats)";
 const REASON_INTERNAL = "internal error";
-const REASON_PROFILE_UNREADABLE = "the browser profile is not readable (is the sidecar up?)";
+const REASON_PROFILE_UNCONFIGURED = "no browser profile configured (set COOKIE_BROWSER_PROFILE)";
+const REASON_PROFILE_ABSENT =
+  "nothing at the browser profile path — start the sign-in browser (docker compose --profile browser up -d) and check its volume is mounted into the bot";
+const REASON_PROFILE_UNREADABLE =
+  "the browser profile is there but the bot may not read it — the sign-in browser must run with PUID and PGID 10001";
 
 /**
  * The import's verdicts. Each one names the NEXT ACTION, because "it didn't work" on its own is
@@ -369,6 +396,7 @@ export class CookieService {
    */
   health(): CookieHealth {
     const configured = this.jarExists();
+    const state = this.profileState();
     return {
       configured,
       // We only know the source of a jar WE wrote. Anything already on disk at boot came from
@@ -376,7 +404,8 @@ export class CookieService {
       source: this.lastWrite?.source ?? (configured ? "env" : "none"),
       updatedAt: this.lastWrite?.at ?? null,
       lastCheck: this.lastCheck,
-      browserProfileAvailable: this.profileState() === "ok",
+      browserProfileAvailable: state === "ok",
+      browserProfile: { state, path: this.browserProfile },
     };
   }
 
@@ -450,9 +479,7 @@ export class CookieService {
   importFromBrowser(): Promise<CookieResult> {
     return this.exclusive("cookies:import", async () => {
       const profile = this.browserProfile;
-      if (profile === null) {
-        return { ok: false, reason: "no browser profile configured (set COOKIE_BROWSER_PROFILE)" };
-      }
+      if (profile === null) return { ok: false, reason: REASON_PROFILE_UNCONFIGURED };
       // yt-dlp addresses a profile as `browser[+keyring][:profile][::container]`, so a path
       // containing ':' or '+' is parsed as something else entirely. Reject it here with a clear
       // reason instead of letting yt-dlp fail with a baffling one.
@@ -464,7 +491,8 @@ export class CookieService {
       // but holds no cookie DB (COOKIE_BROWSER_PROFILE aimed one level off the user-data-dir).
       // Both used to surface as one vague "not readable", or worse as a baffling yt-dlp failure.
       const state = this.profileState();
-      if (state === "missing") return { ok: false, reason: REASON_PROFILE_UNREADABLE };
+      if (state === "absent") return { ok: false, reason: REASON_PROFILE_ABSENT };
+      if (state === "unreadable") return { ok: false, reason: REASON_PROFILE_UNREADABLE };
       if (state === "no-db") return { ok: false, reason: REASON_NO_COOKIE_DB };
       try {
         await mkdir(this.cacheDir, { recursive: true });
@@ -653,8 +681,9 @@ export class CookieService {
   /**
    * Where the sidecar's profile stands, in the three states an operator can actually act on:
    *
-   *  - "missing" — nothing usable at that path. The volume is unmounted, the sidecar has not
-   *    started, or the directory belongs to another uid (profile dirs are owner-only, so the
+   *  - "unconfigured" — COOKIE_BROWSER_PROFILE is unset.
+   *  - "absent" — nothing at that path: the volume is unmounted or the sidecar has not started.
+   *  - "unreadable" — the directory belongs to another uid (profile dirs are owner-only, so the
    *    sidecar's PUID has to equal the bot's own uid).
    *  - "no-db"   — the directory reads fine but holds no chromium cookie database. Almost always
    *    COOKIE_BROWSER_PROFILE aimed one level off — at $HOME rather than the user-data-dir.
@@ -670,16 +699,21 @@ export class CookieService {
    *
    * X_OK as well as R_OK, because yt-dlp has to traverse into the directory to reach the DB.
    */
-  private profileState(): "ok" | "missing" | "no-db" {
+  private profileState(): BrowserProfileState {
     const profile = this.browserProfile;
-    // Unconfigured reports as "missing": there is no directory to be readable, and the callers
-    // that care have already answered "no browser profile configured" before asking.
-    if (profile === null) return "missing";
+    if (profile === null) return "unconfigured";
     try {
-      if (!statSync(profile, { throwIfNoEntry: false })?.isDirectory()) return "missing";
+      const st = statSync(profile, { throwIfNoEntry: false });
+      // Nothing there, or something that is not a directory: the browser has not created its
+      // profile yet, or the volume is not mounted at this path.
+      if (!st?.isDirectory()) return "absent";
       accessSync(profile, constants.R_OK | constants.X_OK);
-    } catch {
-      return "missing";
+    } catch (err) {
+      // stat or access REFUSED rather than found nothing: the profile (or a directory above it)
+      // belongs to another uid. Chromium makes its profile 0700, so this is a PUID mismatch —
+      // a different fix from "the browser is not running", which is why it is its own state.
+      const code = (err as NodeJS.ErrnoException).code;
+      return code === "EACCES" || code === "EPERM" ? "unreadable" : "absent";
     }
     for (const rel of [
       "Default/Network/Cookies",

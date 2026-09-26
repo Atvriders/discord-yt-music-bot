@@ -24,6 +24,7 @@ const HEALTH: CookieHealth = {
   updatedAt: 1_700_000_000_000,
   lastCheck: { at: 1_700_000_000_500, ok: true, reason: null },
   browserProfileAvailable: false,
+  browserProfile: { state: "absent", path: "/browser-profile/.config/chromium" },
 };
 
 function build(
@@ -222,6 +223,7 @@ describe("cookie console — failure modes never leak and never 500", () => {
       updatedAt: null,
       lastCheck: null,
       browserProfileAvailable: false,
+      browserProfile: { state: "unconfigured", path: null },
     });
     const test = await app.inject({ method: "POST", url: "/api/cookies/test", headers: h });
     expect(test.statusCode).toBe(503);

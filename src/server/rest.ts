@@ -101,6 +101,7 @@ const COOKIES_UNWIRED_HEALTH: CookieHealth = {
   updatedAt: null,
   lastCheck: null,
   browserProfileAvailable: false,
+  browserProfile: { state: "unconfigured", path: null },
 };
 
 /**
