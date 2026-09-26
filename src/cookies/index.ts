@@ -97,6 +97,12 @@ export interface CookieResult {
    * literals below: no cookie NAME from the jar, and certainly no value, is ever interpolated.
    */
   warning?: string | null;
+  /**
+   * The jar WAS written and applied, whatever the probe that followed said. A paste or import
+   * that saves a jar and then fails its test is a different outcome from one refused before
+   * saving, and the panel used to call both "failed" — including an import that had worked.
+   */
+  saved?: boolean;
 }
 
 type RunFn = typeof runYtDlp;
@@ -110,8 +116,11 @@ export interface CookieServiceDeps {
    * reports and rewrites the same file the extractor actually reads.
    */
   jarPath: string;
-  /** The validation probe: a REAL extraction with whatever jar is live at the time of the call. */
-  youtube: Pick<YouTubeService, "resolve">;
+  /**
+   * The validation probe: a REAL extraction with whatever jar is live at the time of the call,
+   * that also reports whether YouTube rejected the session (see YouTubeService.probeSession).
+   */
+  youtube: Pick<YouTubeService, "probeSession">;
   /** COOKIE_BROWSER_PROFILE — the sidecar's chromium profile dir; null disables the import. */
   browserProfile: string | null;
   /** Hot-apply hook. Defaults to the YouTubeService module setter, i.e. no restart. */
@@ -272,6 +281,14 @@ const REASON_NO_COOKIE_DB =
  * hole where the session was. U+2026 can never appear in a real cookie (RFC 6265 values are
  * US-ASCII), so finding one is proof, not a guess.
  */
+/**
+ * YouTube read the jar and rejected the session in it. Names the cause and the one fix that
+ * works: YouTube rotates account cookies on any open YouTube tab, so the copy only stays valid
+ * if it is taken from a browser with no YouTube page open (the yt-dlp wiki's procedure).
+ */
+const REASON_COOKIES_REJECTED =
+  "YouTube says these cookies are no longer valid — they were rotated, which YouTube does while a YouTube page is open in the browser they came from. Close every YouTube tab there, open https://www.youtube.com/robots.txt instead, wait ~30s, then import (or re-export and paste) again";
+
 const REASON_TRUNCATED =
   'that paste is TRUNCATED — it contains a \u2026 where the browser shortened the value for display, and the sign-in cookies were in the part it hid. Right-click the Cookie header and choose "Copy value" (selecting the text copies what is shown, not what is there), or use Import from browser, which reads the cookies directly';
 
@@ -313,6 +330,8 @@ function probeReason(err: unknown): string {
       // Not a YouTube verdict at all: yt-dlp rejected the jar and never reached the video. Say
       // so plainly, because the operator's next action is "re-paste it", not "try again later" —
       // and because in this state EVERY extraction fails, not just this probe.
+      case YtErrorKind.CookiesRejected:
+        return REASON_COOKIES_REJECTED;
       case YtErrorKind.CookiesInvalid:
         return "yt-dlp cannot read this cookie file (not valid Netscape format) — playback is broken until it is replaced";
       default:
@@ -353,7 +372,7 @@ function isErrno(err: unknown): err is NodeJS.ErrnoException {
 export class CookieService {
   private readonly cacheDir: string;
   private readonly jarPath: string;
-  private readonly youtube: Pick<YouTubeService, "resolve">;
+  private readonly youtube: Pick<YouTubeService, "probeSession">;
   private readonly browserProfile: string | null;
   private readonly applyCookies: (path: string | null) => void;
   private readonly run: RunFn;
@@ -439,7 +458,9 @@ export class CookieService {
       if (writeFailed !== null) return { ok: false, reason: writeFailed };
       this.lastWrite = { at: this.now(), source: "paste" };
       this.applyCookies(this.jarPath);
-      const result = await this.probe();
+      // Saved and applied from here on, whatever the probe finds — say so, so a failed TEST is
+      // never reported as a failed SAVE.
+      const result: CookieResult = { ...(await this.probe()), saved: true };
       // A jar with no sign-in cookie is SAVED, not rejected: a consent-only jar is a legitimate
       // yt-dlp use case (it clears the EU consent interstitial) and the probe may well pass on an
       // unflagged IP, so refusing it would break a working setup. But it is also exactly what an
@@ -590,7 +611,8 @@ export class CookieService {
       }
       this.lastWrite = { at: this.now(), source: "browser" };
       this.applyCookies(this.jarPath);
-      const result = await this.probe();
+      // The import itself succeeded here; the probe that follows is a separate verdict.
+      const result: CookieResult = { ...(await this.probe()), saved: true };
       // Dropped cookies do not fail the import — gate (c) proved a real auth cookie survived, and
       // what did decrypt may be a perfectly good session. But the operator has to hear about it:
       // the usual cause is a sidecar that acquired a keyring and started writing v11 cookies
@@ -627,8 +649,12 @@ export class CookieService {
   private async probe(): Promise<CookieResult> {
     let result: CookieResult;
     try {
-      await this.youtube.resolve(PROBE_VIDEO_ID);
-      result = { ok: true, reason: null };
+      const { cookiesRejected } = await this.youtube.probeSession(PROBE_VIDEO_ID);
+      // A public video extracts fine logged OUT, so "it worked" alone proves nothing about the
+      // cookies. A rejected session is a failure of the thing this console exists to test.
+      result = cookiesRejected
+        ? { ok: false, reason: REASON_COOKIES_REJECTED }
+        : { ok: true, reason: null };
     } catch (err) {
       result = { ok: false, reason: probeReason(err) };
       // Log the failure SERVER-SIDE, at warn, with the yt-dlp message intact.

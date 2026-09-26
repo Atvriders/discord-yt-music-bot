@@ -134,3 +134,92 @@ describe("setCookiesFile — a saved jar takes effect without a restart", () => 
     expect(lastCookiesArg()).toBe("/data/cache/yt-cookies.txt");
   });
 });
+
+// yt-dlp silently DROPS any client that does not support cookies once it holds a real sign-in
+// (android_vr is one — the bot's first rung), and keeps a separate default set for signed-in
+// sessions. With a jar in play the ladder must lead with that default, or importing a VALID
+// session makes the primary client vanish.
+describe("signed-in client ladder", () => {
+  function clientsTried(): (string | null)[] {
+    return runMock.mock.calls.map((c) => {
+      const args = c[0] as string[];
+      const i = args.findIndex((a) => a.startsWith("youtube:player_client="));
+      return i === -1 ? null : args[i]!.slice("youtube:player_client=".length);
+    });
+  }
+
+  it("leads with yt-dlp's own client choice when a cookie jar is active", async () => {
+    const yt = new YouTubeService(loadMediaConfig({}));
+    setCookiesFile("/data/cache/yt-cookies.txt");
+    await yt.resolve("jNQXAC9IVRw");
+    // First attempt forces NO player_client, so yt-dlp picks its authenticated defaults.
+    expect(clientsTried()[0]).toBeNull();
+  });
+
+  it("keeps the configured ladder behind it as a fallback", async () => {
+    const yt = new YouTubeService(loadMediaConfig({}));
+    setCookiesFile("/data/cache/yt-cookies.txt");
+    runMock
+      .mockResolvedValueOnce({
+        stdout: "",
+        stderr: "ERROR: The page needs to be reloaded.",
+        code: 1,
+      })
+      .mockResolvedValue(meta());
+    await yt.resolve("jNQXAC9IVRw");
+    expect(clientsTried().slice(0, 2)).toEqual([null, "android_vr"]);
+  });
+
+  it("does not change the anonymous ladder at all", async () => {
+    const yt = new YouTubeService(loadMediaConfig({}));
+    await yt.resolve("jNQXAC9IVRw");
+    expect(clientsTried()[0]).toBe("android_vr");
+  });
+});
+
+// An extraction succeeding does not prove the cookies work: a public video extracts fine logged
+// OUT, which is exactly what yt-dlp falls back to when YouTube rejects a rotated session — after
+// a WARNING that playback's --no-warnings hides. Reproduced against yt-dlp 2026.08.19.
+describe("probeSession tells a rejected session apart from a working one", () => {
+  const ROTATED =
+    "WARNING: [youtube] The provided YouTube account cookies are no longer valid. They have likely been rotated in the browser as a security measure.\n";
+
+  it("keeps yt-dlp's warnings, which playback suppresses", async () => {
+    const yt = new YouTubeService(loadMediaConfig({}));
+    setCookiesFile("/data/cache/yt-cookies.txt");
+    await yt.probeSession("jNQXAC9IVRw");
+    expect(runMock.mock.calls[0]![0]).not.toContain("--no-warnings");
+    await yt.resolve("jNQXAC9IVRw");
+    expect(runMock.mock.calls.at(-1)![0]).toContain("--no-warnings");
+  });
+
+  it("reports a rejected session even though the extraction itself succeeded", async () => {
+    const yt = new YouTubeService(loadMediaConfig({}));
+    setCookiesFile("/data/cache/yt-cookies.txt");
+    runMock.mockResolvedValue({ ...meta(), stderr: ROTATED });
+    expect(await yt.probeSession("jNQXAC9IVRw")).toEqual({ cookiesRejected: true });
+  });
+
+  it("reports a healthy session as healthy", async () => {
+    const yt = new YouTubeService(loadMediaConfig({}));
+    setCookiesFile("/data/cache/yt-cookies.txt");
+    expect(await yt.probeSession("jNQXAC9IVRw")).toEqual({ cookiesRejected: false });
+  });
+
+  it("names the rejection, not the symptom, when every rung then fails", async () => {
+    // What produced the live "unknown": the session was refused, and the last rung's error
+    // ("The page needs to be reloaded") matched no rule.
+    const yt = new YouTubeService(loadMediaConfig({}));
+    setCookiesFile("/data/cache/yt-cookies.txt");
+    runMock.mockResolvedValue({
+      stdout: "",
+      stderr: `${ROTATED}ERROR: [youtube] jNQXAC9IVRw: The page needs to be reloaded.\n`,
+      code: 1,
+    });
+    await expect(yt.probeSession("jNQXAC9IVRw")).rejects.toMatchObject({
+      kind: "cookies_rejected",
+    });
+    // Terminal: every rung sends the same jar, so the ladder stops instead of retrying seven times.
+    expect(runMock).toHaveBeenCalledTimes(1);
+  });
+});

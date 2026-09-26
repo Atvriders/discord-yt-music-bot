@@ -102,4 +102,6 @@ export interface CookieResult {
   ok: boolean;
   reason: string | null;
   warning?: string | null;
+  /** The jar was written and applied (a failure then is the TEST, not the save). */
+  saved?: boolean;
 }

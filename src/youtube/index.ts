@@ -3,7 +3,13 @@ import { join } from "node:path";
 import type { MediaConfig } from "../config.js";
 import type { AudioInfo, TrackMeta } from "../types/index.js";
 import { runYtDlp } from "./ytdlp.js";
-import { YtError, YtErrorKind, classifyYtdlpError, isRetryableAcrossClients } from "./errors.js";
+import {
+  YtError,
+  YtErrorKind,
+  classifyYtdlpError,
+  isRetryableAcrossClients,
+  COOKIES_REJECTED_RE,
+} from "./errors.js";
 
 type RunFn = typeof runYtDlp;
 
@@ -38,9 +44,24 @@ const FALLBACK_CLIENTS = [
  * fallbacks. A comma-separated config entry like "android_vr,web_embedded,tv" becomes
  * three separate ladder rungs so a single broken client no longer dooms the request.
  */
-export function buildClientLadder(configured: string): string[] {
+/**
+ * The ladder rung that forces NO player_client, so yt-dlp picks its own defaults.
+ *
+ * Signed in, those defaults are a set yt-dlp maintains specifically for authenticated sessions
+ * (2026.08: web_embedded, tv_downgraded, web). The configured ladder cannot stand in for them:
+ * its first rung, android_vr, does not support cookies at all, and yt-dlp silently DROPS any such
+ * client the moment it holds a real sign-in — so importing a valid session made the bot's
+ * primary client vanish and pushed every extraction down to rungs that mostly cannot serve an
+ * authenticated request. Verified in yt-dlp's own source (INNERTUBE_CLIENTS SUPPORTS_COOKIES,
+ * `_DEFAULT_AUTHED_CLIENTS`, and the "Skipping client … since it does not support cookies" filter).
+ */
+export const YTDLP_DEFAULT_CLIENTS = "";
+
+export function buildClientLadder(configured: string, signedIn = false): string[] {
   const seen = new Set<string>();
-  const ladder: string[] = [];
+  // With a cookie jar in play, yt-dlp's own authenticated defaults go FIRST; the configured
+  // ladder (tuned for anonymous extraction) stays behind them as a fallback.
+  const ladder: string[] = signedIn ? [YTDLP_DEFAULT_CLIENTS] : [];
   for (const c of [...configured.split(","), ...FALLBACK_CLIENTS]) {
     const client = c.trim();
     if (!client || seen.has(client)) continue;
@@ -351,7 +372,11 @@ export class YouTubeService {
    * net args (proxy/cookies) so callers append just this one list.
    */
   private extractorArgs(client: string): string[] {
-    const args = ["--extractor-args", `youtube:player_client=${client}`];
+    // The default rung forces nothing, so yt-dlp chooses (see YTDLP_DEFAULT_CLIENTS).
+    const args =
+      client === YTDLP_DEFAULT_CLIENTS
+        ? []
+        : ["--extractor-args", `youtube:player_client=${client}`];
     // When a bgutil PO-token provider sidecar is configured, point the auto-discovered
     // bgutil HTTP plugin at it so yt-dlp can fetch a PO token for PO-token-gated clients
     // (web/mweb). The plugin itself performs the fetch; we only supply its base_url.
@@ -372,7 +397,7 @@ export class YouTubeService {
    * LAST error is rethrown so the caller surfaces a concrete reason — never a silent skip.
    */
   private async withClientFallback<T>(fn: (client: string) => Promise<T>): Promise<T> {
-    const ladder = buildClientLadder(this.cfg.playerClients);
+    const ladder = buildClientLadder(this.cfg.playerClients, this.cookiesFile() !== null);
     let lastErr: unknown;
     for (const client of ladder) {
       try {
@@ -385,6 +410,71 @@ export class YouTubeService {
     throw lastErr ?? new YtError(YtErrorKind.Unknown, "no player clients configured");
   }
 
+  /**
+   * One `yt-dlp -J` for one player_client rung. `warnings` keeps yt-dlp's WARNING lines on
+   * stderr; ordinary playback suppresses them, the session probe needs them (see probeSession).
+   */
+  private async resolveAttempt(
+    videoId: string,
+    client: string,
+    warnings: boolean,
+  ): Promise<{ meta: TrackMeta; stderr: string }> {
+    const url = `https://www.youtube.com/watch?v=${videoId}`;
+    const { stdout, stderr, code } = await this.run(
+      [
+        "-J",
+        "--no-playlist",
+        ...(warnings ? [] : ["--no-warnings"]),
+        "--no-progress",
+        ...this.extractorArgs(client),
+        "--",
+        url,
+      ],
+      this.cfg.ytdlpTimeoutMs,
+    );
+    if (code !== 0) throw classifyYtdlpError(stderr, code);
+    // yt-dlp exited 0 but may emit non-JSON stdout (empty/truncated/a stray warning).
+    // A raw SyntaxError is not a YtError, so isRetryableAcrossClients would treat it as
+    // retryable and burn the whole ladder before surfacing "Unexpected end of JSON input".
+    // Convert it to a typed YtError(Unknown) so the failure is classified and legible.
+    let raw: RawInfo;
+    try {
+      raw = JSON.parse(stdout) as RawInfo;
+    } catch {
+      throw new YtError(YtErrorKind.Unknown, "yt-dlp returned non-JSON output");
+    }
+    return { meta: toMeta(raw), stderr };
+  }
+
+  /**
+   * Test the SESSION, not just extraction: resolve `videoId` through the same client ladder
+   * playback uses, but with yt-dlp's warnings kept, and report whether YouTube rejected the
+   * cookie jar.
+   *
+   * An extraction succeeding does not mean the cookies work. When they have been rotated
+   * (YouTube does this to any session left open in a browser tab), yt-dlp warns "The provided
+   * YouTube account cookies are no longer valid", quietly treats the request as logged out,
+   * and — for a public video — succeeds anyway. Playback suppresses warnings, so the cookie
+   * console saw either a green light over a dead session or, when a later rung failed, an
+   * unclassifiable "unknown". Reproduced against yt-dlp 2026.08.19.
+   *
+   * Throws exactly as resolve() does when no rung can extract; a rejected jar that ALSO fails
+   * classifies as CookiesRejected, which names the cause instead of the last symptom.
+   */
+  async probeSession(videoId: string): Promise<{ cookiesRejected: boolean }> {
+    let rejected = false;
+    await this.withClientFallback(async (client) => {
+      try {
+        const { stderr } = await this.resolveAttempt(videoId, client, true);
+        if (COOKIES_REJECTED_RE.test(stderr)) rejected = true;
+      } catch (err) {
+        if (err instanceof YtError && err.kind === YtErrorKind.CookiesRejected) rejected = true;
+        throw err;
+      }
+    });
+    return { cookiesRejected: rejected };
+  }
+
   async resolve(videoId: string): Promise<TrackMeta> {
     if (!VIDEO_ID_RE.test(videoId)) {
       throw new YtError(
@@ -392,33 +482,9 @@ export class YouTubeService {
         `"${videoId}" is not a YouTube video id (likely a playlist, Mix, or channel result)`,
       );
     }
-    const url = `https://www.youtube.com/watch?v=${videoId}`;
-    const meta = await this.withClientFallback(async (client) => {
-      const { stdout, stderr, code } = await this.run(
-        [
-          "-J",
-          "--no-playlist",
-          "--no-warnings",
-          "--no-progress",
-          ...this.extractorArgs(client),
-          "--",
-          url,
-        ],
-        this.cfg.ytdlpTimeoutMs,
-      );
-      if (code !== 0) throw classifyYtdlpError(stderr, code);
-      // yt-dlp exited 0 but may emit non-JSON stdout (empty/truncated/a stray warning).
-      // A raw SyntaxError is not a YtError, so isRetryableAcrossClients would treat it as
-      // retryable and burn the whole ladder before surfacing "Unexpected end of JSON input".
-      // Convert it to a typed YtError(Unknown) so the failure is classified and legible.
-      let raw: RawInfo;
-      try {
-        raw = JSON.parse(stdout) as RawInfo;
-      } catch {
-        throw new YtError(YtErrorKind.Unknown, "yt-dlp returned non-JSON output");
-      }
-      return toMeta(raw);
-    });
+    const meta = await this.withClientFallback(
+      async (client) => (await this.resolveAttempt(videoId, client, false)).meta,
+    );
     if (meta.isLive) throw new YtError(YtErrorKind.Live, "live streams are not supported");
     // NOTE: the USER-FACING length limit is now the per-guild `maxTrackDurationSec`
     // setting, enforced authoritatively in the orchestrator's enqueue path. The global

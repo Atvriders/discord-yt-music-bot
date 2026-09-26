@@ -17,7 +17,6 @@ import {
 import type { YtDlpRun } from "../youtube/ytdlp.js";
 import { YtError, YtErrorKind } from "../youtube/errors.js";
 import { createLogger, setRootLogger } from "../util/logger.js";
-import type { TrackMeta } from "../types/index.js";
 
 /**
  * The cookie console's contract, and above all its ONE security invariant: a cookie VALUE never
@@ -31,15 +30,6 @@ const SECRET = "s3cr3t-SID-value-do-not-echo-9f2a1c";
 
 /** The other half of a real jar: the HttpOnly auth cookie a browser export marks with a prefix. */
 const SECRET2 = "s3cr3t-HSID-value-do-not-echo-4b7e0d";
-
-const meta: TrackMeta = {
-  videoId: PROBE_VIDEO_ID,
-  title: "Me at the zoo",
-  channel: "jawed",
-  durationSec: 19,
-  isLive: false,
-  thumbnailUrl: null,
-};
 
 beforeAll(() => {
   // writeJar and the import's promote step log their failures through the root logger; the failure
@@ -66,13 +56,15 @@ function okRun(over: Partial<YtDlpRun> = {}): YtDlpRun {
 async function make(over: Partial<CookieServiceDeps> = {}) {
   const cacheDir = await tmp();
   const jarPath = defaultJarPath(cacheDir);
-  const resolve = vi.fn(async (_id: string): Promise<TrackMeta> => meta);
+  // The console tests the SESSION via YouTubeService.probeSession. Kept under the name `resolve`
+  // for the many assertions that only care that the probe ran against PROBE_VIDEO_ID.
+  const resolve = vi.fn(async (_id: string) => ({ cookiesRejected: false }));
   const applyCookies = vi.fn<(path: string | null) => void>();
   const run = vi.fn(async (_args: string[], _timeoutMs: number): Promise<YtDlpRun> => okRun());
   const svc = new CookieService({
     cacheDir,
     jarPath,
-    youtube: { resolve },
+    youtube: { probeSession: resolve },
     browserProfile: null,
     applyCookies,
     run,
@@ -203,7 +195,7 @@ describe("CookieService.saveFromText", () => {
 
     const res = await svc.saveFromText(NETSCAPE_EXPORT);
 
-    expect(res).toEqual({ ok: true, reason: null });
+    expect(res).toEqual({ ok: true, reason: null, saved: true });
     // The export is kept as-is (both cookie lines survive, HttpOnly prefix included).
     const jar = await readFile(jarPath, "utf8");
     expect(countCookieLines(jar)).toBe(2);
@@ -221,7 +213,7 @@ describe("CookieService.saveFromText", () => {
 
     const res = await svc.saveFromText(HEADER_PASTE);
 
-    expect(res).toEqual({ ok: true, reason: null });
+    expect(res).toEqual({ ok: true, reason: null, saved: true });
     const jar = await readFile(jarPath, "utf8");
     expect(jar.startsWith("# Netscape HTTP Cookie File")).toBe(true);
     // Three name=value pairs became three tab-separated cookie lines.
@@ -237,7 +229,7 @@ describe("CookieService.saveFromText", () => {
     await writeFile(jarPath, "# stale\n");
     await chmod(jarPath, 0o644);
 
-    expect(await svc.saveFromText(HEADER_PASTE)).toEqual({ ok: true, reason: null });
+    expect(await svc.saveFromText(HEADER_PASTE)).toEqual({ ok: true, reason: null, saved: true });
 
     expect(await mode(jarPath)).toBe("600");
     expect(await readFile(jarPath, "utf8")).not.toContain("# stale");
@@ -301,14 +293,14 @@ describe("CookieService.saveFromText", () => {
   });
 
   it("returns the PROBE's verdict, so a saved-but-still-blocked jar never reads as working", async () => {
-    const resolve = vi.fn(async (): Promise<TrackMeta> => {
+    const resolve = vi.fn(async (): Promise<{ cookiesRejected: boolean }> => {
       throw new YtError(YtErrorKind.IpBlocked, "Sign in to confirm you're not a bot");
     });
-    const { svc, jarPath, applyCookies } = await make({ youtube: { resolve } });
+    const { svc, jarPath, applyCookies } = await make({ youtube: { probeSession: resolve } });
 
     const res = await svc.saveFromText(HEADER_PASTE);
 
-    expect(res).toEqual({ ok: false, reason: "sign-in / bot check" });
+    expect(res).toEqual({ ok: false, reason: "sign-in / bot check", saved: true });
     // The jar WAS written and applied — the operator's paste is not thrown away because
     // YouTube is still unhappy; only the verdict is negative.
     expect(await mode(jarPath)).toBe("600");
@@ -347,7 +339,7 @@ describe("CookieService.saveFromText", () => {
     // had installed a session.
     const res = await svc.saveFromText("Cookie: PREF=tz=Etc.UTC; SOCS=CAI; YSC=abc");
 
-    expect(res).toEqual({ ok: true, reason: null, warning: NO_AUTH_PASTE });
+    expect(res).toEqual({ ok: true, reason: null, warning: NO_AUTH_PASTE, saved: true });
     // Saved and applied, not rejected — the warning rides ALONGSIDE the success.
     expect(countCookieLines(await readFile(jarPath, "utf8"))).toBe(3);
     expect(applyCookies).toHaveBeenCalledWith(jarPath);
@@ -393,7 +385,7 @@ describe("CookieService.test", () => {
     for (const [err, reason] of cases) {
       const { svc } = await make({
         youtube: {
-          resolve: vi.fn(async (): Promise<TrackMeta> => {
+          probeSession: vi.fn(async (): Promise<{ cookiesRejected: boolean }> => {
             throw err;
           }),
         },
@@ -443,7 +435,7 @@ describe("CookieService.importFromBrowser", () => {
 
     const res = await svc.importFromBrowser();
 
-    expect(res).toEqual({ ok: true, reason: null });
+    expect(res).toEqual({ ok: true, reason: null, saved: true });
     expect(run).toHaveBeenCalledOnce();
     const [args, timeoutMs] = run.mock.calls[0] as unknown as [string[], number];
     // The pairing IS the feature: read the live profile, write the merged jar to OUR file.
@@ -601,12 +593,12 @@ describe("CookieService security: a cookie value never leaves the module", () =>
     // the response, into stderr — and classifyYtdlpError puts a 500-char slice of that in
     // err.message. Nothing may forward it.
     const profile = await profileWithDb();
-    const resolve = vi.fn(async (): Promise<TrackMeta> => {
+    const resolve = vi.fn(async (): Promise<{ cookiesRejected: boolean }> => {
       throw new YtError(YtErrorKind.Unknown, `yt-dlp failed (exit 1): cookie SID=${SECRET}`);
     });
     const { svc } = await make({
       browserProfile: profile,
-      youtube: { resolve },
+      youtube: { probeSession: resolve },
       run: vi.fn(async (): Promise<YtDlpRun> => okRun({ stderr: `SID=${SECRET}`, code: 1 })),
     });
 
@@ -807,7 +799,7 @@ describe("CookieService.importFromBrowser: an anonymous jar is not a session", (
       run,
     });
 
-    expect(await svc.importFromBrowser()).toEqual({ ok: true, reason: null });
+    expect(await svc.importFromBrowser()).toEqual({ ok: true, reason: null, saved: true });
 
     // Promoted whole, owner-only, staging cleaned up, hot-applied, then proven.
     expect(await readFile(jarPath, "utf8")).toBe(SIGNED_IN_JAR);
@@ -848,7 +840,7 @@ describe("CookieService.importFromBrowser: an anonymous jar is not a session", (
 
     // The import SUCCEEDED — an auth cookie did survive and is installed — and the operator still
     // hears that the sidecar is dropping cookies, because that is a keyring, not a fluke.
-    expect(res).toEqual({ ok: true, reason: null, warning: UNDECRYPTABLE });
+    expect(res).toEqual({ ok: true, reason: null, warning: UNDECRYPTABLE, saved: true });
     expect(JSON.stringify(res)).not.toContain(SECRET);
     expect(applyCookies).toHaveBeenCalledWith(jarPath);
   });
@@ -978,7 +970,7 @@ describe("the network-free export", () => {
       stdout: "Extracting cookies from chromium\nExtracted 5 cookies from chromium\n",
       stderr: NO_URL,
     });
-    expect(res).toEqual({ ok: true, reason: null });
+    expect(res).toEqual({ ok: true, reason: null, saved: true });
     expect(await readFile(jarPath, "utf8")).toBe(NETSCAPE_EXPORT);
   });
 
@@ -1079,5 +1071,57 @@ describe("health() says WHY the browser import is unavailable", () => {
     const { svc } = await make({ browserProfile: path });
     expect(svc.health().browserProfile).toEqual({ state: "ok", path });
     expect(svc.health().browserProfileAvailable).toBe(true);
+  });
+});
+
+// The live report: "imported from the browser profile · Updated just now", and beneath it
+// "Import failed — unknown". The import HAD worked; the test after it failed, the panel called
+// the whole thing failed, and the real reason (a rejected session) was hidden as "unknown".
+describe("a rejected session is named, and a saved jar is not called failed", () => {
+  it("reports a rejected session as such, even though extraction succeeded", async () => {
+    const { svc } = await make({
+      youtube: { probeSession: vi.fn(async () => ({ cookiesRejected: true })) },
+    });
+    const res = await svc.test();
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/no longer valid/);
+    // …and the fix, not just the fact: park the source browser off YouTube, then retry.
+    expect(res.reason).toMatch(/robots\.txt/);
+  });
+
+  it("maps a CookiesRejected failure to the same actionable reason", async () => {
+    const { svc } = await make({
+      youtube: {
+        probeSession: vi.fn(async (): Promise<{ cookiesRejected: boolean }> => {
+          throw new YtError(YtErrorKind.CookiesRejected, "x");
+        }),
+      },
+    });
+    expect((await svc.test()).reason).toMatch(/no longer valid/);
+  });
+
+  it("marks an import whose TEST failed as saved — the jar is in place", async () => {
+    const profile = await profileWithDb();
+    const cacheDir = await tmp();
+    const jarPath = defaultJarPath(cacheDir);
+    const run = vi.fn(async (args: string[]): Promise<YtDlpRun> => {
+      await writeFile(args[args.indexOf("--cookies") + 1]!, NETSCAPE_EXPORT);
+      return okRun();
+    });
+    const { svc } = await make({
+      cacheDir,
+      jarPath,
+      browserProfile: profile,
+      run,
+      youtube: { probeSession: vi.fn(async () => ({ cookiesRejected: true })) },
+    });
+    const res = await svc.importFromBrowser();
+    expect(res).toMatchObject({ ok: false, saved: true });
+    expect(await readFile(jarPath, "utf8")).toBe(NETSCAPE_EXPORT);
+  });
+
+  it("does NOT mark a refusal-before-saving as saved", async () => {
+    const { svc } = await make({ browserProfile: null });
+    expect((await svc.importFromBrowser()).saved).toBeUndefined();
   });
 });

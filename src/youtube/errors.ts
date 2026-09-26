@@ -17,6 +17,13 @@ export enum YtErrorKind {
    * ladder against an error no client swap can fix).
    */
   CookiesInvalid = "cookies_invalid",
+  /**
+   * The jar parsed, but YouTube says the SESSION in it is no longer valid — rotated, typically
+   * because a YouTube page stayed open in the browser it came from. yt-dlp reports it as a
+   * WARNING and carries on logged out, so it is only visible when warnings are kept (the cookie
+   * console's session probe keeps them; playback does not).
+   */
+  CookiesRejected = "cookies_rejected",
   Unknown = "unknown",
 }
 
@@ -40,6 +47,9 @@ const RULES: ReadonlyArray<[YtErrorKind, RegExp]> = [
     YtErrorKind.CookiesInvalid,
     /does not look like a netscape format cookies file|unable to load cookies|failed to (parse|load) cookies|could not load cookies|unable to open cookies file/i,
   ],
+  // Before every YouTube-side verdict: when the session was rejected, THAT is the cause, and the
+  // error yt-dlp finally gives up with ("The page needs to be reloaded", a bot check) is a symptom.
+  [YtErrorKind.CookiesRejected, /cookies are no longer valid/i],
   [YtErrorKind.IpBlocked, /not a bot|ip is likely being blocked/i],
   [
     YtErrorKind.PoTokenSabr,
@@ -78,7 +88,12 @@ export function classifyYtdlpError(stderr: string, code: number | null): YtError
  * because those frequently succeed on android_vr / web_embedded / tv / mweb when the
  * first-choice client is broken by a YouTube-side change.
  */
+/** yt-dlp's wording when YouTube rejects the session in a cookie jar. */
+export const COOKIES_REJECTED_RE = /cookies are no longer valid/i;
+
 const TERMINAL_KINDS: ReadonlySet<YtErrorKind> = new Set([
+  // Every rung sends the same jar, so no client swap revives a rejected session.
+  YtErrorKind.CookiesRejected,
   // A jar yt-dlp cannot parse fails identically on every client, so retrying the ladder only
   // multiplies the wait before the operator sees the one message that would help them.
   YtErrorKind.CookiesInvalid,

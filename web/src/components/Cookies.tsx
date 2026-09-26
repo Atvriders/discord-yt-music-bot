@@ -19,6 +19,8 @@ type OpResult = {
   ok: boolean;
   reason: string | null;
   warning: string | null;
+  /** The jar was written and applied — so a failure after it is the TEST failing, not the save. */
+  saved: boolean;
 };
 
 const SOURCE_LABEL: Record<CookieSource, string> = {
@@ -323,7 +325,7 @@ export function Cookies() {
       try {
         const r = await call();
         if (!aliveRef.current) return;
-        setResult({ op, ok: r.ok, reason: r.reason, warning: warningOf(r) });
+        setResult({ op, ok: r.ok, reason: r.reason, warning: warningOf(r), saved: r.saved === true });
         // Nothing left to keep: the jar lives on the server now, and a pasted session is
         // not something this UI should go on holding.
         if (r.ok && op === "save") setText("");
@@ -335,6 +337,7 @@ export function Cookies() {
           reason: requestMessage(e, "The request failed."),
           // A transport failure carries no server prose; only the server sets warnings.
           warning: null,
+          saved: false,
         });
       } finally {
         await refresh();
@@ -531,9 +534,15 @@ export function Cookies() {
                 : `${
                     result.op === "test"
                       ? "Test failed"
-                      : result.op === "save"
-                        ? "Not applied"
-                        : "Import failed"
+                      : // Saved-then-failed is a different outcome from refused-before-saving,
+                        // and calling it "failed" hid that the import had in fact worked.
+                        result.saved
+                        ? result.op === "save"
+                          ? "Saved and applied, but the test extraction failed"
+                          : "Imported and applied, but the test extraction failed"
+                        : result.op === "save"
+                          ? "Not applied"
+                          : "Import failed"
                   } — ${result.reason ?? "no reason given"}.`}
             </p>
           )}

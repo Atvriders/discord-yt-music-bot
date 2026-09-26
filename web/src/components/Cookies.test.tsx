@@ -295,3 +295,42 @@ describe("Cookies — the import section is never silently missing", () => {
     expect(await screen.findByRole("button", { name: /import from browser/i })).toBeTruthy();
   });
 });
+
+describe("Cookies — a saved jar whose test failed is not called failed", () => {
+  // Live report: the import worked ("imported from the browser profile · Updated just now") and
+  // the panel still said "Import failed". A failed TEST after a successful SAVE is its own outcome.
+  beforeEach(() => {
+    sessionStorage.setItem("ytbot.cookieAdmin", "console-password");
+  });
+
+  it("says the import worked and the test did not", async () => {
+    vi.spyOn(api, "cookies").mockResolvedValue(
+      health({ browserProfileAvailable: true, browserProfile: { state: "ok", path: "/p" } }),
+    );
+    vi.spyOn(api, "cookiesImport").mockResolvedValue({
+      ok: false,
+      reason: "YouTube says these cookies are no longer valid",
+      saved: true,
+    });
+    render(<Cookies />);
+    fireEvent.click(await screen.findByRole("button", { name: /cookie console/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /import from browser/i }));
+    const line = await screen.findByText(/Imported and applied, but the test extraction failed/);
+    expect(line.textContent).toMatch(/no longer valid/);
+    expect(screen.queryByText(/^Import failed/)).toBeNull();
+  });
+
+  it("still says Import failed when nothing was saved", async () => {
+    vi.spyOn(api, "cookies").mockResolvedValue(
+      health({ browserProfileAvailable: true, browserProfile: { state: "ok", path: "/p" } }),
+    );
+    vi.spyOn(api, "cookiesImport").mockResolvedValue({
+      ok: false,
+      reason: "that profile is not signed in to YouTube",
+    });
+    render(<Cookies />);
+    fireEvent.click(await screen.findByRole("button", { name: /cookie console/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /import from browser/i }));
+    expect(await screen.findByText(/Import failed — that profile is not signed in/)).toBeTruthy();
+  });
+});
