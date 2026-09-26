@@ -182,12 +182,16 @@ services:
       # fine and is missing exactly the auth cookies you signed in for. (The console warns when it
       # sees that happen.) The URL is the start page.
       CHROME_CLI: "--password-store=basic https://www.youtube.com/"
-    # LAN-ONLY. Never publish on 0.0.0.0 and never route this through your tunnel/reverse proxy:
-    # it is a logged-in Google session in a full browser behind one password. Substitute your
-    # host's LAN address (LAN_IP=198.51.100.10 docker compose --profile browser up -d); the
-    # default keeps it on loopback, reachable only over an SSH tunnel.
+    # NEVER on 0.0.0.0, a public address, or your tunnel/reverse proxy: it is a logged-in Google
+    # session in a full browser behind one password. By default it binds to the server's
+    # LOOPBACK, so it is not reachable from other computers — that is on purpose. To open it:
+    #   - VPS / remote server: leave LAN_IP unset and tunnel from your own computer:
+    #       ssh -L 8081:127.0.0.1:8081 you@your-server     → https://localhost:8081
+    #     (a VPS has no LAN — its address is PUBLIC, so never set LAN_IP to it)
+    #   - machine on your home network: bind to its PRIVATE address instead:
+    #       LAN_IP=198.51.100.10 docker compose --profile browser up -d
     # 3001 is the image's HTTPS listener (3000 is plain HTTP). The cert is self-signed, so you
-    # WILL get a certificate warning on https://<LAN_IP>:8081 — accept it. Over plain HTTP on a
+    # WILL get a certificate warning on first visit — accept it. Over plain HTTP on a
     # LAN IP the page is not a secure context, and WebCodecs — the desktop's video and audio —
     # is dead, which makes signing in to YouTube by hand miserable.
     ports: ["${LAN_IP:-127.0.0.1}:8081:3001"]

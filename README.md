@@ -215,21 +215,46 @@ page script can read them, so a `document.cookie` copy-paste from DevTools _cann
 (the console will save such a jar and warn you it has no sign-in cookie in it). The two ways to
 get them are a browser-extension `cookies.txt` export, or the sidecar:
 
-```bash
-# Bring up a LAN-only chromium, sign in to YouTube by hand (2FA works — a human is driving)
-LAN_IP=198.51.100.10 docker compose --profile browser up -d
-# → https://<LAN_IP>:8081  (self-signed cert; accept the warning)
+First start it on the server (it is NOT started by a plain `docker compose up -d`):
 
-# Wait ~30s after signing in — chromium commits cookies on a timer, closing the tab does not
-# flush them — or: docker compose stop chromium
-# Then press "Import from browser" in the cookie console, and take the browser down again:
+```bash
+docker compose --profile browser up -d
+```
+
+Then open it. How depends on where the server is — and getting this wrong is how you put a
+browser logged into your Google account on the public internet:
+
+- **A VPS, or any server you reach over the internet** — leave `LAN_IP` unset (the port stays
+  bound to the server's loopback) and tunnel to it from your own computer:
+
+  ```bash
+  ssh -L 8081:127.0.0.1:8081 you@your-server
+  ```
+
+  then open **https://localhost:8081** on your computer. Do **not** set `LAN_IP` here: a VPS has
+  no LAN, so its address is public.
+
+- **A machine on your home network** — bind it to that machine's private address (a `192.168…`
+  / `10…` style address), then open `https://<that address>:8081` from another machine at home:
+
+  ```bash
+  LAN_IP=198.51.100.10 docker compose --profile browser up -d
+  ```
+
+Either way the certificate is self-signed — accept the warning. Sign in to YouTube (2FA works;
+a human is driving), wait ~30s (chromium commits cookies on a timer; closing the tab does not
+flush them), press **Import from browser** in the cookie console, then stop it again:
+
+```bash
 docker compose --profile browser down
 ```
 
 Notes that will save you an evening:
 
-- **Never publish the sidecar on `0.0.0.0` or route it through your tunnel.** It is a logged-in
-  Google session in a full browser behind one password. The default binds it to loopback.
+- **Never publish the sidecar on `0.0.0.0`, on a public address, or through your tunnel.** It is a
+  logged-in Google session in a full browser behind one password. The default binds it to
+  loopback, and "port 8081 isn't reachable" from another computer is that default working — use
+  the SSH tunnel above.
 - **`PUID`/`PGID` must be `10001`** (the bot's app uid). Chromium's profile dir is mode `0700`,
   so a mismatched uid makes it unreadable and the import button stays off.
 - **HTTPS on 3001, not HTTP on 3000.** Over plain HTTP to a LAN IP the page is not a secure
